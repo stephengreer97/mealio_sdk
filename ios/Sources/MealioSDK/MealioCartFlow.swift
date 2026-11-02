@@ -546,7 +546,16 @@ public struct MealioCartList: View {
         let label = est.count > 0
             ? "Add \(est.count) item\(est.count == 1 ? "" : "s") to \(storeName)"
             : "Select items to add"
+        let pending = cart.pendingPreferences().count
         return VStack(spacing: 8) {
+            if pending > 0 {
+                Text("\(pending == 1 ? "1 checked item needs" : "\(pending) checked items need") an option chosen before adding.")
+                    .font(t.font(12))
+                    .foregroundColor(t.warnText)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.bottom, 6)
+            }
             HStack(alignment: .firstTextBaseline) {
                 Text(est.estimated ? "Estimated total" : "Total")
                     .font(t.font(14))
@@ -696,6 +705,17 @@ struct MealioItemRow: View {
             .padding(.vertical, 10)
             .padding(.trailing, 6)
 
+            if on, let picked = picked, cart.needsPreference(item.key) {
+                Text("Choose one: \(mealioListOr((picked.preferences ?? []).map(\.label)))")
+                    .font(t.font(13, .semibold))
+                    .foregroundColor(t.accent)
+                    .lineSpacing(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 8)
+            }
+
             if on, let picked = picked {
                 quantityRow(picked: picked)
             }
@@ -715,28 +735,36 @@ struct MealioItemRow: View {
         .overlay(cardShape.strokeBorder(isOpen ? t.muted : t.border, lineWidth: 1))
     }
 
+    /// Sold by weight: the stepper is pounds, stepping through the store's
+    /// weights (else 0.25 lb). Otherwise a count, clamped to the store cap.
     private func quantityRow(picked: Product) -> some View {
+        let byWeight = picked.soldByWeight == true
+        let range = cart.weightRange(for: item.key)
+        let lb = byWeight ? cart.weight(for: item.key) : 0
         let n = cart.quantity(for: item.key)
-        let atMin = n <= 1
-        let atMax = n >= cart.maxQuantity(for: item.key)
+        let atMin = byWeight ? lb <= range.lowerBound : n <= 1
+        let atMax = byWeight ? lb >= range.upperBound : n >= cart.maxQuantity(for: item.key)
+        let step: (Int) -> Void = { dir in
+            if byWeight {
+                _ = cart.stepWeight(key: item.key, by: dir)
+            } else {
+                _ = cart.setQuantity(key: item.key, to: n + dir)
+            }
+        }
         return HStack {
-            Text(picked.soldByWeight == true ? "Sold by weight" : "Quantity")
+            Text(byWeight ? "Weight" : "Quantity")
                 .font(t.font(12))
                 .foregroundColor(t.muted)
             Spacer(minLength: 8)
             HStack(spacing: 4) {
-                stepButton("\u{2212}", label: "Fewer \(item.ingredient)", off: atMin) {
-                    _ = cart.setQuantity(key: item.key, to: n - 1)
-                }
-                Text("\(n)")
+                stepButton("\u{2212}", label: "Less \(item.ingredient)", off: atMin) { step(-1) }
+                Text(byWeight ? mealioLbText(lb) : "\(n)")
                     .font(t.font(16, .bold))
                     .foregroundColor(t.text)
-                    .frame(minWidth: 28)
+                    .frame(minWidth: byWeight ? 64 : 28)
                     .multilineTextAlignment(.center)
-                    .accessibilityLabel("Quantity \(n)")
-                stepButton("+", label: "More \(item.ingredient)", off: atMax) {
-                    _ = cart.setQuantity(key: item.key, to: n + 1)
-                }
+                    .accessibilityLabel(byWeight ? "Weight \(mealioLbText(lb))" : "Quantity \(n)")
+                stepButton("+", label: "More \(item.ingredient)", off: atMax) { step(1) }
             }
         }
         .padding(.leading, 58)
@@ -749,9 +777,8 @@ struct MealioItemRow: View {
             Text(glyph)
                 .font(t.font(20, .semibold))
                 .foregroundColor(t.text)
-                .frame(width: 44, height: 36)
+                .frame(width: 44, height: 44)
                 .background(RoundedRectangle(cornerRadius: 10).fill(t.surface))
-                .frame(minHeight: 44)
                 .contentShape(Rectangle())
                 .opacity(off ? 0.4 : 1)
         }
@@ -768,7 +795,7 @@ struct MealioItemRow: View {
 
     private func meta(on: Bool, picked: Product?, options: [Product]) -> String {
         if let p = picked {
-            let parts: [String?] = [p.price, p.estimated ? "est." : nil, p.id == item.remembered?.id ? "Your usual" : nil]
+            let parts: [String?] = [mealioPriceText(p), p.id == item.remembered?.id ? "Your usual" : nil]
             return parts.compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " \u{00B7} ")
         }
         switch item.status {
@@ -870,7 +897,7 @@ struct MealioItemRow: View {
 
     private func optionCard(_ o: Product, selected sel: Bool) -> some View {
         let usual = o.id == item.remembered?.id
-        let price = o.outOfStock == true ? "Out of stock" : "\(o.price ?? "")\(o.estimated ? " est." : "")"
+        let price = o.outOfStock == true ? "Out of stock" : mealioPriceText(o)
         let shape = RoundedRectangle(cornerRadius: t.radius)
         return Button(action: { pick(o, preferenceId: nil) }) {
             VStack(alignment: .leading, spacing: 6) {
@@ -1075,7 +1102,8 @@ struct MealioDoneView: View {
                     }
 
                     ForEach(result.added, id: \.key) { a in
-                        row(name: a.name, value: cart.selected(for: a.key)?.price ?? "", muted: false)
+                        row(name: a.name + (a.weightLb.map { ", \(mealioLbText($0))" } ?? ""),
+                            value: cart.selected(for: a.key).map(mealioPriceText) ?? "", muted: false)
                     }
                     ForEach(result.skipped.filter { $0.reason == "deselected" }, id: \.key) { s in
                         row(name: cart.items.first { $0.key == s.key }?.ingredient ?? s.key, value: "Left out", muted: true)
@@ -1111,9 +1139,30 @@ struct MealioDoneView: View {
 /// A failed add's reason in plain words.
 func mealioReasonText(_ r: String) -> String {
     if r == "not_confirmed" { return "not confirmed in your cart" }
+    if r == "weight_not_supported" { return "sold by weight, which this store cannot take here" }
     if r.contains("stock") { return "out of stock" }
     if r.contains("timeout") || r.contains("no_answer") { return "the store did not answer" }
     return "the store refused it"
+}
+
+/// "0.75 lb", "1 lb": at most two decimals, no trailing zeros.
+func mealioLbText(_ lb: Double) -> String {
+    var s = String(format: "%.2f", lb)
+    while s.hasSuffix("0") { s.removeLast() }
+    if s.hasSuffix(".") { s.removeLast() }
+    return "\(s) lb"
+}
+
+/// The price as a row shows it. Sold by the pound: "$9.99/lb est.".
+func mealioPriceText(_ p: Product) -> String {
+    if p.soldByWeight == true, let perLb = p.pricePerLb { return "\(mealioMoney(perLb))/lb est." }
+    return "\(p.price ?? "")\(p.estimated ? " est." : "")".trimmingCharacters(in: .whitespaces)
+}
+
+/// "A, B or C".
+func mealioListOr(_ xs: [String]) -> String {
+    guard xs.count > 1, let last = xs.last else { return xs.first ?? "" }
+    return "\(xs.dropLast().joined(separator: ", ")) or \(last)"
 }
 
 // MARK: - Store picker

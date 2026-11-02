@@ -113,12 +113,12 @@ void main() {
 
       expect(find.text('Quantity'), findsOneWidget);
       expect(find.bySemanticsLabel('Quantity 1'), findsOneWidget);
-      final fewer = find.bySemanticsLabel('Fewer onion');
+      final fewer = find.bySemanticsLabel('Less onion');
       final more = find.bySemanticsLabel('More onion');
       expect(tester.getSize(fewer).width, greaterThanOrEqualTo(44));
       expect(tester.getSize(more).width, greaterThanOrEqualTo(44));
       expect(tester.getSemantics(fewer),
-          isSemantics(label: 'Fewer onion', isButton: true, isEnabled: false, hasTapAction: false));
+          isSemantics(label: 'Less onion', isButton: true, isEnabled: false, hasTapAction: false));
       expect(tester.getSemantics(more),
           isSemantics(label: 'More onion', isButton: true, isEnabled: true, hasTapAction: true));
 
@@ -146,19 +146,108 @@ void main() {
       expect(find.text('Quantity'), findsNothing);
     });
 
-    testWidgets('a sold-by-weight pick is labelled so', (WidgetTester tester) async {
+    testWidgets('a sold-by-weight pick steps in pounds and prices per lb', (WidgetTester tester) async {
       _phone(tester);
       final cart = _cart();
       final onion = (cart['items']! as List<Object?>).first! as Map<String, Object?>;
-      (onion['options']! as List<Object?>)[0] = <String, Object?>{
+      final byWeight = <String, Object?>{
         'id': 'o1',
         'name': 'Yellow Onion',
-        'unitPrice': 1.25,
+        'price': r'$4.00/lb',
+        'unitPrice': 4,
+        'estimated': true,
         'soldByWeight': true,
+        'pricePerLb': 4,
+        'weightOptions': <Object?>[0.5, 0.75, 1],
       };
-      await tester.pumpWidget(MaterialApp(home: Scaffold(body: MealioCartList(session: _session(cart: cart)))));
-      expect(find.text('Sold by weight'), findsOneWidget);
+      (onion['options']! as List<Object?>)[0] = byWeight;
+      onion['remembered'] = byWeight;
+      onion['weightLb'] = 0.75;
+      final s = _session(cart: cart);
+      await tester.pumpWidget(MaterialApp(home: Scaffold(body: MealioCartList(session: s, onAdd: () {}))));
+
+      expect(find.text('Weight'), findsOneWidget);
       expect(find.text('Quantity'), findsNothing);
+      expect(find.text('0.75 lb'), findsOneWidget);
+      expect(find.bySemanticsLabel('Weight 0.75 lb'), findsOneWidget);
+      expect(find.text(r'$4.00/lb est. · Your usual'), findsOneWidget);
+      expect(find.text('Estimated total'), findsOneWidget);
+      expect(find.text(r'about $3.00'), findsOneWidget);
+
+      final less = find.bySemanticsLabel('Less onion');
+      final more = find.bySemanticsLabel('More onion');
+      expect(tester.getSize(less), const Size(44, 44));
+      expect(tester.getSize(more), const Size(44, 44));
+
+      await tester.tap(more);
+      await tester.pump();
+      expect(s.weight('onion'), 1);
+      expect(find.text('1 lb'), findsOneWidget);
+      expect(find.text(r'about $4.00'), findsOneWidget);
+      // The heaviest weight the store sells: More is disabled.
+      expect(tester.getSemantics(more),
+          isSemantics(label: 'More onion', isButton: true, isEnabled: false, hasTapAction: false));
+      expect(s.selections().first.toJson(), <String, Object?>{
+        'key': 'onion',
+        'productId': 'o1',
+        'quantity': 1,
+        'weightLb': 1.0,
+        'remember': true,
+      });
+
+      await tester.tap(less);
+      await tester.pump();
+      await tester.tap(less);
+      await tester.pump();
+      expect(find.text('0.5 lb'), findsOneWidget);
+      expect(tester.getSemantics(less),
+          isSemantics(label: 'Less onion', isButton: true, isEnabled: false, hasTapAction: false));
+      expect(tester.getSemantics(more),
+          isSemantics(label: 'More onion', isButton: true, isEnabled: true, hasTapAction: true));
+    });
+
+    testWidgets('an item whose product has preferences says "Choose one" and is held out until one is picked',
+        (WidgetTester tester) async {
+      _phone(tester);
+      final cart = _cart();
+      final garlic = (cart['items']! as List<Object?>)[1]! as Map<String, Object?>;
+      garlic['options'] = <Object?>[
+        <String, Object?>{
+          'id': 'g1',
+          'name': 'Garlic Bulb',
+          'price': r'$0.50',
+          'unitPrice': 0.5,
+          'preferences': <Object?>[
+            <String, Object?>{'id': 'whole', 'label': 'Whole'},
+            <String, Object?>{'id': 'peeled', 'label': 'Peeled'},
+            <String, Object?>{'id': 'none', 'label': 'No preference'},
+          ],
+        },
+      ];
+      final s = _session(cart: cart);
+      await tester.pumpWidget(MaterialApp(home: Scaffold(body: MealioCartList(session: s, onAdd: () {}))));
+      expect(find.textContaining('Choose one'), findsNothing);
+      expect(find.textContaining('needs an option chosen'), findsNothing);
+
+      await tester.tap(find.text('Garlic Bulb'));
+      await tester.pump();
+      expect(s.isSelected('garlic'), isTrue);
+      expect(find.text('Choose one: Whole, Peeled or No preference'), findsOneWidget);
+      final line = tester.widget<Text>(find.text('Choose one: Whole, Peeled or No preference'));
+      expect(line.style!.color, MealioTheme.of(tester.element(find.byType(MealioCartList))).accent);
+      expect(find.text('1 checked item needs an option chosen before adding.'), findsOneWidget);
+      // Held out of the count, the total and the add.
+      expect(find.text('Add 1 item to H-E-B'), findsOneWidget);
+      expect(find.text(r'$1.25'), findsWidgets);
+      expect(s.selections()[1].productId, isNull);
+
+      await tester.tap(find.bySemanticsLabel('Peeled'));
+      await tester.pump();
+      expect(find.textContaining('Choose one'), findsNothing);
+      expect(find.textContaining('needs an option chosen'), findsNothing);
+      expect(find.text('Add 2 items to H-E-B'), findsOneWidget);
+      expect(find.text(r'$1.75'), findsOneWidget);
+      expect(s.selections()[1].preferenceId, 'peeled');
     });
 
     testWidgets('shows the count and CTA, and unchecking changes them', (WidgetTester tester) async {
@@ -235,7 +324,13 @@ void main() {
                 'cartId': 'c1',
                 'store': 'kroger',
                 'added': <Object?>[
-                  <String, Object?>{'key': 'onion', 'productId': 'o1', 'name': 'Yellow Onion', 'quantity': 1},
+                  <String, Object?>{
+                    'key': 'onion',
+                    'productId': 'o1',
+                    'name': 'Yellow Onion',
+                    'quantity': 1,
+                    'weightLb': 1.25,
+                  },
                 ],
                 'skipped': <Object?>[
                   <String, Object?>{'key': 'garlic', 'reason': 'deselected'},
@@ -304,6 +399,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('All set'), findsOneWidget);
       expect(find.text('Added 1 item to Kroger'), findsOneWidget);
+      expect(find.text('Yellow Onion, 1.25 lb'), findsOneWidget);
       expect(find.textContaining('Ground Beef (not confirmed in your cart)'), findsOneWidget);
       expect(find.text('Left out'), findsOneWidget);
       expect(find.textContaining('Check out on'), findsNothing);

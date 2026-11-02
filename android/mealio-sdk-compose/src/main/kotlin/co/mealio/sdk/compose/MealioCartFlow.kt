@@ -69,7 +69,9 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.TextStyle
@@ -527,6 +529,14 @@ fun MealioCartList(
             Modifier.fillMaxWidth().background(t.background).padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            val pending = cart.pendingPreferences().size
+            if (pending > 0) {
+                Text(
+                    (if (pending == 1) "1 checked item needs" else "$pending checked items need") + " an option chosen before adding.",
+                    style = t.ts(12, color = t.warnText, lineHeight = 17),
+                    modifier = Modifier.padding(bottom = 6.dp),
+                )
+            }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Bottom) {
                 Text(if (est.estimated) "Estimated total" else "Total", style = t.ts(14, color = t.muted))
                 Text((if (est.estimated) "about " else "") + money(est.total), style = t.ts(18, FontWeight.Bold))
@@ -572,8 +582,7 @@ private fun StepButton(t: MealioTheme, symbol: String, label: String, enabled: B
     val shape = RoundedCornerShape(10.dp)
     Box(
         Modifier
-            .widthIn(min = 44.dp)
-            .height(36.dp)
+            .size(44.dp)
             .alpha(if (dim) 0.4f else 1f)
             .clip(shape)
             .background(t.surface)
@@ -673,8 +682,7 @@ private fun ItemRow(
 
     val meta = when {
         picked != null -> listOfNotNull(
-            picked.price?.takeIf { it.isNotEmpty() },
-            if (picked.estimated) "est." else null,
+            priceText(picked).takeIf { it.isNotEmpty() },
             if (picked.id == item.remembered?.id) "Your usual" else null,
         ).joinToString(" · ")
         item.status == ItemStatus.REMEMBERED -> "Not adding this time"
@@ -744,30 +752,44 @@ private fun ItemRow(
             }
         }
 
+        if (on && picked != null && cart.needsPreference(item.key)) {
+            Text(
+                "Choose one: " + listOr(picked.preferences.map { it.label }),
+                style = t.ts(13, FontWeight.SemiBold, t.accent, lineHeight = 18),
+                modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 8.dp).semantics { liveRegion = LiveRegionMode.Polite },
+            )
+        }
+
         if (on && picked != null) {
-            val q = cart.quantity(item.key)
-            val max = cart.maxQuantity(item.key)
+            // Sold by weight: the stepper is pounds, stepping through the store's
+            // weights (else 0.25 lb). Otherwise a count, clamped to the store cap.
+            val byWeight = picked.soldByWeight == true
+            val range = if (byWeight) cart.weightRange(item.key) else null
+            val lb = if (byWeight) cart.weight(item.key) else 0.0
+            val n = cart.quantity(item.key)
+            val atMin = if (range != null) lb <= range.min else n <= 1
+            val atMax = if (range != null) lb >= range.max else n >= cart.maxQuantity(item.key)
+            fun step(dir: Int) {
+                if (byWeight) cart.stepWeight(item.key, dir) else cart.setQuantity(item.key, n + dir)
+                onChange()
+            }
             Row(
                 Modifier.fillMaxWidth().padding(start = 58.dp, end = 12.dp, bottom = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                Text(if (picked.soldByWeight == true) "Sold by weight" else "Quantity", style = t.ts(12, color = t.muted, lineHeight = 17))
+                Text(if (byWeight) "Weight" else "Quantity", style = t.ts(12, color = t.muted, lineHeight = 17))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    StepButton(t, "−", "Fewer ${item.ingredient}", enabled = !disabled && q > 1, dim = q <= 1) {
-                        cart.setQuantity(item.key, cart.quantity(item.key) - 1)
-                        onChange()
-                    }
+                    StepButton(t, "−", "Less ${item.ingredient}", enabled = !disabled && !atMin, dim = atMin) { step(-1) }
+                    val value = if (byWeight) lbText(lb) else "$n"
+                    val valueLabel = if (byWeight) "Weight ${lbText(lb)}" else "Quantity $n"
                     Text(
-                        "$q",
+                        value,
                         style = t.ts(16, FontWeight.Bold),
                         textAlign = TextAlign.Center,
-                        modifier = Modifier.widthIn(min = 28.dp).semantics { contentDescription = "Quantity $q" },
+                        modifier = Modifier.widthIn(min = if (byWeight) 64.dp else 28.dp).semantics { contentDescription = valueLabel },
                     )
-                    StepButton(t, "+", "More ${item.ingredient}", enabled = !disabled && q < max, dim = q >= max) {
-                        cart.setQuantity(item.key, cart.quantity(item.key) + 1)
-                        onChange()
-                    }
+                    StepButton(t, "+", "More ${item.ingredient}", enabled = !disabled && !atMax, dim = atMax) { step(1) }
                 }
             }
         }
@@ -807,7 +829,7 @@ private fun ItemRow(
                                 overflow = TextOverflow.Ellipsis,
                             )
                             Text(
-                                if (o.outOfStock) "Out of stock" else (o.price ?: "") + (if (o.estimated) " est." else ""),
+                                if (o.outOfStock) "Out of stock" else priceText(o),
                                 style = t.ts(13, FontWeight.SemiBold),
                             )
                             if (usual) Text("Your usual", style = t.ts(11, FontWeight.Bold, t.accent))
@@ -817,7 +839,7 @@ private fun ItemRow(
                 }
                 val prefs = picked?.preferences ?: emptyList()
                 if (picked != null && prefs.isNotEmpty()) {
-                    val selPref = cart.selectedPreferenceId(item.key)
+                    val selPref = cart.preferenceId(item.key)
                     FlowRow(
                         Modifier.padding(horizontal = 12.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -909,7 +931,7 @@ private fun Thumb(t: MealioTheme, product: Product?, dim: Boolean = false, big: 
 
 @Composable
 private fun ColumnScope.Done(t: MealioTheme, cart: CartSession, result: AddResult, storeName: String, onDone: () -> Unit) {
-    fun price(key: String) = cart.selected(key)?.price ?: ""
+    fun price(key: String) = cart.selected(key)?.let { priceText(it) } ?: ""
     Column(
         Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -936,7 +958,7 @@ private fun ColumnScope.Done(t: MealioTheme, cart: CartSession, result: AddResul
         val rule = hairline()
         for (a in result.added) {
             DoneRow(t, rule) {
-                Text(a.name, style = t.ts(14), maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                Text(a.name + (a.weightLb?.let { ", ${lbText(it)}" } ?: ""), style = t.ts(14), maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                 Text(price(a.key), style = t.ts(14, FontWeight.Bold))
             }
         }
@@ -961,8 +983,26 @@ private fun DoneRow(t: MealioTheme, rule: Dp, content: @Composable androidx.comp
     }
 }
 
+/** "0.75 lb", "1 lb". */
+internal fun lbText(lb: Double): String =
+    java.math.BigDecimal(String.format(java.util.Locale.US, "%.2f", lb)).stripTrailingZeros().toPlainString() + " lb"
+
+/** "A, B or C". */
+internal fun listOr(xs: List<String>): String {
+    if (xs.size <= 1) return xs.firstOrNull() ?: ""
+    return xs.dropLast(1).joinToString(", ") + " or " + xs.last()
+}
+
+/** The price as a row shows it. Sold by the pound: "$9.99/lb est.". */
+internal fun priceText(p: Product): String {
+    val perLb = p.pricePerLb
+    if (p.soldByWeight == true && perLb != null) return "${money(perLb)}/lb est."
+    return ((p.price ?: "") + (if (p.estimated) " est." else "")).trim()
+}
+
 internal fun reasonText(r: String): String = when {
     r == "not_confirmed" -> "not confirmed in your cart"
+    r == "weight_not_supported" -> "sold by weight, which this store cannot take here"
     Regex("stock").containsMatchIn(r) -> "out of stock"
     Regex("timeout|no_answer").containsMatchIn(r) -> "the store did not answer"
     else -> "the store refused it"

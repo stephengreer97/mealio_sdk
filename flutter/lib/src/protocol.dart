@@ -36,6 +36,7 @@ String _str(Object? v, [String fallback = '']) => v is String ? v : fallback;
 String? _strOrNull(Object? v) => v is String ? v : null;
 int _int(Object? v, int fallback) => v is num ? v.toInt() : fallback;
 int? _intOrNull(Object? v) => v is num ? v.toInt() : null;
+double? _doubleOrNull(Object? v) => v is num ? v.toDouble() : null;
 bool _bool(Object? v, [bool fallback = false]) => v is bool ? v : fallback;
 
 Map<String, Object?>? _mapOrNull(Object? v) {
@@ -521,6 +522,7 @@ class Product {
     this.maxQuantity,
     this.soldByWeight,
     this.weightOptions,
+    this.pricePerLb,
   });
 
   factory Product.fromJson(Object? json) {
@@ -541,6 +543,7 @@ class Product {
       weightOptions: m['weightOptions'] is List
           ? _list(m['weightOptions']).whereType<num>().map((num n) => n.toDouble()).toList()
           : null,
+      pricePerLb: _doubleOrNull(m['pricePerLb']),
     );
   }
 
@@ -573,8 +576,13 @@ class Product {
   /// Sold by weight (deli, fish counter).
   final bool? soldByWeight;
 
-  /// Weights offered for a sold-by-weight item, in lb.
+  /// Weights offered for a sold-by-weight item, in lb, ascending. Null when
+  /// the store lists none.
   final List<double>? weightOptions;
+
+  /// Price per lb for a sold-by-weight item priced by the pound. Null for a
+  /// weight item priced as a package, and on count items.
+  final double? pricePerLb;
 
   Map<String, Object?> toJson() {
     final out = <String, Object?>{'id': id, 'name': name};
@@ -589,6 +597,7 @@ class Product {
     _put(out, 'maxQuantity', maxQuantity);
     _put(out, 'soldByWeight', soldByWeight);
     _put(out, 'weightOptions', weightOptions);
+    _put(out, 'pricePerLb', pricePerLb);
     return out;
   }
 }
@@ -625,6 +634,7 @@ class CartItem {
     required this.key,
     required this.ingredient,
     required this.quantity,
+    this.weightLb,
     this.status = ItemStatus.choose,
     this.options = const <Product>[],
     this.selectedId,
@@ -661,6 +671,7 @@ class CartItem {
       key: _str(m['key']),
       ingredient: _str(m['ingredient']),
       quantity: _int(m['quantity'], 1),
+      weightLb: _doubleOrNull(m['weightLb']),
       status: status,
       options: options,
       selectedId: selectedId,
@@ -674,6 +685,10 @@ class CartItem {
   final String key;
   final String ingredient;
   final int quantity;
+
+  /// The recipe's own weight for this line, in lb, when it gave one in a
+  /// weight unit. Null otherwise.
+  final double? weightLb;
 
   final ItemStatus status;
 
@@ -705,6 +720,7 @@ class CartItem {
       'selectedId': selectedId,
       'remembered': remembered?.toJson(),
     };
+    _put(out, 'weightLb', weightLb);
     _put(out, 'rememberedPreferenceId', rememberedPreferenceId);
     _put(out, 'reason', reason);
     // ignore: deprecated_member_use_from_same_package
@@ -804,7 +820,7 @@ class SearchResult {
 }
 
 class AddedItem {
-  const AddedItem({required this.key, required this.productId, required this.name, required this.quantity});
+  const AddedItem({required this.key, required this.productId, required this.name, required this.quantity, this.weightLb});
   factory AddedItem.fromJson(Object? json) {
     final m = _mapOrNull(json) ?? const <String, Object?>{};
     return AddedItem(
@@ -812,14 +828,21 @@ class AddedItem {
       productId: _str(m['productId']),
       name: _str(m['name']),
       quantity: _int(m['quantity'], 1),
+      weightLb: _doubleOrNull(m['weightLb']),
     );
   }
   final String key;
   final String productId;
   final String name;
   final int quantity;
-  Map<String, Object?> toJson() =>
-      <String, Object?>{'key': key, 'productId': productId, 'name': name, 'quantity': quantity};
+
+  /// Set on an item added by weight: the pounds asked for.
+  final double? weightLb;
+  Map<String, Object?> toJson() {
+    final out = <String, Object?>{'key': key, 'productId': productId, 'name': name, 'quantity': quantity};
+    _put(out, 'weightLb', weightLb);
+    return out;
+  }
 }
 
 class SkippedItem {
@@ -924,7 +947,14 @@ class StoreInfo {
 
 /// The user's decision for one item, sent to `/carts/{cart}/add`.
 class Selection {
-  const Selection({required this.key, required this.productId, this.quantity, this.remember, this.preferenceId});
+  const Selection({
+    required this.key,
+    required this.productId,
+    this.quantity,
+    this.weightLb,
+    this.remember,
+    this.preferenceId,
+  });
 
   factory Selection.fromJson(Object? json) {
     final m = _mapOrNull(json) ?? const <String, Object?>{};
@@ -932,6 +962,7 @@ class Selection {
       key: _str(m['key']),
       productId: _strOrNull(m['productId']),
       quantity: _intOrNull(m['quantity']),
+      weightLb: _doubleOrNull(m['weightLb']),
       remember: m['remember'] is bool ? m['remember']! as bool : null,
       preferenceId: _strOrNull(m['preferenceId']),
     );
@@ -944,6 +975,12 @@ class Selection {
   final String? productId;
   final int? quantity;
 
+  /// Pounds, for a Product with `soldByWeight`. Above 0 and at most 20. The
+  /// store writes it by weight where it can (H-E-B, Albertsons family);
+  /// elsewhere the item fails as `weight_not_supported`. Ignored for count
+  /// items.
+  final double? weightLb;
+
   /// Save this product as the remembered choice. Default true.
   final bool? remember;
 
@@ -953,6 +990,7 @@ class Selection {
   Map<String, Object?> toJson() {
     final out = <String, Object?>{'key': key, 'productId': productId};
     _put(out, 'quantity', quantity);
+    _put(out, 'weightLb', weightLb);
     _put(out, 'remember', remember);
     _put(out, 'preferenceId', preferenceId);
     return out;

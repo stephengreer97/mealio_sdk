@@ -218,13 +218,21 @@ session.isSelected(key); session.selectedId(for: key); session.selected(for: key
 try session.select(key: key, productId: id, preferenceId: "sliced")
 session.deselect(key: key)                       // leave out of THIS run; the usual stays saved
 try await session.search(key: key, query: "minced garlic jar")   // adds to options(for:)
+session.setQuantity(key: key, to: 2)             // count items, clamped to 1 and the store cap
+session.isWeight(key)                            // soldByWeight: use weight, not quantity
+session.weight(for: key); session.weightRange(for: key)
+session.setWeight(key: key, to: 1.25); session.stepWeight(key: key, by: 1)   // snapped to the store's weights
+session.needsPreference(key); session.pendingPreferences()  // ticked, but no preference chosen yet
 let est = session.estimate()                     // total, count, estimated ("about"), unpriced
 let result = try await session.addToCart(onStep: { step, _ in })
 ```
 
 `selections()` sends one entry for every item: selected ones with
 `remember: true` (and the preference), the rest with `productId: nil,
-remember: false`, which leaves them out without forgetting the usual pick.
+remember: false`, which leaves them out without forgetting the usual pick. A
+sold-by-weight item sends `quantity: 1` and `weightLb`, and is estimated as
+`pricePerLb` times the weight. An item whose product has `preferences` and none
+chosen is held out of `selections()` and `estimate()` until one is.
 `select` throws `unknown_item` / `unknown_product` if the key or product was not
 part of the cart.
 

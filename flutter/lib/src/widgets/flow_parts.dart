@@ -429,8 +429,29 @@ class LoadingView extends StatelessWidget {
   }
 }
 
+/// "0.75 lb", "1 lb".
+String lbText(double lb) {
+  var n = lb.toStringAsFixed(2);
+  if (n.contains('.')) n = n.replaceFirst(RegExp(r'0+$'), '').replaceFirst(RegExp(r'\.$'), '');
+  return '$n lb';
+}
+
+/// "A, B or C".
+String listOr(List<String> xs) {
+  if (xs.length <= 1) return xs.isEmpty ? '' : xs.first;
+  return '${xs.sublist(0, xs.length - 1).join(', ')} or ${xs.last}';
+}
+
+/// The price as a row shows it. Sold by the pound: "\$9.99/lb est.".
+String priceText(Product p) {
+  final perLb = p.pricePerLb;
+  if ((p.soldByWeight ?? false) && perLb != null) return '${mealioMoney(perLb)}/lb est.';
+  return '${p.price ?? ''}${p.estimated ? ' est.' : ''}'.trim();
+}
+
 String reasonText(String r) {
   if (r == 'not_confirmed') return 'not confirmed in your cart';
+  if (r == 'weight_not_supported') return 'sold by weight, which this store cannot take here';
   if (RegExp('stock').hasMatch(r)) return 'out of stock';
   if (RegExp('timeout|no_answer').hasMatch(r)) return 'the store did not answer';
   return 'the store refused it';
@@ -461,7 +482,11 @@ class DoneView extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = theme;
     final r = result;
-    String price(String key) => session.selected(key)?.price ?? '';
+    String price(String key) {
+      final p = session.selected(key);
+      return p == null ? '' : priceText(p);
+    }
+
     String ingredient(String key) {
       for (final CartItem i in session.items) {
         if (i.key == key) return i.ingredient;
@@ -526,7 +551,8 @@ class DoneView extends StatelessWidget {
                   children: <Widget>[
                     for (final AddedItem a in r.added)
                       row(
-                        Text(a.name, maxLines: 2, overflow: TextOverflow.ellipsis, style: t.style(size: 14)),
+                        Text('${a.name}${a.weightLb != null ? ', ${lbText(a.weightLb!)}' : ''}',
+                            maxLines: 2, overflow: TextOverflow.ellipsis, style: t.style(size: 14)),
                         Text(price(a.key), style: t.style(weight: FontWeight.w700)),
                       ),
                     for (final SkippedItem x in r.skipped.where((SkippedItem x) => x.reason == 'deselected'))

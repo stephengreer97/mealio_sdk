@@ -313,8 +313,13 @@ data class Product(
     val maxQuantity: Int? = null,
     /** Sold by weight (deli, fish counter). */
     val soldByWeight: Boolean? = null,
-    /** Weights offered for a sold-by-weight item, in lb. */
+    /** Weights offered for a sold-by-weight item, in lb, ascending. Null when the store lists none. */
     val weightOptions: List<Double>? = null,
+    /**
+     * Price per lb for a sold-by-weight item priced by the pound. Null for a
+     * weight item priced as a package, and on count items.
+     */
+    val pricePerLb: Double? = null,
 ) {
     companion object {
         fun fromJson(o: JSONObject): Product = Product(
@@ -334,6 +339,7 @@ data class Product(
             weightOptions = o.arr("weightOptions")?.let { a ->
                 (0 until a.length()).mapNotNull { i -> (a.opt(i) as? Number)?.toDouble()?.takeIf { it.isFinite() } }
             },
+            pricePerLb = o.num("pricePerLb")?.takeIf { it.isFinite() },
         )
     }
 }
@@ -370,6 +376,8 @@ data class CartItem(
     /** The user's remembered product, whatever its stock. */
     val remembered: Product? = null,
     val rememberedPreferenceId: String? = null,
+    /** The recipe's own weight for this line, in lb, when it gave one in a weight unit. */
+    val weightLb: Double? = null,
 ) {
     companion object {
         fun fromJson(o: JSONObject): CartItem = fromJson(o, null)
@@ -401,6 +409,7 @@ data class CartItem(
                 selectedId = selectedId,
                 remembered = remembered,
                 rememberedPreferenceId = o.str("rememberedPreferenceId"),
+                weightLb = o.num("weightLb")?.takeIf { it.isFinite() },
             )
         }
     }
@@ -463,7 +472,14 @@ data class SearchResult(val key: String, val query: String, val options: List<Pr
     }
 }
 
-data class AddedItem(val key: String, val productId: String, val name: String, val quantity: Int)
+data class AddedItem(
+    val key: String,
+    val productId: String,
+    val name: String,
+    val quantity: Int,
+    /** Set on an item added by weight: the pounds asked for. */
+    val weightLb: Double? = null,
+)
 data class SkippedItem(val key: String, val reason: String)
 data class FailedItem(val key: String, val productId: String, val name: String, val reason: String)
 
@@ -487,7 +503,10 @@ data class AddResult(
             cartId = o.str("cartId") ?: "",
             store = o.str("store") ?: "",
             added = o.arr("added")?.objects()?.map {
-                AddedItem(it.str("key") ?: "", it.str("productId") ?: "", it.str("name") ?: "", it.num("quantity")?.toInt() ?: 1)
+                AddedItem(
+                    it.str("key") ?: "", it.str("productId") ?: "", it.str("name") ?: "", it.num("quantity")?.toInt() ?: 1,
+                    it.num("weightLb")?.takeIf { w -> w.isFinite() },
+                )
             } ?: emptyList(),
             skipped = o.arr("skipped")?.objects()?.map { SkippedItem(it.str("key") ?: "", it.str("reason") ?: "") }
                 ?: emptyList(),
@@ -512,11 +531,18 @@ data class Selection(
     val remember: Boolean? = null,
     /** Required when the chosen Product has `preferences`. */
     val preferenceId: String? = null,
+    /**
+     * Pounds, for a Product with soldByWeight. Above 0 and at most 20. The
+     * store writes it by weight where it can (H-E-B, Albertsons family);
+     * elsewhere the item fails as weight_not_supported. Ignored for count items.
+     */
+    val weightLb: Double? = null,
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("key", key)
         .putNullable("productId", productId)
         .putIfNotNull("quantity", quantity)
+        .putIfNotNull("weightLb", weightLb)
         .putIfNotNull("remember", remember)
         .putIfNotNull("preferenceId", preferenceId)
 }

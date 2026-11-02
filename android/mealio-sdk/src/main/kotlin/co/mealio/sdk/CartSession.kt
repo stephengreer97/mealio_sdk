@@ -1,10 +1,29 @@
 package co.mealio.sdk
 
+import kotlin.math.abs
 import kotlin.math.roundToLong
+
+/** The weight step (lb) for a sold-by-weight item whose store lists no weights. */
+const val WEIGHT_STEP: Double = 0.25
+
+/** The most a selection may ask for, in lb. The server refuses more. */
+const val MAX_WEIGHT_LB: Double = 20.0
+
+/** The lightest and heaviest weight (lb) the user can pick for an item. */
+data class WeightRange(val min: Double, val max: Double)
+
+private fun nearestIndex(opts: List<Double>, v: Double): Int {
+    var best = 0
+    opts.forEachIndexed { i, o -> if (abs(o - v) < abs(opts[best] - v) - 1e-9) best = i }
+    return best
+}
 
 /** The selected items' total, for "Estimated total about $12.40". */
 data class Estimate(
-    /** Unit price times quantity over the selected items that have a unit price, to the cent. */
+    /**
+     * Unit price times quantity over the selected items that have a unit price,
+     * and price per lb times the weight for a sold-by-weight item, to the cent.
+     */
     val total: Double,
     /** Selected items. */
     val count: Int,
@@ -31,6 +50,7 @@ class CartSession internal constructor(
     private val picks = LinkedHashMap<String, Pick>()
     private val extra = HashMap<String, List<Product>>()
     private val qty = HashMap<String, Int>()
+    private val lb = HashMap<String, Double>()
 
     init {
         for (it in items) {
@@ -83,8 +103,96 @@ class CartSession internal constructor(
         return v
     }
 
+    /** True when the selected product is sold by weight: use weight(), not quantity(). */
+    @Synchronized
+    fun isWeight(key: String): Boolean = selected(key)?.soldByWeight == true
+
+    /**
+     * The lightest and heaviest weight (lb) the user can pick for the selected
+     * product: its first and last weightOption, else 0.25 to 20.
+     */
+    @Synchronized
+    fun weightRange(key: String): WeightRange {
+        val opts = weightOptions(key)
+        if (opts.isEmpty()) return WeightRange(WEIGHT_STEP, MAX_WEIGHT_LB)
+        return WeightRange(opts.first(), minOf(MAX_WEIGHT_LB, opts.last()))
+    }
+
+    /**
+     * Pounds to add for a sold-by-weight item: the user's, else the recipe's own
+     * weight, else the store's first weight option, else 0.25. Always a weight
+     * the selected product can be bought in (see setWeight). 0 for count items.
+     */
+    @Synchronized
+    fun weight(key: String): Double {
+        if (!isWeight(key)) return 0.0
+        lb[key]?.let { return snapWeight(key, it) }
+        val recipe = find(key)?.weightLb
+        if (recipe != null && recipe > 0) return snapWeight(key, recipe)
+        return weightOptions(key).firstOrNull() ?: WEIGHT_STEP
+    }
+
+    /**
+     * Set the weight in lb. Snapped to the nearest weightOption when the store
+     * lists them, else to 0.25 lb steps, and clamped to weightRange. Returns
+     * what was set.
+     */
+    @Synchronized
+    fun setWeight(key: String, pounds: Double): Double {
+        val v = snapWeight(key, if (pounds.isFinite()) pounds else 0.0)
+        lb[key] = v
+        return v
+    }
+
+    /** One step heavier (dir > 0) or lighter (dir < 0): the next weightOption, else 0.25 lb. Returns the new weight. */
+    @Synchronized
+    fun stepWeight(key: String, dir: Int): Double {
+        val d = if (dir < 0) -1 else 1
+        val cur = weight(key)
+        val opts = weightOptions(key)
+        if (opts.isEmpty()) return setWeight(key, cur + d * WEIGHT_STEP)
+        val i = nearestIndex(opts, cur)
+        return setWeight(key, opts[maxOf(0, minOf(opts.size - 1, i + d))])
+    }
+
+    private fun weightOptions(key: String): List<Double> =
+        (selected(key)?.weightOptions ?: emptyList())
+            .filter { it.isFinite() && it > 0 && it <= MAX_WEIGHT_LB }
+            .distinct()
+            .sorted()
+
+    private fun snapWeight(key: String, pounds: Double): Double {
+        val r = weightRange(key)
+        val opts = weightOptions(key)
+        val v = maxOf(r.min, minOf(r.max, pounds))
+        if (opts.isNotEmpty()) return opts[nearestIndex(opts, v)]
+        // Math.round(v / 0.25) * 0.25 in the reference (half rounds up).
+        return maxOf(r.min, minOf(r.max, Math.floor(v / WEIGHT_STEP + 0.5) * WEIGHT_STEP))
+    }
+
     @Synchronized
     fun isSelected(key: String): Boolean = key in picks
+
+    /** The preference chosen for an item's product, or null. */
+    @Synchronized
+    fun preferenceId(key: String): String? = picks[key]?.preferenceId
+
+    /**
+     * True when the item is ticked but its product offers preferences (H-E-B
+     * deli slicing, for example) and none is chosen. Such an item stays out of
+     * the add and the total until one is, the same rule as the Mealio app: a
+     * missing preference is a different request from "No preference".
+     */
+    @Synchronized
+    fun needsPreference(key: String): Boolean {
+        val p = picks[key] ?: return false
+        val prefs = selected(key)?.preferences
+        return !prefs.isNullOrEmpty() && p.preferenceId.isNullOrEmpty()
+    }
+
+    /** Keys of ticked items still waiting on a preference. */
+    @Synchronized
+    fun pendingPreferences(): List<String> = items.filter { needsPreference(it.key) }.map { it.key }
 
     @Synchronized
     fun selectedCount(): Int = picks.size
@@ -134,18 +242,23 @@ class CartSession internal constructor(
 
     /**
      * One selection for EVERY item: selected ones as {productId, quantity,
-     * remember: true, preferenceId}, the rest as {productId: null, remember: false}.
+     * remember: true, preferenceId} (quantity 1 and weightLb for a sold-by-weight
+     * product), the rest, and ticked items still waiting on a preference, as
+     * {productId: null, remember: false}.
      */
     @Synchronized
     fun selections(): List<Selection> = items.map { it ->
         val p = picks[it.key]
-        if (p != null) Selection(it.key, p.productId, quantity = minOf(quantity(it.key), maxQuantity(it.key)), remember = true, preferenceId = p.preferenceId)
-        else Selection(it.key, null, remember = false)
+        if (p == null || needsPreference(it.key)) Selection(it.key, null, remember = false)
+        else if (isWeight(it.key)) Selection(it.key, p.productId, quantity = 1, remember = true, preferenceId = p.preferenceId, weightLb = weight(it.key))
+        else Selection(it.key, p.productId, quantity = minOf(quantity(it.key), maxQuantity(it.key)), remember = true, preferenceId = p.preferenceId)
     }
 
     /**
-     * Estimated total of the selected items: unit price times quantity.
-     * `estimated` is true when any item is sold by weight or has no price.
+     * Estimated total of the selected items: unit price times quantity, and for a
+     * sold-by-weight item price per lb times the weight (one package price when
+     * the store prices it as a package). Items waiting on a preference are left
+     * out. `estimated` is true when any item is sold by weight or has no price.
      */
     @Synchronized
     fun estimate(): Estimate {
@@ -155,7 +268,16 @@ class CartSession internal constructor(
         var estimated = false
         for (it in items) {
             val p = selected(it.key) ?: continue
+            if (needsPreference(it.key)) continue
             count += 1
+            if (p.soldByWeight == true) {
+                estimated = true
+                val perLb = p.pricePerLb
+                if (perLb != null) total += perLb * weight(it.key)
+                else if (p.unitPrice != null) total += p.unitPrice
+                else unpriced += 1
+                continue
+            }
             val u = p.unitPrice
             if (u != null) total += u * minOf(quantity(it.key), maxQuantity(it.key)) else unpriced += 1
             if (p.estimated) estimated = true

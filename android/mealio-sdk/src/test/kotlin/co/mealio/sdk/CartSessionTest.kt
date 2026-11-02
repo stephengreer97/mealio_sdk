@@ -282,4 +282,148 @@ class CartSessionTest {
         assertEquals(2, out.results.size)
         assertTrue(out.results[1].skipped)
     }
+
+    // ── sold by weight (mirrors describe('sold by weight')) ──────────────
+
+    private val turkey = """{"id":"t1","name":"Deli Turkey","soldByWeight":true,"estimated":true,"pricePerLb":10,"unitPrice":10,"weightOptions":[0.25,0.5,0.75,1,1.25]}"""
+    private val salmon = """{"id":"s1","name":"Salmon","soldByWeight":true,"estimated":true,"pricePerLb":12,"unitPrice":12}"""
+    private val brisket = """{"id":"b1","name":"Brisket, Avg. 4 lbs","soldByWeight":true,"estimated":true,"pricePerLb":null,"unitPrice":32}"""
+
+    private fun weightCart(weightLb: Double? = null): CartSession {
+        val w = if (weightLb != null) ""","weightLb":$weightLb""" else ""
+        val json = JSONObject(
+            """{"cartId":"c1","store":"heb","ready":[],"needsChoice":[],"unavailable":[],"items":[""" +
+                """{"key":"turkey","ingredient":"deli turkey","quantity":1,"status":"remembered","selectedId":"t1","remembered":$turkey,"options":[$turkey,$salmon,$brisket]$w},""" +
+                """{"key":"onion","ingredient":"onion","quantity":2,"status":"remembered","selectedId":"o1","remembered":null,"options":[{"id":"o1","name":"Onion","unitPrice":1}]}""" +
+                "]}",
+        )
+        return session(json)
+    }
+
+    @Test
+    fun weightStartsAtTheRecipeWeightElseTheFirstOptionElseAQuarter() {
+        assertEquals(0.75, weightCart(0.75).weight("turkey"), 0.0)
+        // A recipe weight the store does not sell becomes the nearest one it does.
+        assertEquals(0.5, weightCart(0.6).weight("turkey"), 0.0)
+        assertEquals(0.25, weightCart().weight("turkey"), 0.0)
+        val cs = weightCart()
+        cs.select("turkey", "s1")
+        assertEquals(0.25, cs.weight("turkey"), 0.0)
+        assertEquals(0.0, cs.weight("onion"), 0.0)
+        assertTrue(cs.isWeight("turkey"))
+        assertFalse(cs.isWeight("onion"))
+    }
+
+    @Test
+    fun setWeightSnapsToTheOptionsAndClampsToTheirRange() {
+        val cs = weightCart()
+        assertEquals(0.75, cs.setWeight("turkey", 0.8), 0.0)
+        assertEquals(1.25, cs.setWeight("turkey", 9.0), 0.0)
+        assertEquals(0.25, cs.setWeight("turkey", 0.0), 0.0)
+        assertEquals(WeightRange(0.25, 1.25), cs.weightRange("turkey"))
+        assertEquals(0.25, cs.weight("turkey"), 0.0)
+    }
+
+    @Test
+    fun withNoOptionsQuarterPoundStepsFromAQuarterTo20() {
+        val cs = weightCart()
+        cs.select("turkey", "s1")
+        assertEquals(1.0, cs.setWeight("turkey", 1.1), 0.0)
+        assertEquals(1.25, cs.setWeight("turkey", 1.13), 0.0)
+        assertEquals(0.25, cs.setWeight("turkey", 0.01), 0.0)
+        assertEquals(20.0, cs.setWeight("turkey", 99.0), 0.0)
+        assertEquals(WeightRange(0.25, 20.0), cs.weightRange("turkey"))
+        cs.setWeight("turkey", 1.0)
+        assertEquals(1.25, cs.stepWeight("turkey", 1), 0.0)
+        assertEquals(1.0, cs.stepWeight("turkey", -1), 0.0)
+    }
+
+    @Test
+    fun stepWeightWalksTheOptionsAndStopsAtTheEnds() {
+        val cs = weightCart()
+        assertEquals(0.25, cs.stepWeight("turkey", -1), 0.0)
+        assertEquals(0.5, cs.stepWeight("turkey", 1), 0.0)
+        cs.setWeight("turkey", 1.25)
+        assertEquals(1.25, cs.stepWeight("turkey", 1), 0.0)
+        assertEquals(1.0, cs.stepWeight("turkey", -1), 0.0)
+    }
+
+    @Test
+    fun switchingProductReSnapsTheWeightToTheNewProduct() {
+        val cs = weightCart()
+        cs.select("turkey", "s1")
+        cs.setWeight("turkey", 3.0)
+        cs.select("turkey", "t1")
+        assertEquals(1.25, cs.weight("turkey"), 0.0)
+    }
+
+    @Test
+    fun selectionsSendWeightLbForWeightItemsOnly() {
+        val cs = weightCart(1.0)
+        assertEquals(
+            listOf(
+                Selection("turkey", "t1", quantity = 1, remember = true, preferenceId = null, weightLb = 1.0),
+                Selection("onion", "o1", quantity = 2, remember = true, preferenceId = null),
+            ),
+            cs.selections(),
+        )
+        val wire = cs.selections().map { it.toJson() }
+        assertEquals(1.0, wire[0].getDouble("weightLb"), 0.0)
+        assertFalse(wire[1].has("weightLb"))
+    }
+
+    @Test
+    fun estimateIsPricePerLbTimesTheWeightAndMarkedEstimated() {
+        val cs = weightCart()
+        cs.setWeight("turkey", 1.25)
+        val e = cs.estimate()
+        assertEquals(14.5, e.total, 0.0)
+        assertTrue(e.estimated)
+        assertEquals(2, e.count)
+        // A package-priced weight item counts its price once, whatever the weight.
+        cs.select("turkey", "b1")
+        cs.setWeight("turkey", 3.0)
+        val e2 = cs.estimate()
+        assertEquals(34.0, e2.total, 0.0)
+        assertTrue(e2.estimated)
+    }
+
+    @Test
+    fun parsesWeightFieldsAsOptional() {
+        val cs = weightCart(1.0)
+        assertEquals(1.0, cs.items[0].weightLb!!, 0.0)
+        assertNull(cs.items[1].weightLb)
+        assertEquals(10.0, cs.options("turkey")[0].pricePerLb!!, 0.0)
+        assertNull(cs.options("turkey")[2].pricePerLb)
+        assertNull(cs.options("onion")[0].pricePerLb)
+        val r = AddResult.fromJson(
+            JSONObject("""{"cartId":"c1","store":"heb","added":[{"key":"turkey","productId":"t1","name":"Deli Turkey","quantity":1,"weightLb":1.25},{"key":"onion","productId":"o1","name":"Onion","quantity":2}],"skipped":[],"failed":[],"storeCartUrl":null}"""),
+        )
+        assertEquals(1.25, r.added[0].weightLb!!, 0.0)
+        assertNull(r.added[1].weightLb)
+    }
+
+    // ── preferences ──────────────────────────────────────────────────────
+
+    @Test
+    fun holdsAnItemBackFromTheAddAndTheTotalUntilItsPreferenceIsChosen() {
+        val p4 = prepared()
+        val prefs = JSONArray().put(JSONObject().put("id", "thin").put("label", "Thin")).put(JSONObject().put("id", "none").put("label", "No preference"))
+        p4.getJSONArray("items").getJSONObject(1)
+            .put("options", JSONArray().put(product("g1", "Deli Turkey", 6.0).put("preferences", prefs)))
+        val cs = session(p4)
+        cs.select("garlic", "g1")
+        assertTrue(cs.needsPreference("garlic"))
+        assertEquals(listOf("garlic"), cs.pendingPreferences())
+        assertEquals(Selection("garlic", null, remember = false), cs.selections()[1])
+        assertEquals(1, cs.estimate().count)
+        cs.select("garlic", "g1", preferenceId = "thin")
+        assertFalse(cs.needsPreference("garlic"))
+        assertEquals("thin", cs.preferenceId("garlic"))
+        val sel = cs.selections()[1]
+        assertEquals("garlic", sel.key)
+        assertEquals("g1", sel.productId)
+        assertEquals("thin", sel.preferenceId)
+        assertEquals(2, cs.estimate().count)
+    }
 }

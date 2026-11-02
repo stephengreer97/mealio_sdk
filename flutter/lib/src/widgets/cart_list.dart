@@ -74,6 +74,7 @@ class _MealioCartListState extends State<MealioCartList> {
             final est = s.estimate();
             final selectable = s.items.where((CartItem i) => i.status != ItemStatus.unavailable).length;
             final canAdd = !widget.busy && est.count > 0 && widget.onAdd != null;
+            final pending = s.pendingPreferences().length;
             return Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: <Widget>[
@@ -121,6 +122,15 @@ class _MealioCartListState extends State<MealioCartList> {
                 Footer(
                   theme: t,
                   children: <Widget>[
+                    if (pending > 0)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 6),
+                        child: Text(
+                          '${pending == 1 ? '1 checked item needs' : '$pending checked items need'} '
+                          'an option chosen before adding.',
+                          style: t.style(size: 12, height: 17 / 12, color: t.warnText),
+                        ),
+                      ),
                     Row(
                       crossAxisAlignment: CrossAxisAlignment.baseline,
                       textBaseline: TextBaseline.alphabetic,
@@ -309,8 +319,7 @@ class _ItemRowState extends State<_ItemRow> {
     final String meta;
     if (picked != null) {
       meta = <String?>[
-        picked.price,
-        picked.estimated ? 'est.' : null,
+        priceText(picked),
         picked.id == rememberedId ? 'Your usual' : null,
       ].whereType<String>().where((String x) => x.isNotEmpty).join(' · ');
     } else if (item.status == ItemStatus.remembered) {
@@ -397,6 +406,19 @@ class _ItemRowState extends State<_ItemRow> {
 
     final children = <Widget>[row];
 
+    if (on && picked != null && _s.needsPreference(item.key)) {
+      children.add(Semantics(
+        liveRegion: true,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+          child: Text(
+            'Choose one: ${listOr(picked.preferences.map((ProductPreference p) => p.label).toList())}',
+            style: t.style(size: 13, height: 18 / 13, weight: FontWeight.w600, color: t.accent),
+          ),
+        ),
+      ));
+    }
+
     if (on && picked != null) children.add(_quantityRow(t, picked));
 
     if (item.status == ItemStatus.rememberedUnavailable && !on) {
@@ -419,31 +441,45 @@ class _ItemRowState extends State<_ItemRow> {
     );
   }
 
+  // Sold by weight: the stepper is pounds, stepping through the store's
+  // weights (else 0.25 lb). Otherwise a count, clamped to the store cap.
   Widget _quantityRow(MealioTheme t, Product picked) {
     final key = _item.key;
+    final byWeight = picked.soldByWeight ?? false;
+    final range = byWeight ? _s.weightRange(key) : null;
+    final lb = byWeight ? _s.weight(key) : 0.0;
     final q = _s.quantity(key);
-    final max = _s.maxQuantity(key);
+    final atMin = range != null ? lb <= range.min : q <= 1;
+    final atMax = range != null ? lb >= range.max : q >= _s.maxQuantity(key);
+    void step(int dir) {
+      if (byWeight) {
+        _s.stepWeight(key, dir);
+      } else {
+        _s.setQuantity(key, q + dir);
+      }
+    }
+
+    final value = byWeight ? lbText(lb) : '$q';
     return Padding(
       padding: const EdgeInsets.only(left: 58, right: 12, bottom: 10),
       child: Row(
         children: <Widget>[
           Expanded(
-            child: Text(picked.soldByWeight == true ? 'Sold by weight' : 'Quantity',
-                style: t.style(size: 12, height: 17 / 12, color: t.muted)),
+            child: Text(byWeight ? 'Weight' : 'Quantity', style: t.style(size: 12, height: 17 / 12, color: t.muted)),
           ),
-          _stepButton(t, '−', 'Fewer ${_item.ingredient}', q > 1, () => _s.setQuantity(key, q - 1)),
+          _stepButton(t, '−', 'Less ${_item.ingredient}', !atMin, () => step(-1)),
           const SizedBox(width: 4),
           Semantics(
             container: true,
-            label: 'Quantity $q',
+            label: byWeight ? 'Weight $value' : 'Quantity $value',
             excludeSemantics: true,
             child: ConstrainedBox(
-              constraints: const BoxConstraints(minWidth: 28),
-              child: Text('$q', textAlign: TextAlign.center, style: t.style(size: 16, weight: FontWeight.w700)),
+              constraints: BoxConstraints(minWidth: byWeight ? 64 : 28),
+              child: Text(value, textAlign: TextAlign.center, style: t.style(size: 16, weight: FontWeight.w700)),
             ),
           ),
           const SizedBox(width: 4),
-          _stepButton(t, '+', 'More ${_item.ingredient}', q < max, () => _s.setQuantity(key, q + 1)),
+          _stepButton(t, '+', 'More ${_item.ingredient}', !atMax, () => step(1)),
         ],
       ),
     );
@@ -467,7 +503,7 @@ class _ItemRowState extends State<_ItemRow> {
             onTap: enabled ? onTap : null,
             child: SizedBox(
               width: 44,
-              height: 36,
+              height: 44,
               child: Center(child: Text(glyph, style: t.style(size: 20, weight: FontWeight.w600))),
             ),
           ),
@@ -478,7 +514,7 @@ class _ItemRowState extends State<_ItemRow> {
 
   Widget _expanded(MealioTheme t, Product? picked, List<Product> options, String? rememberedId, String storeName) {
     final prefs = picked?.preferences ?? const <ProductPreference>[];
-    final selPref = _s.selectedPreferenceId(_item.key);
+    final selPref = _s.preferenceId(_item.key);
     final searchLabel = 'Search $storeName for something else';
     final note = _searchNote;
     return Container(
@@ -614,7 +650,7 @@ class _ItemRowState extends State<_ItemRow> {
   }
 
   Widget _option(MealioTheme t, Product o, bool sel, bool usual) {
-    final price = o.outOfStock ? 'Out of stock' : '${o.price ?? ''}${o.estimated ? ' est.' : ''}';
+    final price = o.outOfStock ? 'Out of stock' : priceText(o);
     final tag = usual ? 'Your usual' : (o.badge == 'popular' ? 'Popular' : null);
     return Semantics(
       inMutuallyExclusiveGroup: true,

@@ -16,7 +16,9 @@ import 'protocol.dart';
 class CartEstimate {
   const CartEstimate({required this.total, required this.count, required this.estimated, required this.unpriced});
 
-  /// Unit price times quantity, summed, rounded to cents.
+  /// Unit price times quantity, summed, rounded to cents. A sold-by-weight
+  /// item counts price per lb times its weight (its package price once when
+  /// the store prices it as a package).
   final double total;
 
   /// Selected items.
@@ -33,6 +35,38 @@ class CartEstimate {
   String toString() => 'CartEstimate(total: $total, count: $count, estimated: $estimated, unpriced: $unpriced)';
 }
 
+/// The weight step (lb) for a sold-by-weight item whose store lists no
+/// weights.
+const double weightStep = 0.25;
+
+/// The most a selection may ask for, in lb. The server refuses more.
+const double maxWeightLb = 20;
+
+/// The lightest and heaviest weight (lb) a sold-by-weight item can be set to.
+@immutable
+class WeightRange {
+  const WeightRange({required this.min, required this.max});
+  final double min;
+  final double max;
+
+  @override
+  bool operator ==(Object other) => other is WeightRange && other.min == min && other.max == max;
+
+  @override
+  int get hashCode => Object.hash(min, max);
+
+  @override
+  String toString() => 'WeightRange(min: $min, max: $max)';
+}
+
+int _nearestIndex(List<double> opts, double v) {
+  var best = 0;
+  for (var i = 0; i < opts.length; i += 1) {
+    if ((opts[i] - v).abs() < (opts[best] - v).abs() - 1e-9) best = i;
+  }
+  return best;
+}
+
 class _Pick {
   const _Pick(this.productId, this.preferenceId);
   final String productId;
@@ -40,7 +74,7 @@ class _Pick {
 }
 
 /// A prepared cart. A [ChangeNotifier]: it notifies after [select],
-/// [deselect], [setQuantity] and [search], so widgets can rebuild with a
+/// [deselect], [setQuantity], [setWeight], [stepWeight] and [search], so widgets can rebuild with a
 /// `ListenableBuilder`.
 class CartSession extends ChangeNotifier {
   CartSession(this._client, this.cart) {
@@ -59,6 +93,7 @@ class CartSession extends ChangeNotifier {
   final Map<String, _Pick> _picks = <String, _Pick>{};
   final Map<String, List<Product>> _extra = <String, List<Product>>{};
   final Map<String, int> _qty = <String, int>{};
+  final Map<String, double> _lb = <String, double>{};
 
   String get cartId => cart.cartId;
   String get store => cart.store;
@@ -115,11 +150,92 @@ class CartSession extends ChangeNotifier {
     return v;
   }
 
+  /// True when the selected product is sold by weight: use [weight], not
+  /// [quantity].
+  bool isWeight(String key) => selected(key)?.soldByWeight ?? false;
+
+  /// The lightest and heaviest weight (lb) the user can pick for the selected
+  /// product: its first and last weight option, else 0.25 to 20.
+  WeightRange weightRange(String key) {
+    final opts = _weightOptions(key);
+    if (opts.isEmpty) return const WeightRange(min: weightStep, max: maxWeightLb);
+    return WeightRange(min: opts.first, max: opts.last < maxWeightLb ? opts.last : maxWeightLb);
+  }
+
+  /// Pounds to add for a sold-by-weight item: the user's, else the recipe's
+  /// own weight, else the store's first weight option, else 0.25. Always a
+  /// weight the selected product can be bought in (see [setWeight]). 0 for
+  /// count items.
+  double weight(String key) {
+    if (!isWeight(key)) return 0;
+    final set = _lb[key];
+    if (set != null) return _snapWeight(key, set);
+    final recipe = _find(key)?.weightLb;
+    if (recipe != null && recipe > 0) return _snapWeight(key, recipe);
+    final opts = _weightOptions(key);
+    return opts.isEmpty ? weightStep : opts.first;
+  }
+
+  /// Set the weight in lb. Snapped to the nearest weight option when the
+  /// store lists them, else to 0.25 lb steps, and clamped to [weightRange].
+  /// Returns what was set.
+  double setWeight(String key, double lb) {
+    final v = _snapWeight(key, lb.isFinite ? lb : 0);
+    _lb[key] = v;
+    notifyListeners();
+    return v;
+  }
+
+  /// One step heavier (`dir` 1) or lighter (`dir` -1): the next weight
+  /// option, else 0.25 lb. Returns the new weight.
+  double stepWeight(String key, int dir) {
+    final d = dir < 0 ? -1 : 1;
+    final cur = weight(key);
+    final opts = _weightOptions(key);
+    if (opts.isEmpty) return setWeight(key, cur + d * weightStep);
+    final i = (_nearestIndex(opts, cur) + d).clamp(0, opts.length - 1);
+    return setWeight(key, opts[i]);
+  }
+
+  List<double> _weightOptions(String key) {
+    final raw = selected(key)?.weightOptions ?? const <double>[];
+    final opts = raw.where((double n) => n.isFinite && n > 0 && n <= maxWeightLb).toSet().toList()..sort();
+    return opts;
+  }
+
+  double _snapWeight(String key, double lb) {
+    final r = weightRange(key);
+    final opts = _weightOptions(key);
+    final v = lb.clamp(r.min, r.max).toDouble();
+    if (opts.isNotEmpty) return opts[_nearestIndex(opts, v)];
+    return ((v / weightStep).round() * weightStep).clamp(r.min, r.max).toDouble();
+  }
+
   bool isSelected(String key) => _picks.containsKey(key);
   int selectedCount() => _picks.length;
 
   /// The preference picked with the selected product, if any.
   String? selectedPreferenceId(String key) => _picks[key]?.preferenceId;
+
+  /// The preference chosen for an item's product, or null. The same as
+  /// [selectedPreferenceId], named as in the other SDKs.
+  String? preferenceId(String key) => _picks[key]?.preferenceId;
+
+  /// True when the item is ticked but its product offers preferences (H-E-B
+  /// deli slicing, for example) and none is chosen. Such an item stays out
+  /// of the add and the total until one is, the same rule as the Mealio app:
+  /// a missing preference is a different request from "No preference".
+  bool needsPreference(String key) {
+    final pick = _picks[key];
+    if (pick == null) return false;
+    final prefs = selected(key)?.preferences ?? const <ProductPreference>[];
+    final pref = pick.preferenceId;
+    return prefs.isNotEmpty && (pref == null || pref.isEmpty);
+  }
+
+  /// Keys of ticked items still waiting on a preference.
+  List<String> pendingPreferences() =>
+      items.where((CartItem it) => needsPreference(it.key)).map((CartItem it) => it.key).toList();
 
   /// The selected product for an item, from its options.
   Product? selected(String key) {
@@ -165,19 +281,32 @@ class CartSession extends ChangeNotifier {
   List<Selection> selections() {
     return items.map((CartItem it) {
       final p = _picks[it.key];
-      return p == null
-          ? Selection(key: it.key, productId: null, remember: false)
-          : Selection(
-              key: it.key,
-              productId: p.productId,
-              quantity: _clampedQuantity(it.key),
-              remember: true,
-              preferenceId: p.preferenceId,
-            );
+      if (p == null || needsPreference(it.key)) return Selection(key: it.key, productId: null, remember: false);
+      if (isWeight(it.key)) {
+        return Selection(
+          key: it.key,
+          productId: p.productId,
+          quantity: 1,
+          weightLb: weight(it.key),
+          remember: true,
+          preferenceId: p.preferenceId,
+        );
+      }
+      return Selection(
+        key: it.key,
+        productId: p.productId,
+        quantity: _clampedQuantity(it.key),
+        remember: true,
+        preferenceId: p.preferenceId,
+      );
     }).toList();
   }
 
-  /// Estimated total of the selected items: unit price times quantity.
+  /// Estimated total of the selected items: unit price times quantity, and
+  /// for a sold-by-weight item price per lb times the weight (one package
+  /// price when the store prices it as a package). An item waiting on a
+  /// preference is left out. `estimated` is true when any item is sold by
+  /// weight or has no price, so show it as "about".
   CartEstimate estimate() {
     var total = 0.0;
     var count = 0;
@@ -185,8 +314,20 @@ class CartSession extends ChangeNotifier {
     var estimated = false;
     for (final CartItem it in items) {
       final p = selected(it.key);
-      if (p == null) continue;
+      if (p == null || needsPreference(it.key)) continue;
       count += 1;
+      if (p.soldByWeight ?? false) {
+        estimated = true;
+        final perLb = p.pricePerLb;
+        if (perLb != null) {
+          total += perLb * weight(it.key);
+        } else if (p.unitPrice != null) {
+          total += p.unitPrice!;
+        } else {
+          unpriced += 1;
+        }
+        continue;
+      }
       final unit = p.unitPrice;
       if (unit != null) {
         total += unit * _clampedQuantity(it.key);

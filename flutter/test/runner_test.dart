@@ -814,6 +814,200 @@ void main() {
       expect(e.estimated, isTrue);
     });
 
+    group('sold by weight', () {
+      const turkey = <String, Object?>{
+        'id': 't1',
+        'name': 'Deli Turkey',
+        'soldByWeight': true,
+        'estimated': true,
+        'pricePerLb': 10,
+        'unitPrice': 10,
+        'weightOptions': <Object?>[0.25, 0.5, 0.75, 1, 1.25],
+      };
+      const salmon = <String, Object?>{
+        'id': 's1',
+        'name': 'Salmon',
+        'soldByWeight': true,
+        'estimated': true,
+        'pricePerLb': 12,
+        'unitPrice': 12,
+      };
+      const brisket = <String, Object?>{
+        'id': 'b1',
+        'name': 'Brisket, Avg. 4 lbs',
+        'soldByWeight': true,
+        'estimated': true,
+        'pricePerLb': null,
+        'unitPrice': 32,
+      };
+      Map<String, Object?> weightCart([Map<String, Object?> over = const <String, Object?>{}]) => <String, Object?>{
+            'cartId': 'c1',
+            'store': 'heb',
+            'ready': <Object?>[],
+            'needsChoice': <Object?>[],
+            'unavailable': <Object?>[],
+            'items': <Object?>[
+              <String, Object?>{
+                'key': 'turkey',
+                'ingredient': 'deli turkey',
+                'quantity': 1,
+                'status': 'remembered',
+                'selectedId': 't1',
+                'remembered': turkey,
+                'options': <Object?>[turkey, salmon, brisket],
+                ...over,
+              },
+              <String, Object?>{
+                'key': 'onion',
+                'ingredient': 'onion',
+                'quantity': 2,
+                'status': 'remembered',
+                'selectedId': 'o1',
+                'remembered': null,
+                'options': <Object?>[
+                  <String, Object?>{'id': 'o1', 'name': 'Onion', 'unitPrice': 1},
+                ],
+              },
+            ],
+          };
+
+      test('parses pricePerLb and the recipe weight, and payloads without them', () {
+        final c = PreparedCart.fromJson(weightCart(<String, Object?>{'weightLb': 0.75}));
+        expect(c.items.first.weightLb, 0.75);
+        expect(c.items.first.options.first.pricePerLb, 10.0);
+        expect(c.items.first.options[2].pricePerLb, isNull);
+        expect(c.items[1].weightLb, isNull);
+        expect(c.items[1].options.first.pricePerLb, isNull);
+        final a = AddedItem.fromJson(<String, Object?>{
+          'key': 'turkey',
+          'productId': 't1',
+          'name': 'Deli Turkey',
+          'quantity': 1,
+          'weightLb': 1.25,
+        });
+        expect(a.weightLb, 1.25);
+        expect(a.toJson()['weightLb'], 1.25);
+        expect(AddedItem.fromJson(<String, Object?>{'key': 'o', 'productId': 'o1', 'name': 'O', 'quantity': 1}).weightLb,
+            isNull);
+        expect(Selection.fromJson(<String, Object?>{'key': 'turkey', 'productId': 't1', 'weightLb': 1}).weightLb, 1.0);
+      });
+
+      test('starts at the recipe weight, else the first option, else 0.25', () {
+        expect(session(cart: weightCart(<String, Object?>{'weightLb': 0.75})).weight('turkey'), 0.75);
+        // A recipe weight the store does not sell becomes the nearest one it does.
+        expect(session(cart: weightCart(<String, Object?>{'weightLb': 0.6})).weight('turkey'), 0.5);
+        expect(session(cart: weightCart()).weight('turkey'), 0.25);
+        final cs = session(cart: weightCart());
+        cs.select('turkey', 's1');
+        expect(cs.weight('turkey'), 0.25);
+        expect(cs.weight('onion'), 0);
+        expect(cs.isWeight('turkey'), isTrue);
+        expect(cs.isWeight('onion'), isFalse);
+      });
+
+      test('setWeight snaps to the options and clamps to their range', () {
+        final cs = session(cart: weightCart());
+        var notified = 0;
+        cs.addListener(() => notified += 1);
+        expect(cs.setWeight('turkey', 0.8), 0.75);
+        expect(cs.setWeight('turkey', 9), 1.25);
+        expect(cs.setWeight('turkey', 0), 0.25);
+        expect(cs.setWeight('turkey', double.nan), 0.25);
+        expect(cs.weightRange('turkey'), const WeightRange(min: 0.25, max: 1.25));
+        expect(cs.weight('turkey'), 0.25);
+        expect(notified, 4);
+      });
+
+      test('with no options, 0.25 lb steps from 0.25 to 20', () {
+        final cs = session(cart: weightCart());
+        cs.select('turkey', 's1');
+        expect(cs.setWeight('turkey', 1.1), 1);
+        expect(cs.setWeight('turkey', 1.13), 1.25);
+        expect(cs.setWeight('turkey', 0.01), 0.25);
+        expect(cs.setWeight('turkey', 99), 20);
+        expect(cs.weightRange('turkey'), const WeightRange(min: weightStep, max: maxWeightLb));
+        cs.setWeight('turkey', 1);
+        expect(cs.stepWeight('turkey', 1), 1.25);
+        expect(cs.stepWeight('turkey', -1), 1);
+      });
+
+      test('stepWeight walks the options and stops at the ends', () {
+        final cs = session(cart: weightCart());
+        expect(cs.stepWeight('turkey', -1), 0.25);
+        expect(cs.stepWeight('turkey', 1), 0.5);
+        cs.setWeight('turkey', 1.25);
+        expect(cs.stepWeight('turkey', 1), 1.25);
+        expect(cs.stepWeight('turkey', -1), 1);
+      });
+
+      test('switching product re-snaps the weight to the new product', () {
+        final cs = session(cart: weightCart());
+        cs.select('turkey', 's1');
+        cs.setWeight('turkey', 3);
+        cs.select('turkey', 't1');
+        expect(cs.weight('turkey'), 1.25);
+      });
+
+      test('selections send weightLb for weight items only', () {
+        final cs = session(cart: weightCart(<String, Object?>{'weightLb': 1}));
+        expect(cs.selections().map((Selection x) => x.toJson()).toList(), <Object?>[
+          <String, Object?>{'key': 'turkey', 'productId': 't1', 'quantity': 1, 'weightLb': 1.0, 'remember': true},
+          <String, Object?>{'key': 'onion', 'productId': 'o1', 'quantity': 2, 'remember': true},
+        ]);
+      });
+
+      test('estimate is price per lb times the weight, and marked estimated', () {
+        final cs = session(cart: weightCart());
+        cs.setWeight('turkey', 1.25);
+        var e = cs.estimate();
+        expect(e.total, 14.5);
+        expect(e.estimated, isTrue);
+        expect(e.count, 2);
+        // A package-priced weight item counts its price once, whatever the weight.
+        cs.select('turkey', 'b1');
+        cs.setWeight('turkey', 3);
+        e = cs.estimate();
+        expect(e.total, 34);
+        expect(e.estimated, isTrue);
+      });
+    });
+
+    test('holds an item back from the add and the total until its preference is chosen', () {
+      final cart = prepared();
+      final garlic = (cart['items']! as List<Object?>)[1]! as Map<String, Object?>;
+      garlic['options'] = <Object?>[
+        <String, Object?>{
+          'id': 'g1',
+          'name': 'Deli Turkey',
+          'unitPrice': 6,
+          'preferences': <Object?>[
+            <String, Object?>{'id': 'thin', 'label': 'Thin'},
+            <String, Object?>{'id': 'none', 'label': 'No preference'},
+          ],
+        },
+      ];
+      final cs = session(cart: cart);
+      cs.select('garlic', 'g1');
+      expect(cs.needsPreference('garlic'), isTrue);
+      expect(cs.needsPreference('onion'), isFalse);
+      expect(cs.needsPreference('beef'), isFalse);
+      expect(cs.pendingPreferences(), <String>['garlic']);
+      expect(cs.selections()[1].toJson(), <String, Object?>{'key': 'garlic', 'productId': null, 'remember': false});
+      expect(cs.estimate().count, 1);
+      cs.select('garlic', 'g1', preferenceId: 'thin');
+      expect(cs.needsPreference('garlic'), isFalse);
+      expect(cs.pendingPreferences(), isEmpty);
+      expect(cs.preferenceId('garlic'), 'thin');
+      expect(cs.selections()[1].toJson(), <String, Object?>{
+        'key': 'garlic',
+        'productId': 'g1',
+        'quantity': 1,
+        'remember': true,
+        'preferenceId': 'thin',
+      });
+      expect(cs.estimate().count, 2);
+    });
+
     test('a 0.1 cart without items is rebuilt from the groupings, ready items pre-selected', () {
       final s = session(cart: <String, Object?>{
         'cartId': 'c1',

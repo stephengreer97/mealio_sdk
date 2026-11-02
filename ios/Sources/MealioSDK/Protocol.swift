@@ -512,13 +512,17 @@ public struct Product: Codable, Equatable, Identifiable {
     public let maxQuantity: Int?
     /// Sold by weight (deli, fish counter).
     public let soldByWeight: Bool?
-    /// Weights offered for a sold-by-weight item, in lb.
+    /// Weights offered for a sold-by-weight item, in lb, ascending. Absent
+    /// when the store lists none.
     public let weightOptions: [Double]?
+    /// Price per lb for a sold-by-weight item priced by the pound. Nil for a
+    /// weight item priced as a package, and absent on count items.
+    public let pricePerLb: Double?
 
     public init(id: String, name: String, price: String? = nil, imageUrl: String? = nil, size: String? = nil,
                 outOfStock: Bool? = nil, badge: String? = nil, preferences: [ProductPreference]? = nil,
                 unitPrice: Double? = nil, estimated: Bool = false, maxQuantity: Int? = nil,
-                soldByWeight: Bool? = nil, weightOptions: [Double]? = nil) {
+                soldByWeight: Bool? = nil, weightOptions: [Double]? = nil, pricePerLb: Double? = nil) {
         self.id = id
         self.name = name
         self.price = price
@@ -532,11 +536,12 @@ public struct Product: Codable, Equatable, Identifiable {
         self.maxQuantity = maxQuantity
         self.soldByWeight = soldByWeight
         self.weightOptions = weightOptions
+        self.pricePerLb = pricePerLb
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, price, imageUrl, size, outOfStock, badge, preferences, unitPrice, estimated
-        case maxQuantity, soldByWeight, weightOptions
+        case maxQuantity, soldByWeight, weightOptions, pricePerLb
     }
 
     public init(from decoder: Decoder) throws {
@@ -554,6 +559,7 @@ public struct Product: Codable, Equatable, Identifiable {
         maxQuantity = try c.decodeIfPresent(Int.self, forKey: .maxQuantity)
         soldByWeight = try c.decodeIfPresent(Bool.self, forKey: .soldByWeight)
         weightOptions = try c.decodeIfPresent([Double].self, forKey: .weightOptions)
+        pricePerLb = try c.decodeIfPresent(Double.self, forKey: .pricePerLb)
     }
 }
 
@@ -573,6 +579,9 @@ public struct CartItem: Codable, Equatable, Identifiable {
     public let key: String
     public let ingredient: String
     public let quantity: Int
+    /// The recipe's own weight for this line, in lb, when it gave the amount
+    /// in a weight unit (lb, oz, g or kg). Nil otherwise.
+    public let weightLb: Double?
     public let status: ItemStatus
     /// Every option, best first. The remembered product leads when the store has it.
     public let options: [Product]
@@ -590,10 +599,11 @@ public struct CartItem: Codable, Equatable, Identifiable {
 
     public init(key: String, ingredient: String, quantity: Int = 1, status: ItemStatus, options: [Product] = [],
                 selectedId: String? = nil, remembered: Product? = nil, rememberedPreferenceId: String? = nil,
-                reason: String? = nil, chosen: Product? = nil) {
+                reason: String? = nil, chosen: Product? = nil, weightLb: Double? = nil) {
         self.key = key
         self.ingredient = ingredient
         self.quantity = quantity
+        self.weightLb = weightLb
         self.status = status
         self.options = options
         self.selectedId = selectedId
@@ -604,7 +614,7 @@ public struct CartItem: Codable, Equatable, Identifiable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case key, ingredient, quantity, status, options, selectedId, remembered, rememberedPreferenceId, reason, chosen
+        case key, ingredient, quantity, weightLb, status, options, selectedId, remembered, rememberedPreferenceId, reason, chosen
     }
 
     /// Every field past `key` is optional, so a 0.1 payload (chosen / options /
@@ -614,6 +624,7 @@ public struct CartItem: Codable, Equatable, Identifiable {
         key = try c.decode(String.self, forKey: .key)
         ingredient = try c.decodeIfPresent(String.self, forKey: .ingredient) ?? key
         quantity = try c.decodeIfPresent(Int.self, forKey: .quantity) ?? 1
+        weightLb = try c.decodeIfPresent(Double.self, forKey: .weightLb)
         reason = try c.decodeIfPresent(String.self, forKey: .reason)
         chosen = try c.decodeIfPresent(Product.self, forKey: .chosen)
         let opts = try c.decodeIfPresent([Product].self, forKey: .options)
@@ -692,7 +703,14 @@ public struct SearchResult: Codable, Equatable {
 }
 
 public struct AddResult: Codable, Equatable {
-    public struct Added: Codable, Equatable { public let key: String; public let productId: String; public let name: String; public let quantity: Int }
+    public struct Added: Codable, Equatable {
+        public let key: String
+        public let productId: String
+        public let name: String
+        public let quantity: Int
+        /// Set on an item added by weight: the pounds asked for.
+        public let weightLb: Double?
+    }
     public struct Skipped: Codable, Equatable { public let key: String; public let reason: String }
     public struct Failed: Codable, Equatable { public let key: String; public let productId: String; public let name: String; public let reason: String }
 
@@ -733,16 +751,22 @@ public struct Selection: Codable, Equatable {
     public let remember: Bool?
     /// Required when the chosen Product has `preferences`.
     public let preferenceId: String?
+    /// Pounds, for a Product with `soldByWeight`. Above 0 and at most 20. The
+    /// store writes it by weight where it can (H-E-B, Albertsons family);
+    /// elsewhere the item fails as `weight_not_supported`. Ignored for count items.
+    public let weightLb: Double?
 
-    public init(key: String, productId: String?, quantity: Int? = nil, remember: Bool? = nil, preferenceId: String? = nil) {
+    public init(key: String, productId: String?, quantity: Int? = nil, weightLb: Double? = nil,
+                remember: Bool? = nil, preferenceId: String? = nil) {
         self.key = key
         self.productId = productId
         self.quantity = quantity
+        self.weightLb = weightLb
         self.remember = remember
         self.preferenceId = preferenceId
     }
 
-    private enum CodingKeys: String, CodingKey { case key, productId, quantity, remember, preferenceId }
+    private enum CodingKeys: String, CodingKey { case key, productId, quantity, weightLb, remember, preferenceId }
 
     // productId is always sent, as null for a skip.
     public func encode(to encoder: Encoder) throws {
@@ -750,6 +774,7 @@ public struct Selection: Codable, Equatable {
         try c.encode(key, forKey: .key)
         try c.encode(productId, forKey: .productId)
         try c.encodeIfPresent(quantity, forKey: .quantity)
+        try c.encodeIfPresent(weightLb, forKey: .weightLb)
         try c.encodeIfPresent(remember, forKey: .remember)
         try c.encodeIfPresent(preferenceId, forKey: .preferenceId)
     }

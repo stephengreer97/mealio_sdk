@@ -8,9 +8,24 @@
 import Combine
 import Foundation
 
+/// The weight step (lb) for a sold-by-weight item whose store lists no weights.
+public let WEIGHT_STEP: Double = 0.25
+/// The most a selection may ask for, in lb. The server refuses more.
+public let MAX_WEIGHT_LB: Double = 20
+
+/// The index of the option nearest `v`. The first wins a tie.
+private func nearestIndex(_ opts: [Double], _ v: Double) -> Int {
+    var best = 0
+    for (i, o) in opts.enumerated() where abs(o - v) < abs(opts[best] - v) - 1e-9 {
+        best = i
+    }
+    return best
+}
+
 /// The estimated total of the selected items. Mirrors `estimate()` in client.ts.
 public struct CartEstimate: Equatable {
-    /// Unit price times quantity over the selected items, rounded to cents.
+    /// Unit price times quantity over the selected items (price per lb times
+    /// the weight for a sold-by-weight item), rounded to cents.
     public let total: Double
     /// Selected items.
     public let count: Int
@@ -44,6 +59,8 @@ public final class CartSession: ObservableObject {
     @Published private var extra: [String: [Product]] = [:]
     /// Quantities the user changed, by item key.
     @Published private var qty: [String: Int] = [:]
+    /// Weights (lb) the user changed, by item key.
+    @Published private var lb: [String: Double] = [:]
 
     init(client: MealioClient, cart: PreparedCart) {
         self.client = client
@@ -103,7 +120,81 @@ public final class CartSession: ObservableObject {
         return v
     }
 
+    /// True when the selected product is sold by weight: use `weight(for:)`,
+    /// not `quantity(for:)`.
+    public func isWeight(_ key: String) -> Bool { selected(for: key)?.soldByWeight == true }
+
+    /// The lightest and heaviest weight (lb) the user can pick for the
+    /// selected product: its first and last weight option, else 0.25 to 20.
+    public func weightRange(for key: String) -> ClosedRange<Double> {
+        let opts = weightOptions(for: key)
+        guard let first = opts.first, let last = opts.last else { return WEIGHT_STEP...MAX_WEIGHT_LB }
+        return first...min(MAX_WEIGHT_LB, last)
+    }
+
+    /// Pounds to add for a sold-by-weight item: the user's, else the recipe's
+    /// own weight, else the store's first weight option, else 0.25. Always a
+    /// weight the selected product can be bought in (see `setWeight`). 0 for
+    /// count items.
+    public func weight(for key: String) -> Double {
+        guard isWeight(key) else { return 0 }
+        if let set = lb[key] { return snapWeight(key, set) }
+        if let recipe = find(key)?.weightLb, recipe > 0 { return snapWeight(key, recipe) }
+        return weightOptions(for: key).first ?? WEIGHT_STEP
+    }
+
+    /// Set the weight in lb. Snapped to the nearest weight option when the
+    /// store lists them, else to 0.25 lb steps, and clamped to
+    /// `weightRange(for:)`. Returns what was set.
+    @discardableResult
+    public func setWeight(key: String, to pounds: Double) -> Double {
+        let v = snapWeight(key, pounds.isFinite ? pounds : 0)
+        lb[key] = v
+        return v
+    }
+
+    /// One step heavier (`by: 1`) or lighter (`by: -1`): the next weight
+    /// option, else 0.25 lb. Returns the new weight.
+    @discardableResult
+    public func stepWeight(key: String, by dir: Int) -> Double {
+        let d = dir.signum()
+        let cur = weight(for: key)
+        let opts = weightOptions(for: key)
+        if opts.isEmpty { return setWeight(key: key, to: cur + Double(d) * WEIGHT_STEP) }
+        let i = nearestIndex(opts, cur)
+        return setWeight(key: key, to: opts[max(0, min(opts.count - 1, i + d))])
+    }
+
+    private func weightOptions(for key: String) -> [Double] {
+        let raw = selected(for: key)?.weightOptions ?? []
+        return Array(Set(raw.filter { $0.isFinite && $0 > 0 && $0 <= MAX_WEIGHT_LB })).sorted()
+    }
+
+    private func snapWeight(_ key: String, _ pounds: Double) -> Double {
+        let range = weightRange(for: key)
+        let opts = weightOptions(for: key)
+        let v = max(range.lowerBound, min(range.upperBound, pounds))
+        if !opts.isEmpty { return opts[nearestIndex(opts, v)] }
+        return max(range.lowerBound, min(range.upperBound, (v / WEIGHT_STEP).rounded() * WEIGHT_STEP))
+    }
+
     public func isSelected(_ key: String) -> Bool { picks[key] != nil }
+
+    /// True when the item is ticked but its product offers preferences (H-E-B
+    /// deli slicing, for example) and none is chosen. Such an item stays out
+    /// of `selections()` and `estimate()` until one is, the same rule as the
+    /// Mealio app: a missing preference is a different request from "No
+    /// preference".
+    public func needsPreference(_ key: String) -> Bool {
+        guard let pick = picks[key] else { return false }
+        guard let prefs = selected(for: key)?.preferences, !prefs.isEmpty else { return false }
+        return pick.preferenceId?.isEmpty ?? true
+    }
+
+    /// Keys of ticked items still waiting on a preference, in recipe order.
+    public func pendingPreferences() -> [String] {
+        items.filter { needsPreference($0.key) }.map(\.key)
+    }
     public var selectedCount: Int { picks.count }
 
     /// The selected product for an item, from its options.
@@ -140,14 +231,19 @@ public final class CartSession: ObservableObject {
     }
 
     /// One selection for EVERY item, in recipe order. Selected: the product,
-    /// quantity, `remember: true` and the preference. Not selected:
-    /// `productId: nil, remember: false` (left out this run, not forgotten).
+    /// quantity, `remember: true` and the preference; a sold-by-weight item
+    /// sends quantity 1 and `weightLb`. Not selected, or still waiting on a
+    /// preference (`needsPreference`): `productId: nil, remember: false`
+    /// (left out this run, not forgotten).
     public func selections() -> [Selection] {
         items.map { (it: CartItem) -> Selection in
-            if let p = picks[it.key] {
-                return Selection(key: it.key, productId: p.productId, quantity: min(quantity(for: it.key), maxQuantity(for: it.key)), remember: true, preferenceId: p.preferenceId)
+            guard let p = picks[it.key], !needsPreference(it.key) else {
+                return Selection(key: it.key, productId: nil, remember: false)
             }
-            return Selection(key: it.key, productId: nil, remember: false)
+            if isWeight(it.key) {
+                return Selection(key: it.key, productId: p.productId, quantity: 1, weightLb: weight(for: it.key), remember: true, preferenceId: p.preferenceId)
+            }
+            return Selection(key: it.key, productId: p.productId, quantity: min(quantity(for: it.key), maxQuantity(for: it.key)), remember: true, preferenceId: p.preferenceId)
         }
     }
 
@@ -156,15 +252,29 @@ public final class CartSession: ObservableObject {
         selections().first { $0.key == key }
     }
 
-    /// Estimated total of the selected items: unit price times quantity.
+    /// Estimated total of the selected items: unit price times quantity, and
+    /// for a sold-by-weight item price per lb times the weight (one package
+    /// price when the store prices it as a package). Items waiting on a
+    /// preference are left out.
     public func estimate() -> CartEstimate {
         var total = 0.0
         var count = 0
         var unpriced = 0
         var estimated = false
         for it in items {
-            guard let p = selected(for: it.key) else { continue }
+            guard let p = selected(for: it.key), !needsPreference(it.key) else { continue }
             count += 1
+            if p.soldByWeight == true {
+                estimated = true
+                if let perLb = p.pricePerLb {
+                    total += perLb * weight(for: it.key)
+                } else if let unit = p.unitPrice {
+                    total += unit
+                } else {
+                    unpriced += 1
+                }
+                continue
+            }
             if let unit = p.unitPrice {
                 total += unit * Double(min(quantity(for: it.key), maxQuantity(for: it.key)))
             } else {

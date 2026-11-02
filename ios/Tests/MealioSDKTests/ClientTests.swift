@@ -492,4 +492,164 @@ final class ClientTests: XCTestCase {
         XCTAssertEqual(body["epoch"], .int(9))
         XCTAssertEqual(body["sdk"]?["ops"]?.arrayValue?.count, SUPPORTED_OPS.count)
     }
+
+    // MARK: Sold by weight
+    // Same as the TS "cart session > sold by weight" tests.
+
+    private static let turkeyJSON = #"{"id":"t1","name":"Deli Turkey","soldByWeight":true,"estimated":true,"pricePerLb":10,"unitPrice":10,"weightOptions":[0.25,0.5,0.75,1,1.25]}"#
+    private static let salmonJSON = #"{"id":"s1","name":"Salmon","soldByWeight":true,"estimated":true,"pricePerLb":12,"unitPrice":12}"#
+    private static let brisketJSON = #"{"id":"b1","name":"Brisket, Avg. 4 lbs","soldByWeight":true,"estimated":true,"pricePerLb":null,"unitPrice":32}"#
+
+    /// The turkey item, with `weightLb` when given, and a count item (onion x2 at $1).
+    private static func weightCartJSON(weightLb: Double? = nil) -> String {
+        let w = weightLb.map { #""weightLb":\#($0),"# } ?? ""
+        return #"""
+        {"cartId":"c1","store":"heb","ready":[],"needsChoice":[],"unavailable":[],
+         "items":[
+          {"key":"turkey","ingredient":"deli turkey","quantity":1,\#(w)"status":"remembered","selectedId":"t1",
+           "remembered":\#(turkeyJSON),"options":[\#(turkeyJSON),\#(salmonJSON),\#(brisketJSON)]},
+          {"key":"onion","ingredient":"onion","quantity":2,"status":"remembered","selectedId":"o1","remembered":null,
+           "options":[{"id":"o1","name":"Onion","unitPrice":1}]}
+         ]}
+        """#
+    }
+
+    @MainActor
+    private func weightSession(weightLb: Double? = nil) throws -> CartSession {
+        try makeSession(makeClient(keys: TestSigner.keys), json: ClientTests.weightCartJSON(weightLb: weightLb))
+    }
+
+    @MainActor
+    func testWeightStartsAtTheRecipeWeightElseTheFirstOptionElseAQuarterPound() throws {
+        XCTAssertEqual(try weightSession(weightLb: 0.75).weight(for: "turkey"), 0.75)
+        // A recipe weight the store does not sell becomes the nearest one it does.
+        XCTAssertEqual(try weightSession(weightLb: 0.6).weight(for: "turkey"), 0.5)
+        XCTAssertEqual(try weightSession().weight(for: "turkey"), 0.25)
+        let cs = try weightSession()
+        try cs.select(key: "turkey", productId: "s1")
+        XCTAssertEqual(cs.weight(for: "turkey"), 0.25)
+        XCTAssertEqual(cs.weight(for: "onion"), 0)
+        XCTAssertTrue(cs.isWeight("turkey"))
+        XCTAssertFalse(cs.isWeight("onion"))
+    }
+
+    @MainActor
+    func testSetWeightSnapsToTheOptionsAndClampsToTheirRange() throws {
+        let cs = try weightSession()
+        XCTAssertEqual(cs.setWeight(key: "turkey", to: 0.8), 0.75)
+        XCTAssertEqual(cs.setWeight(key: "turkey", to: 9), 1.25)
+        XCTAssertEqual(cs.setWeight(key: "turkey", to: 0), 0.25)
+        XCTAssertEqual(cs.weightRange(for: "turkey"), 0.25...1.25)
+        XCTAssertEqual(cs.weight(for: "turkey"), 0.25)
+    }
+
+    @MainActor
+    func testWithNoOptionsWeightStepsAQuarterPoundFromAQuarterTo20() throws {
+        let cs = try weightSession()
+        try cs.select(key: "turkey", productId: "s1")
+        XCTAssertEqual(cs.setWeight(key: "turkey", to: 1.1), 1)
+        XCTAssertEqual(cs.setWeight(key: "turkey", to: 1.13), 1.25)
+        XCTAssertEqual(cs.setWeight(key: "turkey", to: 0.01), 0.25)
+        XCTAssertEqual(cs.setWeight(key: "turkey", to: 99), 20)
+        XCTAssertEqual(cs.weightRange(for: "turkey"), 0.25...20)
+        cs.setWeight(key: "turkey", to: 1)
+        XCTAssertEqual(cs.stepWeight(key: "turkey", by: 1), 1.25)
+        XCTAssertEqual(cs.stepWeight(key: "turkey", by: -1), 1)
+    }
+
+    @MainActor
+    func testStepWeightWalksTheOptionsAndStopsAtTheEnds() throws {
+        let cs = try weightSession()
+        XCTAssertEqual(cs.stepWeight(key: "turkey", by: -1), 0.25)
+        XCTAssertEqual(cs.stepWeight(key: "turkey", by: 1), 0.5)
+        cs.setWeight(key: "turkey", to: 1.25)
+        XCTAssertEqual(cs.stepWeight(key: "turkey", by: 1), 1.25)
+        XCTAssertEqual(cs.stepWeight(key: "turkey", by: -1), 1)
+    }
+
+    @MainActor
+    func testSwitchingProductReSnapsTheWeightToTheNewProduct() throws {
+        let cs = try weightSession()
+        try cs.select(key: "turkey", productId: "s1")
+        cs.setWeight(key: "turkey", to: 3)
+        try cs.select(key: "turkey", productId: "t1")
+        XCTAssertEqual(cs.weight(for: "turkey"), 1.25)
+    }
+
+    @MainActor
+    func testSelectionsSendWeightLbForWeightItemsOnly() throws {
+        let cs = try weightSession(weightLb: 1)
+        XCTAssertEqual(cs.selections(), [
+            Selection(key: "turkey", productId: "t1", quantity: 1, weightLb: 1, remember: true),
+            Selection(key: "onion", productId: "o1", quantity: 2, remember: true),
+        ])
+        let wire = try JSONValue(encoding: cs.selections())
+        XCTAssertEqual(wire.arrayValue?[0], ["key": "turkey", "productId": "t1", "quantity": 1, "weightLb": 1, "remember": true])
+        XCTAssertEqual(wire.arrayValue?[1], ["key": "onion", "productId": "o1", "quantity": 2, "remember": true])
+    }
+
+    @MainActor
+    func testWeightEstimateIsPricePerLbTimesTheWeightAndMarkedEstimated() throws {
+        let cs = try weightSession()
+        cs.setWeight(key: "turkey", to: 1.25)
+        let est = cs.estimate()
+        XCTAssertEqual(est.total, 14.5, accuracy: 0.001)
+        XCTAssertTrue(est.estimated)
+        XCTAssertEqual(est.count, 2)
+        // A package-priced weight item counts its price once, whatever the weight.
+        try cs.select(key: "turkey", productId: "b1")
+        cs.setWeight(key: "turkey", to: 3)
+        XCTAssertEqual(cs.estimate().total, 34, accuracy: 0.001)
+        XCTAssertTrue(cs.estimate().estimated)
+    }
+
+    func testWeightFieldsDecodeAndAreOptional() throws {
+        let item = try JSONDecoder().decode(CartItem.self, from: Data(#"{"key":"t","ingredient":"turkey","quantity":1,"weightLb":1.25,"status":"choose","options":[\#(ClientTests.turkeyJSON),\#(ClientTests.brisketJSON)]}"#.utf8))
+        XCTAssertEqual(item.weightLb, 1.25)
+        XCTAssertEqual(item.options[0].pricePerLb, 10)
+        XCTAssertNil(item.options[1].pricePerLb)
+        let old = try JSONDecoder().decode(CartItem.self, from: Data(#"{"key":"o","ingredient":"onion","quantity":1,"status":"choose","options":[{"id":"o1","name":"Onion"}]}"#.utf8))
+        XCTAssertNil(old.weightLb)
+        XCTAssertNil(old.options[0].pricePerLb)
+
+        let add = try JSONDecoder().decode(AddResult.self, from: Data(#"""
+        {"cartId":"c","store":"heb","skipped":[],"failed":[],"storeCartUrl":null,
+         "added":[{"key":"t","productId":"t1","name":"Deli Turkey","quantity":1,"weightLb":1.25},
+                  {"key":"o","productId":"o1","name":"Onion","quantity":2}]}
+        """#.utf8))
+        XCTAssertEqual(add.added[0].weightLb, 1.25)
+        XCTAssertNil(add.added[1].weightLb)
+    }
+
+    // MARK: Preferences
+
+    // Same as the TS "holds an item back from the add and the total until its
+    // preference is chosen" test.
+    @MainActor
+    func testHoldsAnItemBackFromTheAddAndTheTotalUntilItsPreferenceIsChosen() throws {
+        let json = #"""
+        {"cartId":"c1","store":"heb","ready":[],"needsChoice":[],"unavailable":[],
+         "items":[
+          {"key":"onion","ingredient":"onion","quantity":1,"status":"remembered","selectedId":"o1","remembered":{"id":"o1","name":"Onion"},
+           "options":[{"id":"o1","name":"Onion"},{"id":"o2","name":"Red Onion"}]},
+          {"key":"garlic","ingredient":"garlic","quantity":1,"status":"choose","selectedId":null,"remembered":null,
+           "options":[{"id":"g1","name":"Deli Turkey","unitPrice":6,"preferences":[{"id":"thin","label":"Thin"},{"id":"none","label":"No preference"}]}]},
+          {"key":"saffron","ingredient":"saffron","quantity":1,"status":"unavailable","selectedId":null,"remembered":null,"options":[],"reason":"no_results"}
+         ]}
+        """#
+        let cs = try makeSession(makeClient(keys: TestSigner.keys), json: json)
+        try cs.select(key: "garlic", productId: "g1")
+        XCTAssertTrue(cs.needsPreference("garlic"))
+        XCTAssertFalse(cs.needsPreference("onion"))
+        XCTAssertFalse(cs.needsPreference("saffron"))
+        XCTAssertEqual(cs.pendingPreferences(), ["garlic"])
+        XCTAssertEqual(cs.selections()[1], Selection(key: "garlic", productId: nil, remember: false))
+        XCTAssertEqual(cs.estimate().count, 1)
+        try cs.select(key: "garlic", productId: "g1", preferenceId: "thin")
+        XCTAssertFalse(cs.needsPreference("garlic"))
+        XCTAssertEqual(cs.pendingPreferences(), [])
+        XCTAssertEqual(cs.preferenceId(for: "garlic"), "thin")
+        XCTAssertEqual(cs.selections()[1], Selection(key: "garlic", productId: "g1", quantity: 1, remember: true, preferenceId: "thin"))
+        XCTAssertEqual(cs.estimate().count, 2)
+    }
 }
