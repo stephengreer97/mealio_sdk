@@ -6,7 +6,7 @@ import { Allowlist } from './allowlist';
 import { openEnvelope, EnvelopeError } from './verify';
 import { SUPPORTED_OPS } from './protocol';
 import type {
-  AddResult, AllowlistPayload, CartItem, Envelope, PreparedCart, Recipe, Selection, StepRequest,
+  AddResult, AllowlistPayload, CartItem, Envelope, PreparedCart, Product, Recipe, SearchResult, Selection, StepRequest,
 } from './protocol';
 
 export const SDK_CORE_VERSION = '0.1.0';
@@ -39,7 +39,6 @@ interface JobStart { job: string; envelope: Envelope }
 
 export class MealioClient {
   private runner: Runner;
-  private helloDone = false;
   private token: string | null = null;
   private base: string;
   private f: typeof fetch;
@@ -52,33 +51,35 @@ export class MealioClient {
 
   /** Start a cart: signs in to the store if needed, searches every ingredient. */
   async prepareCart(input: { store: string; recipe: Recipe; zip?: string | null }): Promise<CartSession> {
-    await this.hello();
-    const start = await this.post<JobStart>('/api/v1/sdk/carts', input);
+    const start = await this.post<JobStart>('/api/v1/sdk/carts', { ...input, ...(await this.about()) });
     const result = await this.drive(start) as unknown as PreparedCart;
     return new CartSession(this, result);
   }
 
+  /** Search the store again for one item ("minced garlic jar"). */
+  async search(cartId: string, key: string, query: string): Promise<SearchResult> {
+    const start = await this.post<JobStart>(`/api/v1/sdk/carts/${encodeURIComponent(cartId)}/search`, { key, query, ...(await this.about()) });
+    return await this.drive(start) as unknown as SearchResult;
+  }
+
   /** Fill the store cart with the user's choices. */
   async addToCart(cartId: string, selections: Selection[]): Promise<AddResult> {
-    await this.hello();
-    const start = await this.post<JobStart>(`/api/v1/sdk/carts/${encodeURIComponent(cartId)}/add`, { selections });
+    const start = await this.post<JobStart>(`/api/v1/sdk/carts/${encodeURIComponent(cartId)}/add`, { selections, ...(await this.about()) });
     return await this.drive(start) as unknown as AddResult;
   }
 
-  private async hello(): Promise<void> {
-    if (this.helloDone) return;
+  /** Who is calling, carried on every job-starting call (this used to be a separate hello round trip). */
+  private async about(): Promise<{ sdk: Record<string, unknown>; epoch: number }> {
     const epoch = this.cfg.getEpoch ? await this.cfg.getEpoch() : 0;
-    const res = await this.post<{ ok: boolean; allowlist?: Envelope | null }>('/api/v1/sdk/hello', {
-      sdk: { platform: this.cfg.platform, version: this.cfg.sdkVersion, core: SDK_CORE_VERSION, ops: SUPPORTED_OPS },
-      epoch,
-    });
-    if (res.allowlist) {
-      try {
-        const p = openEnvelope(res.allowlist, this.cfg.keys);
-        if (p.kind === 'allowlist') this.runner.allowlist.widen(p as AllowlistPayload);
-      } catch { /* an allowlist we cannot verify is ignored, the bundled one stands */ }
-    }
-    this.helloDone = true;
+    return { sdk: { platform: this.cfg.platform, version: this.cfg.sdkVersion, core: SDK_CORE_VERSION, ops: SUPPORTED_OPS }, epoch };
+  }
+
+  /** Apply a signed allowlist widening, if the server ever sends one. */
+  widenAllowlist(env: Envelope): void {
+    try {
+      const p = openEnvelope(env, this.cfg.keys);
+      if (p.kind === 'allowlist') this.runner.allowlist.widen(p as AllowlistPayload);
+    } catch { /* an allowlist we cannot verify is ignored, the bundled one stands */ }
   }
 
   private async drive(start: JobStart): Promise<unknown> {
@@ -124,7 +125,6 @@ export class MealioClient {
     }
     if (res.status === 401 && !retried) {
       this.token = null;
-      this.helloDone = false;
       return this.post<T>(path, body, true);
     }
     let json: any = null;
@@ -135,48 +135,87 @@ export class MealioClient {
   }
 }
 
-/** A prepared cart the app can show and edit before filling the store cart. */
+/**
+ * A prepared cart. Every item is shown every run. Remembered products start
+ * selected; the user can select another option, search for something else,
+ * or deselect an item to leave it out of THIS run (its remembered choice is
+ * kept for next time).
+ */
 export class CartSession {
-  private picks = new Map<string, Selection>();
+  private picks = new Map<string, { productId: string; preferenceId: string | null }>();
+  private extra = new Map<string, Product[]>();
 
   constructor(private client: MealioClient, public readonly cart: PreparedCart) {
-    for (const it of cart.ready) {
-      if (it.chosen) this.picks.set(it.key, { key: it.key, productId: it.chosen.id, quantity: it.quantity, remember: true });
+    for (const it of this.items) {
+      if (it.selectedId) this.picks.set(it.key, { productId: it.selectedId, preferenceId: it.rememberedPreferenceId ?? null });
     }
   }
 
   get cartId(): string { return this.cart.cartId; }
   get store(): string { return this.cart.store; }
-  get ready(): CartItem[] { return this.cart.ready; }
-  get needsChoice(): CartItem[] { return this.cart.needsChoice; }
-  get unavailable(): CartItem[] { return this.cart.unavailable; }
+  /** Every item in recipe order (older servers: rebuilt from the 0.1 groupings). */
+  get items(): CartItem[] {
+    if (this.cart.items) return this.cart.items;
+    return [...this.cart.ready, ...this.cart.needsChoice, ...this.cart.unavailable];
+  }
+  /** @deprecated */ get ready(): CartItem[] { return this.cart.ready; }
+  /** @deprecated */ get needsChoice(): CartItem[] { return this.cart.needsChoice; }
+  /** @deprecated */ get unavailable(): CartItem[] { return this.cart.unavailable; }
 
-  /** Items still waiting on the user. */
-  pending(): CartItem[] {
-    return this.cart.needsChoice.filter((it) => !this.picks.has(it.key));
+  /** Options for an item, including any found with search(). */
+  options(key: string): Product[] {
+    const it = this.find(key);
+    const base = it ? (it.options || (it.chosen ? [it.chosen] : [])) : [];
+    const more = this.extra.get(key) || [];
+    const seen = new Set(base.map((p) => p.id));
+    return [...base, ...more.filter((p) => !seen.has(p.id))];
   }
 
-  choose(key: string, productId: string, opts: { quantity?: number; remember?: boolean; preferenceId?: string | null } = {}): void {
-    const item = this.find(key);
-    if (!item) throw new MealioError('unknown_item', `No item ${key}`);
-    const known = [item.chosen, ...(item.options || [])].some((p) => p && p.id === productId);
-    if (!known) throw new MealioError('unknown_product', `Product ${productId} was not offered for ${key}`);
-    this.picks.set(key, { key, productId, quantity: opts.quantity ?? item.quantity, remember: opts.remember ?? true, preferenceId: opts.preferenceId ?? null });
+  selectedId(key: string): string | null { return this.picks.get(key)?.productId ?? null; }
+  isSelected(key: string): boolean { return this.picks.has(key); }
+  selectedCount(): number { return this.picks.size; }
+
+  select(key: string, productId: string, opts: { preferenceId?: string | null } = {}): void {
+    if (!this.find(key)) throw new MealioError('unknown_item', `No item ${key}`);
+    if (!this.options(key).some((p) => p.id === productId)) throw new MealioError('unknown_product', `Product ${productId} was not offered for ${key}`);
+    this.picks.set(key, { productId, preferenceId: opts.preferenceId ?? null });
   }
 
-  skip(key: string): void {
-    this.picks.set(key, { key, productId: null, remember: false });
+  /** Leave the item out of this run. Its remembered choice is kept. */
+  deselect(key: string): void { this.picks.delete(key); }
+
+  /** Search the store for something else and add the results to this item's options. */
+  async search(key: string, query: string): Promise<Product[]> {
+    const r = await this.client.search(this.cart.cartId, key, query);
+    const prev = this.extra.get(key) || [];
+    const seen = new Set(prev.map((p) => p.id));
+    this.extra.set(key, [...r.options.filter((p) => !seen.has(p.id)), ...prev]);
+    return r.options;
   }
 
   selections(): Selection[] {
-    return [...this.picks.values()];
+    return this.items.map((it) => {
+      const p = this.picks.get(it.key);
+      return p
+        ? { key: it.key, productId: p.productId, quantity: it.quantity, remember: true, preferenceId: p.preferenceId }
+        : { key: it.key, productId: null, remember: false };
+    });
   }
 
   async addToCart(): Promise<AddResult> {
     return this.client.addToCart(this.cart.cartId, this.selections());
   }
 
+  /** @deprecated use select() */
+  choose(key: string, productId: string, opts: { quantity?: number; remember?: boolean; preferenceId?: string | null } = {}): void {
+    this.select(key, productId, { preferenceId: opts.preferenceId });
+  }
+  /** @deprecated use deselect() */
+  skip(key: string): void { this.deselect(key); }
+  /** @deprecated */
+  pending(): CartItem[] { return this.items.filter((it) => it.status !== 'unavailable' && !this.picks.has(it.key)); }
+
   private find(key: string): CartItem | undefined {
-    return [...this.cart.ready, ...this.cart.needsChoice].find((i) => i.key === key);
+    return this.items.find((i) => i.key === key);
   }
 }

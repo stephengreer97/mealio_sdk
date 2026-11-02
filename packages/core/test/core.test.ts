@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import vm from 'node:vm';
 import vectors from '../../../protocol/test-vectors.json';
 import {
-  Allowlist, GUARD_SCRIPT, Runner, matches, openEnvelope, checkInstructions, EnvelopeError, MealioClient,
+  Allowlist, GUARD_SCRIPT, Runner, matches, openEnvelope, checkInstructions, EnvelopeError, MealioClient, CartSession,
   type Host, type Envelope, type Matcher,
 } from '../src';
 
@@ -126,8 +126,11 @@ describe('client', () => {
     const fetchImpl = (async (url: string, init: any) => {
       seen.push(url.replace('https://mealio.test', ''));
       const body = (o: unknown) => ({ ok: true, status: 200, json: async () => o });
-      if (url.endsWith('/hello')) return body({ ok: true });
-      if (url.endsWith('/carts')) return body({ job: 'job_test', envelope: c1 });
+      if (url.endsWith('/carts')) {
+        // Who is calling rides on the first call: no separate hello round trip.
+        expect(JSON.parse(init.body).sdk.platform).toBe('web-test');
+        return body({ job: 'job_test', envelope: c1 });
+      }
       if (url.endsWith('/step')) {
         const b = JSON.parse(init.body);
         expect(b.seq).toBe(1);
@@ -142,7 +145,7 @@ describe('client', () => {
     }, fakeHost());
     // done result is not a PreparedCart here, the point is the loop.
     const session = await client.prepareCart({ store: 'heb', recipe: { id: 'r1', ingredients: [] } }).catch((e) => e);
-    expect(seen).toEqual(['/api/v1/sdk/hello', '/api/v1/sdk/carts', '/api/v1/sdk/jobs/job_test/step']);
+    expect(seen).toEqual(['/api/v1/sdk/carts', '/api/v1/sdk/jobs/job_test/step']);
     expect(session).toBeDefined();
   });
 
@@ -152,12 +155,50 @@ describe('client', () => {
     const fetchImpl = (async () => {
       calls += 1;
       if (calls === 1) return { ok: false, status: 401, json: async () => ({}) };
-      return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      return { ok: true, status: 200, json: async () => ({ job: 'job_test', envelope: vectors.cases[1].envelope }) };
     }) as any;
     const client = new MealioClient({
       publishableKey: 'pk', getSessionToken: async () => `t${++tokens}`, platform: 'web-test', sdkVersion: '0', fetchImpl, keys: KEYS,
     }, fakeHost());
-    await (client as any).hello();
+    // seq 2 vector is the first envelope here only for the retry check; it fails the seq check after.
+    await client.addToCart('c1', []).catch(() => {});
     expect(tokens).toBe(2);
+  });
+});
+
+describe('cart session', () => {
+  const prepared = {
+    cartId: 'c1', store: 'heb',
+    items: [
+      { key: 'onion', ingredient: 'onion', quantity: 1, status: 'remembered', selectedId: 'o1', remembered: { id: 'o1', name: 'Onion' },
+        options: [{ id: 'o1', name: 'Onion' }, { id: 'o2', name: 'Red Onion' }] },
+      { key: 'garlic', ingredient: 'garlic', quantity: 1, status: 'choose', selectedId: null, remembered: null,
+        options: [{ id: 'g1', name: 'Garlic' }] },
+      { key: 'saffron', ingredient: 'saffron', quantity: 1, status: 'unavailable', selectedId: null, remembered: null, options: [], reason: 'no_results' },
+    ],
+    ready: [], needsChoice: [], unavailable: [],
+  } as any;
+
+  it('starts with remembered items selected, and deselecting leaves them out without forgetting', () => {
+    const cs = new CartSession({} as any, prepared);
+    expect(cs.isSelected('onion')).toBe(true);
+    expect(cs.isSelected('garlic')).toBe(false);
+    cs.select('garlic', 'g1');
+    cs.deselect('onion');
+    expect(cs.selections()).toEqual([
+      { key: 'onion', productId: null, remember: false },
+      { key: 'garlic', productId: 'g1', quantity: 1, remember: true, preferenceId: null },
+      { key: 'saffron', productId: null, remember: false },
+    ]);
+  });
+
+  it('adds searched products to an item and lets the user pick one', async () => {
+    const client = { search: async () => ({ key: 'garlic', query: 'jar', options: [{ id: 'g9', name: 'Minced Garlic Jar' }] }) } as any;
+    const cs = new CartSession(client, prepared);
+    await cs.search('garlic', 'jar');
+    expect(cs.options('garlic').map((p) => p.id)).toEqual(['g1', 'g9']);
+    cs.select('garlic', 'g9');
+    expect(cs.selectedId('garlic')).toBe('g9');
+    expect(() => cs.select('garlic', 'nope')).toThrow();
   });
 });

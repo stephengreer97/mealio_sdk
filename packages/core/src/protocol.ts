@@ -138,24 +138,46 @@ export interface Product {
   preferences?: Array<{ id: string; label: string }>;
 }
 
+export type ItemStatus = 'remembered' | 'choose' | 'remembered_unavailable' | 'unavailable';
+
 export interface CartItem {
   key: string;
   ingredient: string;
   quantity: number;
-  /** Set when the user chose this product before for this recipe and it is in stock. */
-  chosen?: Product | null;
-  /** Up to 8 options, best first. Present when the user still has to choose. */
-  options?: Product[];
-  /** Why nothing could be offered, e.g. "no_results". */
+  /**
+   * remembered              the user's remembered product, in stock, pre-selected
+   * choose                  nothing remembered yet: the user picks
+   * remembered_unavailable  the remembered product is out of stock or gone this time
+   * unavailable             nothing found; `reason` says why
+   */
+  status: ItemStatus;
+  /** Every option, best first. The remembered product leads when the store has it. */
+  options: Product[];
+  /** Pre-selected product id for this run, or null. */
+  selectedId: string | null;
+  /** The user's remembered product, whatever its stock. */
+  remembered: Product | null;
+  rememberedPreferenceId?: string | null;
   reason?: string | null;
+  /** @deprecated 0.1 shape. */
+  chosen?: Product | null;
 }
 
 export interface PreparedCart {
   cartId: string;
   store: string;
+  /** Every recipe line, in recipe order. Show them all. */
+  items: CartItem[];
+  /** @deprecated 0.1 groupings derived from items. */
   ready: CartItem[];
   needsChoice: CartItem[];
   unavailable: CartItem[];
+}
+
+export interface SearchResult {
+  key: string;
+  query: string;
+  options: Product[];
 }
 
 export interface AddResult {
@@ -171,7 +193,11 @@ export interface Selection {
   key: string;
   productId: string | null;
   quantity?: number;
-  /** Save this choice for the next time this recipe is carted. Default true. */
+  /**
+   * Save this product as the remembered choice. Default true. A selection with
+   * productId null leaves the item out of this run and never forgets the
+   * remembered choice.
+   */
   remember?: boolean;
   /** Required when the chosen Product has `preferences`. */
   preferenceId?: string | null;
