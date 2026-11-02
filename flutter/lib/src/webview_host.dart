@@ -13,6 +13,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
@@ -31,7 +32,7 @@ const String bridgeChannelName = '__mealioNativeBridge';
 /// idempotent, so it is safe to inject on every page start and before every
 /// script.
 const String bridgeInjection =
-    'window.__mealioNativePost = function(s){ __mealioNativeBridge.postMessage(s) };' + bridgeShim;
+    'window.__mealioNativePost = function(s){ __mealioNativeBridge.postMessage(s) };$bridgeShim';
 
 /// Message type the in-page fetch posts back. Never collected by `runScript`.
 const String fetchResultType = 'MEALIO_FETCH_RESULT';
