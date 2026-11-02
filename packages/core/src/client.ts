@@ -299,6 +299,24 @@ export class CartSession {
   }
 
   isSelected(key: string): boolean { return this.picks.has(key); }
+
+  /** The preference chosen for an item's product, or null. */
+  preferenceId(key: string): string | null { return this.picks.get(key)?.preferenceId ?? null; }
+
+  /**
+   * True when the item is ticked but its product offers preferences (H-E-B
+   * deli slicing, for example) and none is chosen. Such an item stays out of
+   * the add and the total until one is, the same rule as the Mealio app: a
+   * missing preference is a different request from "No preference".
+   */
+  needsPreference(key: string): boolean {
+    if (!this.picks.has(key)) return false;
+    const prefs = this.selected(key)?.preferences;
+    return !!prefs && prefs.length > 0 && !this.picks.get(key)?.preferenceId;
+  }
+
+  /** Keys of ticked items still waiting on a preference. */
+  pendingPreferences(): string[] { return this.items.filter((it) => this.needsPreference(it.key)).map((it) => it.key); }
   selectedCount(): number { return this.picks.size; }
 
   select(key: string, productId: string, opts: { preferenceId?: string | null } = {}): void {
@@ -322,7 +340,7 @@ export class CartSession {
   selections(): Selection[] {
     return this.items.map((it) => {
       const p = this.picks.get(it.key);
-      if (!p) return { key: it.key, productId: null, remember: false };
+      if (!p || this.needsPreference(it.key)) return { key: it.key, productId: null, remember: false };
       if (this.isWeight(it.key)) {
         return { key: it.key, productId: p.productId, quantity: 1, weightLb: this.weight(it.key), remember: true, preferenceId: p.preferenceId };
       }
@@ -350,7 +368,7 @@ export class CartSession {
     let total = 0, count = 0, unpriced = 0, estimated = false;
     for (const it of this.items) {
       const p = this.selected(it.key);
-      if (!p) continue;
+      if (!p || this.needsPreference(it.key)) continue;
       count += 1;
       if (p.soldByWeight) {
         estimated = true;

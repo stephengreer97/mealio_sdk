@@ -295,6 +295,22 @@ describe('cart session', () => {
     });
   });
 
+  it('holds an item back from the add and the total until its preference is chosen', () => {
+    const p4 = JSON.parse(JSON.stringify(prepared));
+    p4.items[1].options = [{ id: 'g1', name: 'Deli Turkey', unitPrice: 6, preferences: [{ id: 'thin', label: 'Thin' }, { id: 'none', label: 'No preference' }] }];
+    const cs = new CartSession({} as any, p4);
+    cs.select('garlic', 'g1');
+    expect(cs.needsPreference('garlic')).toBe(true);
+    expect(cs.pendingPreferences()).toEqual(['garlic']);
+    expect(cs.selections()[1]).toEqual({ key: 'garlic', productId: null, remember: false });
+    expect(cs.estimate().count).toBe(1);
+    cs.select('garlic', 'g1', { preferenceId: 'thin' });
+    expect(cs.needsPreference('garlic')).toBe(false);
+    expect(cs.preferenceId('garlic')).toBe('thin');
+    expect(cs.selections()[1]).toMatchObject({ key: 'garlic', productId: 'g1', preferenceId: 'thin' });
+    expect(cs.estimate().count).toBe(2);
+  });
+
   it('adds searched products to an item and lets the user pick one', async () => {
     const client = { search: async () => ({ key: 'garlic', query: 'jar', options: [{ id: 'g9', name: 'Minced Garlic Jar' }] }) } as any;
     const cs = new CartSession(client, prepared);

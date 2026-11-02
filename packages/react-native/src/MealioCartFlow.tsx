@@ -231,6 +231,11 @@ export function CartList({ t, cart, storeName, busy, onChange, onAdd, onChangeSt
         <Text style={[s.small, s.footnote]}>Unchecked items are left out this time only. Your usual picks stay saved for next time. Prices from {storeName}.</Text>
       </ScrollView>
       <View style={s.footer}>
+        {cart.pendingPreferences().length ? (
+          <Text style={[s.small, s.pendingNote]}>
+            {cart.pendingPreferences().length === 1 ? '1 checked item needs' : `${cart.pendingPreferences().length} checked items need`} an option chosen before adding.
+          </Text>
+        ) : null}
         <View style={s.totalRow}>
           <Text style={s.totalLabel}>{est.estimated ? 'Estimated total' : 'Total'}</Text>
           <Text style={s.totalValue}>{est.estimated ? 'about ' : ''}{money(est.total)}</Text>
@@ -326,6 +331,12 @@ function ItemRow({ t, cart, item, storeName, open, onToggleOpen, onChange, disab
         </Pressable>
       </View>
 
+      {on && picked && cart.needsPreference(item.key) ? (
+        <Text style={[s.prefNeeded, { color: t.accent }]} accessibilityLiveRegion="polite">
+          Choose one: {listOr((picked.preferences || []).map((p) => p.label))}
+        </Text>
+      ) : null}
+
       {on && picked ? (() => {
         // Sold by weight: the stepper is pounds, stepping through the store's
         // weights (else 0.25 lb). Otherwise a count, clamped to the store cap.
@@ -388,7 +399,7 @@ function ItemRow({ t, cart, item, storeName, open, onToggleOpen, onChange, disab
           {picked?.preferences?.length ? (
             <View style={s.prefs}>
               {picked.preferences.map((p) => {
-                const selPref = cart.selections().find((x) => x.key === item.key)?.preferenceId === p.id;
+                const selPref = cart.preferenceId(item.key) === p.id;
                 return (
                   <Pressable key={p.id} onPress={() => pick(picked, p.id)} accessibilityRole="radio" accessibilityState={{ selected: selPref }}
                     style={[s.pref, selPref && { backgroundColor: t.accent }]}>
@@ -456,6 +467,12 @@ function lbText(lb: number): string {
 }
 
 /** The price as a row shows it. Sold by the pound: "$9.99/lb est.". */
+/** "A, B or C". */
+function listOr(xs: string[]): string {
+  if (xs.length <= 1) return xs[0] || '';
+  return `${xs.slice(0, -1).join(', ')} or ${xs[xs.length - 1]}`;
+}
+
 function priceText(p: Product): string {
   if (p.soldByWeight && typeof p.pricePerLb === 'number') return `${money(p.pricePerLb)}/lb est.`;
   return `${p.price || ''}${p.estimated ? ' est.' : ''}`.trim();
@@ -576,6 +593,8 @@ function make(t: MealioTheme) {
     stepValue: { ...f, minWidth: 28, textAlign: 'center', fontSize: 16, fontWeight: '700', color: t.text },
     stepValueWide: { minWidth: 64 },
     warnText: { ...f, fontSize: 13, lineHeight: 18, color: t.warnText },
+    prefNeeded: { ...f, fontSize: 13, lineHeight: 18, fontWeight: '600', paddingLeft: 12, paddingRight: 12, paddingBottom: 8 },
+    pendingNote: { color: t.warnText, paddingBottom: 6 },
     expand: { borderTopWidth: 1, borderTopColor: t.border, paddingVertical: 12, gap: 12 },
     optRow: { paddingHorizontal: 12, gap: 10 },
     opt: { width: 136, padding: 10, gap: 6, borderRadius: t.radius, borderWidth: 1, borderColor: t.border, margin: 1, backgroundColor: t.background },
