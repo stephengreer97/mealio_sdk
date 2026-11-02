@@ -14,7 +14,7 @@ const val MAX_INSTRUCTIONS = 64
 /** Clock skew allowed when checking `exp`, in seconds. */
 const val EXP_SKEW_SECONDS = 120L
 
-/** Every op this SDK can run. Sent to the server in hello. */
+/** Every op this SDK can run. Sent to the server with every job-starting call. */
 val SUPPORTED_OPS: List<String> = listOf("page_open", "page_script", "show_login", "fetch", "done", "fail")
 
 /** A signed instruction batch, exactly as the server sent it. */
@@ -305,6 +305,10 @@ data class Product(
     val badge: String? = null,
     /** Variants the user must pick one of (H-E-B "sliced or shaved?"). Pass the id as preferenceId. */
     val preferences: List<ProductPreference> = emptyList(),
+    /** One unit's price as a number, for an estimated total. The server works out "2 for $1.05" style deals. */
+    val unitPrice: Double? = null,
+    /** Sold by weight: the price is the store's estimate. */
+    val estimated: Boolean = false,
 ) {
     companion object {
         fun fromJson(o: JSONObject): Product = Product(
@@ -317,7 +321,25 @@ data class Product(
             badge = o.str("badge"),
             preferences = o.arr("preferences")?.objects()?.map { ProductPreference(it.str("id") ?: "", it.str("label") ?: "") }
                 ?: emptyList(),
+            unitPrice = o.num("unitPrice")?.takeIf { it.isFinite() },
+            estimated = o.bool("estimated") ?: false,
         )
+    }
+}
+
+/** Where an item stands this run. */
+enum class ItemStatus(val wire: String) {
+    /** The user's remembered product, in stock, pre-selected. */
+    REMEMBERED("remembered"),
+    /** Nothing remembered yet: the user picks. */
+    CHOOSE("choose"),
+    /** The remembered product is out of stock or gone this time. */
+    REMEMBERED_UNAVAILABLE("remembered_unavailable"),
+    /** Nothing found; `reason` says why. */
+    UNAVAILABLE("unavailable");
+
+    companion object {
+        fun fromWire(s: String?): ItemStatus? = values().firstOrNull { it.wire == s }
     }
 }
 
@@ -325,39 +347,107 @@ data class CartItem(
     val key: String,
     val ingredient: String,
     val quantity: Int,
-    /** Set when the user chose this product before for this recipe and it is in stock. */
+    /** @deprecated 0.1 shape: the remembered product when it is in stock. Use [remembered] and [selectedId]. */
     val chosen: Product? = null,
-    /** Up to 8 options, best first. Present when the user still has to choose. */
+    /** Every option, best first. The remembered product leads when the store has it. */
     val options: List<Product> = emptyList(),
-    /** Why nothing could be offered, e.g. "no_results". */
+    /** Why nothing could be offered, e.g. "no_results", or why the remembered product is unavailable. */
     val reason: String? = null,
+    val status: ItemStatus = ItemStatus.CHOOSE,
+    /** Pre-selected product id for this run, or null. */
+    val selectedId: String? = null,
+    /** The user's remembered product, whatever its stock. */
+    val remembered: Product? = null,
+    val rememberedPreferenceId: String? = null,
 ) {
     companion object {
-        fun fromJson(o: JSONObject): CartItem = CartItem(
-            key = o.str("key") ?: "",
-            ingredient = o.str("ingredient") ?: "",
-            quantity = o.num("quantity")?.toInt() ?: 1,
-            chosen = o.obj("chosen")?.let { Product.fromJson(it) },
-            options = o.arr("options")?.objects()?.map { Product.fromJson(it) } ?: emptyList(),
-            reason = o.str("reason"),
-        )
+        fun fromJson(o: JSONObject): CartItem = fromJson(o, null)
+
+        /**
+         * `legacy` is the 0.1 grouping the item came from ("ready", "needsChoice",
+         * "unavailable") when the server sent no `items`; it fills in `status`.
+         */
+        internal fun fromJson(o: JSONObject, legacy: String?): CartItem {
+            val chosen = o.obj("chosen")?.let { Product.fromJson(it) }
+            val remembered = o.obj("remembered")?.let { Product.fromJson(it) } ?: chosen
+            var options = o.arr("options")?.objects()?.map { Product.fromJson(it) } ?: emptyList()
+            if (chosen != null && options.none { it.id == chosen.id }) options = listOf(chosen) + options
+            val status = ItemStatus.fromWire(o.str("status")) ?: when (legacy) {
+                "ready" -> if (chosen != null) ItemStatus.REMEMBERED else ItemStatus.CHOOSE
+                "unavailable" -> ItemStatus.UNAVAILABLE
+                else -> ItemStatus.CHOOSE
+            }
+            val selectedId = if (o.has("selectedId")) o.str("selectedId")
+            else if (status == ItemStatus.REMEMBERED) remembered?.id else null
+            return CartItem(
+                key = o.str("key") ?: "",
+                ingredient = o.str("ingredient") ?: "",
+                quantity = o.num("quantity")?.toInt() ?: 1,
+                chosen = chosen,
+                options = options,
+                reason = o.str("reason"),
+                status = status,
+                selectedId = selectedId,
+                remembered = remembered,
+                rememberedPreferenceId = o.str("rememberedPreferenceId"),
+            )
+        }
     }
 }
 
 data class PreparedCart(
     val cartId: String,
     val store: String,
+    /** @deprecated 0.1 groupings derived from items. */
     val ready: List<CartItem>,
     val needsChoice: List<CartItem>,
     val unavailable: List<CartItem>,
+    /** Every recipe line, in recipe order. Show them all. */
+    val items: List<CartItem> = ready + needsChoice + unavailable,
+    /** Display name, e.g. "H-E-B". */
+    val storeName: String? = null,
 ) {
     companion object {
-        fun fromJson(o: JSONObject): PreparedCart = PreparedCart(
-            cartId = o.str("cartId") ?: "",
-            store = o.str("store") ?: "",
-            ready = o.arr("ready")?.objects()?.map { CartItem.fromJson(it) } ?: emptyList(),
-            needsChoice = o.arr("needsChoice")?.objects()?.map { CartItem.fromJson(it) } ?: emptyList(),
-            unavailable = o.arr("unavailable")?.objects()?.map { CartItem.fromJson(it) } ?: emptyList(),
+        fun fromJson(o: JSONObject): PreparedCart {
+            fun group(name: String) = o.arr(name)?.objects()?.map { CartItem.fromJson(it, name) } ?: emptyList()
+            val ready = group("ready")
+            val needsChoice = group("needsChoice")
+            val unavailable = group("unavailable")
+            // Older servers: rebuilt from the 0.1 groupings.
+            val items = o.arr("items")?.objects()?.map { CartItem.fromJson(it, null) } ?: (ready + needsChoice + unavailable)
+            return PreparedCart(
+                cartId = o.str("cartId") ?: "",
+                store = o.str("store") ?: "",
+                ready = ready,
+                needsChoice = needsChoice,
+                unavailable = unavailable,
+                items = items,
+                storeName = o.str("storeName"),
+            )
+        }
+    }
+}
+
+/** A store the SDK supports, from GET /api/v1/stores. */
+data class StoreInfo(
+    val id: String,
+    /** Display name, e.g. "H-E-B". */
+    val name: String,
+    /** "device": runs on the phone with the user's store login. "kroger_api": through Kroger's API. */
+    val via: String,
+) {
+    companion object {
+        fun fromJson(o: JSONObject): StoreInfo = StoreInfo(o.str("id") ?: "", o.str("name") ?: o.str("id") ?: "", o.str("via") ?: "device")
+    }
+}
+
+/** What a search job returns: more options for one item. */
+data class SearchResult(val key: String, val query: String, val options: List<Product>) {
+    companion object {
+        fun fromJson(o: JSONObject): SearchResult = SearchResult(
+            key = o.str("key") ?: "",
+            query = o.str("query") ?: "",
+            options = o.arr("options")?.objects()?.map { Product.fromJson(it) } ?: emptyList(),
         )
     }
 }
@@ -374,6 +464,12 @@ data class AddResult(
     val failed: List<FailedItem>,
     /** Open this to let the user check out on the store's own site or app. */
     val storeCartUrl: String?,
+    /**
+     * True when a cart read after adding confirmed every added item. A failed
+     * item with reason "not_confirmed" was sent but not found in the cart. Null
+     * when the server did not say.
+     */
+    val verified: Boolean? = null,
 ) {
     companion object {
         fun fromJson(o: JSONObject): AddResult = AddResult(
@@ -388,16 +484,20 @@ data class AddResult(
                 FailedItem(it.str("key") ?: "", it.str("productId") ?: "", it.str("name") ?: "", it.str("reason") ?: "")
             } ?: emptyList(),
             storeCartUrl = o.str("storeCartUrl"),
+            verified = o.bool("verified"),
         )
     }
 }
 
-/** One decision the user made. `productId == null` means skip this ingredient. */
+/**
+ * One decision the user made. `productId == null` leaves the item out of this
+ * run and never forgets the remembered choice.
+ */
 data class Selection(
     val key: String,
     val productId: String?,
     val quantity: Int? = null,
-    /** Save this choice for the next time this recipe is carted. */
+    /** Save this product as the remembered choice. The server's default is true. */
     val remember: Boolean? = null,
     /** Required when the chosen Product has `preferences`. */
     val preferenceId: String? = null,

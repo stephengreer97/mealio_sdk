@@ -10,8 +10,12 @@
 //   forward to the WKScriptMessageHandler named "mealio".
 // - `fetch` runs through URLSession with the store's cookies copied from the
 //   WebView cookie store for that request's host.
+// - show_login: while a MealioCartFlow sheet is open, the sign-in WebView is
+//   published in `login` and the flow draws it inside its own sheet (one sheet
+//   for the whole flow). With no flow open, the host presents its own sheet.
 
 #if canImport(UIKit) && canImport(WebKit)
+import Combine
 import UIKit
 import WebKit
 
@@ -29,7 +33,7 @@ enum Bridge {
 }
 
 @MainActor
-public final class WebViewHost: NSObject, MealioHost {
+public final class WebViewHost: NSObject, MealioHost, ObservableObject {
     public typealias Presenter = @MainActor () -> UIViewController?
 
     private let presenter: Presenter
@@ -45,6 +49,16 @@ public final class WebViewHost: NSObject, MealioHost {
     private var loadTimer: Task<Void, Never>?
     private var scriptListener: ((JSONMessage) -> Void)?
     private var cachedUserAgent: String?
+
+    /// The sign-in in progress, while a cart flow sheet is hosting it.
+    @Published var login: LoginSheet?
+    /// Open cart flow sheets that will draw the sign-in themselves.
+    private var flowHosts = 0
+
+    /// A cart flow sheet opened (`true`) or closed (`false`).
+    func hostLogin(_ on: Bool) {
+        flowHosts = max(0, flowHosts + (on ? 1 : -1))
+    }
 
     private lazy var fetchSession: URLSession = {
         // The SDK's own cookie handling: nothing is stored by URLSession, the
@@ -176,14 +190,26 @@ public final class WebViewHost: NSObject, MealioHost {
     // MARK: - show_login
 
     public func showLogin(_ request: LoginRequest) async throws -> LoginOutcome {
-        guard let from = presenter() else {
-            throw MealioError(code: MealioError.Code.unsupported, message: "No view controller to present the store login from")
-        }
         guard let url = URL(string: request.url) else {
             throw MealioError(code: MealioError.Code.blocked, message: "The login URL is not valid")
         }
         let sheet = LoginSheet(request: request)
-        return await sheet.run(from: from, url: url)
+        if flowHosts > 0 {
+            // Inside the open flow sheet: publish it, the flow draws it.
+            let publish: @MainActor (LoginSheet?) -> Void = { [weak self, weak sheet] shown in
+                guard let self = self else { return }
+                if let shown = shown {
+                    self.login = shown
+                } else if self.login == nil || self.login === sheet {
+                    self.login = nil
+                }
+            }
+            return await sheet.run(url: url, mode: .inline(publish))
+        }
+        guard let from = presenter() else {
+            throw MealioError(code: MealioError.Code.unsupported, message: "No view controller to present the store login from")
+        }
+        return await sheet.run(url: url, mode: .modal(from))
     }
 
     // MARK: - fetch
@@ -405,14 +431,24 @@ extension WebViewHost: WKNavigationDelegate {
 
 // MARK: - Login sheet
 
-/// One show_login: a visible WKWebView in a modal sheet, on the same data store
-/// as the hidden WebView.
+/// One show_login: a visible WKWebView on the same data store as the hidden
+/// WebView, either drawn inside the cart flow sheet (`.inline`) or in a modal
+/// sheet of its own (`.modal`). The navigation checks are the same either way.
 @MainActor
 final class LoginSheet: NSObject, WKNavigationDelegate, WKUIDelegate, UIAdaptivePresentationControllerDelegate {
+    enum Mode {
+        /// Present a sheet from this view controller.
+        case modal(UIViewController)
+        /// Hand the sheet to the flow (`self` to show, nil to take it down).
+        case inline(@MainActor (LoginSheet?) -> Void)
+    }
+
     private let request: LoginRequest
     private let doneUrlRegex: NSRegularExpression?
-    private let webView: WKWebView
+    /// The visible sign-in WebView.
+    let webView: WKWebView
     private var nav: UINavigationController?
+    private var unpublish: (@MainActor () -> Void)?
     private var once: ResumeOnce<LoginOutcome>?
     private var messages: [JSONMessage] = []
     private var timers: [Task<Void, Never>] = []
@@ -437,16 +473,31 @@ final class LoginSheet: NSObject, WKNavigationDelegate, WKUIDelegate, UIAdaptive
         webView.uiDelegate = self
     }
 
-    func run(from presenter: UIViewController, url: URL) async -> LoginOutcome {
+    /// The store's own title for the sign-in ("Sign in to H-E-B").
+    var title: String { request.title }
+    var url: String { request.url }
+
+    /// The user closed the sign-in.
+    func cancel() {
+        finish(.cancelled)
+    }
+
+    func run(url: URL, mode: Mode) async -> LoginOutcome {
         await withCheckedContinuation { cont in
             once = ResumeOnce(cont)
-            let screen = LoginViewController(title: request.title, webView: webView) { [weak self] in
-                self?.finish(.cancelled)
+            switch mode {
+            case .modal(let presenter):
+                let screen = LoginViewController(title: request.title, webView: webView) { [weak self] in
+                    self?.finish(.cancelled)
+                }
+                let nav = UINavigationController(rootViewController: screen)
+                nav.presentationController?.delegate = self
+                self.nav = nav
+                presenter.present(nav, animated: true)
+            case .inline(let publish):
+                unpublish = { publish(nil) }
+                publish(self)
             }
-            let nav = UINavigationController(rootViewController: screen)
-            nav.presentationController?.delegate = self
-            self.nav = nav
-            presenter.present(nav, animated: true)
             webView.load(URLRequest(url: url))
 
             timers.append(after(request.timeoutMs) { [weak self] in self?.finish(.timeout) })
@@ -492,6 +543,12 @@ final class LoginSheet: NSObject, WKNavigationDelegate, WKUIDelegate, UIAdaptive
         webView.configuration.userContentController.removeScriptMessageHandler(forName: Bridge.messageHandlerName)
         let outcome = LoginOutcome(outcome: kind, messages: messages)
         let once = self.once
+        if let unpublish = unpublish {
+            self.unpublish = nil
+            unpublish()
+            once?.resume(outcome)
+            return
+        }
         if let nav = nav, nav.presentingViewController != nil {
             nav.dismiss(animated: true) { once?.resume(outcome) }
             // If the dismissal never reports back, do not hang the run.

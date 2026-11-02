@@ -7,13 +7,15 @@ import android.content.Context
  *
  * ```
  * MealioCart.configure(context, "pk_live_...", sessionTokenProvider = { myServer.mealioSessionToken() })
+ * // Compose: MealioCartButton(recipe, store = "heb") runs the whole flow.
+ * // Or by hand:
  * val session = MealioCart.prepareCart("heb", recipe, zip = "78701")
- * session.choose(item.key, item.options.first().id)
+ * session.select(item.key, session.options(item.key).first().id)
  * val result = session.addToCart()
  * ```
  */
 object MealioCart {
-    const val SDK_VERSION = "0.1.0"
+    const val SDK_VERSION = "0.2.0"
 
     private class State(val client: MealioClient, val host: WebViewHost, val sessions: StoreSessions)
 
@@ -61,12 +63,18 @@ object MealioCart {
     val client: MealioClient get() = current().client
 
     /**
-     * Start a cart for `recipe` at `store`. Shows the store's login sheet when
-     * the user is not signed in, then searches every ingredient.
+     * Start a cart for `recipe` at `store`. Shows the store's sign-in when the
+     * user is not signed in (inside an open MealioCartFlow sheet, else in its
+     * own screen), then searches every ingredient. `store` null uses the
+     * user's default store; with none yet it fails with "store_required".
      * Throws MealioException.
      */
-    suspend fun prepareCart(store: String, recipe: Recipe, zip: String? = null): CartSession =
-        current().client.prepareCart(store, recipe, zip)
+    @JvmOverloads
+    suspend fun prepareCart(store: String?, recipe: Recipe, zip: String? = null, onStep: StepListener? = null): CartSession =
+        current().client.prepareCart(store, recipe, zip, onStep)
+
+    /** Stores the SDK supports right now (GET /api/v1/stores). */
+    suspend fun stores(): List<StoreInfo> = current().client.stores()
 
     /** Sign the user out of one store on this device. */
     suspend fun signOutOfStore(store: String) {
@@ -75,7 +83,6 @@ object MealioCart {
         if (hosts != null) s.sessions.clearStore(hosts)
         s.host.reset()
         s.sessions.bumpEpoch()
-        s.client.resetHello()
     }
 
     /**
@@ -88,7 +95,6 @@ object MealioCart {
         s.sessions.clearAll()
         s.host.reset()
         s.sessions.bumpEpoch()
-        s.client.resetHello()
     }
 
     private fun current(): State =

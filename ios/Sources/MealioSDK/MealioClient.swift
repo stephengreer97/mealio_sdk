@@ -1,11 +1,11 @@
-// The partner-facing flow: hello, start a cart, drive the job through step
-// calls, fill the cart. Mirrors packages/core/src/client.ts. This file has no
+// The partner-facing flow: start a cart, drive the job through step calls,
+// search again for one item, fill the cart. Mirrors packages/core/src/client.ts. This file has no
 // UIKit in it; MealioCart (in MealioCart.swift) wires it to the WebViewHost.
 
 import Foundation
 
-/// SDK version, sent as `X-Mealio-SDK: ios/<version>` and in `hello`.
-public let MEALIO_SDK_VERSION = "0.1.0"
+/// SDK version, sent as `X-Mealio-SDK: ios/<version>` and in the `sdk` body field.
+public let MEALIO_SDK_VERSION = "0.2.0"
 /// The version of the reference core this SDK ports.
 public let SDK_CORE_VERSION = "0.1.0"
 public let DEFAULT_BASE_URL = URL(string: "https://mealio.co")!
@@ -43,9 +43,11 @@ public struct MealioError: Error, LocalizedError, Equatable, CustomStringConvert
         public static let unsupported = "unsupported"
         /// Mealio answered with an error or something the SDK could not read.
         public static let server = "server"
-        /// `CartSession.choose` was given a key that is not in the cart.
+        /// No store was given and the user has no default store yet: let them pick one.
+        public static let storeRequired = "store_required"
+        /// `CartSession.select` was given a key that is not in the cart.
         public static let unknownItem = "unknown_item"
-        /// `CartSession.choose` was given a product that was not offered.
+        /// `CartSession.select` was given a product that was not offered.
         public static let unknownProduct = "unknown_product"
         /// `MealioCart.configure` has not been called.
         public static let notConfigured = "not_configured"
@@ -53,8 +55,8 @@ public struct MealioError: Error, LocalizedError, Equatable, CustomStringConvert
 }
 
 /// The store-session epoch: a number the SDK bumps every time it signs out of
-/// a store, kept in UserDefaults. `hello` sends it so the server knows the
-/// device's store sessions changed.
+/// a store, kept in UserDefaults. Every job-starting call sends it as `epoch`
+/// so the server knows the device's store sessions changed.
 public enum StoreEpoch {
     static let defaultsKey = "co.mealio.sdk.storeEpoch"
 
@@ -107,11 +109,34 @@ public struct MealioClientConfig {
     }
 }
 
+/// What the SDK is doing right now, for a progress screen. Inferred from the
+/// server's instruction ids (open-, session-, login-, search-, add-), never
+/// from store specifics.
+public enum Step: String, Equatable, CaseIterable {
+    case connecting
+    case checkingSignIn = "checking_sign_in"
+    case signingIn = "signing_in"
+    case searching
+    case adding
+}
+
+/// Called before each instruction the SDK runs.
+public typealias StepListener = @MainActor (Step, Instruction) -> Void
+
+/// The progress step an instruction belongs to. Mirrors `stepOf` in client.ts.
+public func stepOf(_ ins: Instruction) -> Step {
+    if case .showLogin = ins { return .signingIn }
+    let id = ins.id
+    if id.hasPrefix("search") { return .searching }
+    if id.hasPrefix("add") { return .adding }
+    if id.hasPrefix("session") || id.hasPrefix("resession") { return .checkingSignIn }
+    return .connecting
+}
+
 @MainActor
 public final class MealioClient {
     public let config: MealioClientConfig
     let runner: Runner
-    private var helloDone = false
     private var token: String?
     private let base: String
 
@@ -126,15 +151,48 @@ public final class MealioClient {
         self.base = b
     }
 
-    /// The allowlist in force, including any hosts `hello` widened it with.
+    /// The allowlist in force, including any signed widening applied with `widenAllowlist`.
     public var allowlist: Allowlist { runner.allowlist }
 
+    /// Who is calling, carried in the body of every job-starting call (this
+    /// used to be a separate hello round trip).
+    struct SDKInfo: Encodable { let platform: String; let version: String; let core: String; let ops: [String] }
+
+    private func about() -> (sdk: SDKInfo, epoch: Int) {
+        (SDKInfo(platform: config.platform, version: config.sdkVersion, core: SDK_CORE_VERSION, ops: SUPPORTED_OPS),
+         config.epochProvider())
+    }
+
+    /// Stores the SDK supports right now. Public: no session token is sent.
+    public func stores() async throws -> [StoreInfo] {
+        guard let url = URL(string: base + "/api/v1/stores") else {
+            throw MealioError(code: MealioError.Code.network, message: "Could not reach Mealio")
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        let data: Data
+        do {
+            let (d, _) = try await config.urlSession.data(for: req)
+            data = d
+        } catch {
+            throw MealioError(code: MealioError.Code.network, message: "Could not reach Mealio")
+        }
+        guard let json = JSONValue.parse(data) else {
+            throw MealioError(code: MealioError.Code.network, message: "Could not reach Mealio")
+        }
+        guard let list = json["stores"]?.arrayValue else { return [] }
+        return list.compactMap { try? $0.decode(StoreInfo.self) }
+    }
+
     /// Start a cart: signs in to the store if needed, searches every ingredient.
-    public func prepareCart(store: String, recipe: Recipe, zip: String? = nil) async throws -> CartSession {
-        try await hello()
-        struct Body: Encodable { let store: String; let recipe: Recipe; let zip: String? }
-        let start = try await post("/api/v1/sdk/carts", body: Body(store: store, recipe: recipe, zip: zip))
-        let result = try await drive(start)
+    /// `store` is optional: without it Mealio uses the user's default store,
+    /// and fails with `store_required` when they have none yet.
+    public func prepareCart(store: String? = nil, recipe: Recipe, zip: String? = nil,
+                            onStep: StepListener? = nil) async throws -> CartSession {
+        struct Body: Encodable { let store: String?; let recipe: Recipe; let zip: String?; let sdk: SDKInfo; let epoch: Int }
+        let a = about()
+        let start = try await post("/api/v1/sdk/carts", body: Body(store: store, recipe: recipe, zip: zip, sdk: a.sdk, epoch: a.epoch))
+        let result = try await drive(start, onStep: onStep)
         do {
             return CartSession(client: self, cart: try result.decode(PreparedCart.self))
         } catch {
@@ -142,12 +200,29 @@ public final class MealioClient {
         }
     }
 
+    /// Search the store again for one item ("minced garlic jar").
+    public func search(cartId: String, key: String, query: String,
+                       onStep: StepListener? = nil) async throws -> SearchResult {
+        struct Body: Encodable { let key: String; let query: String; let sdk: SDKInfo; let epoch: Int }
+        let a = about()
+        let start = try await post("/api/v1/sdk/carts/\(MealioClient.encodeComponent(cartId))/search",
+                                   body: Body(key: key, query: query, sdk: a.sdk, epoch: a.epoch))
+        let result = try await drive(start, onStep: onStep)
+        do {
+            return try result.decode(SearchResult.self)
+        } catch {
+            throw MealioError(code: MealioError.Code.server, message: "Mealio sent search results the SDK could not read")
+        }
+    }
+
     /// Fill the store cart with the user's choices.
-    public func addToCart(cartId: String, selections: [Selection]) async throws -> AddResult {
-        try await hello()
-        struct Body: Encodable { let selections: [Selection] }
-        let start = try await post("/api/v1/sdk/carts/\(MealioClient.encodeComponent(cartId))/add", body: Body(selections: selections))
-        let result = try await drive(start)
+    public func addToCart(cartId: String, selections: [Selection],
+                          onStep: StepListener? = nil) async throws -> AddResult {
+        struct Body: Encodable { let selections: [Selection]; let sdk: SDKInfo; let epoch: Int }
+        let a = about()
+        let start = try await post("/api/v1/sdk/carts/\(MealioClient.encodeComponent(cartId))/add",
+                                   body: Body(selections: selections, sdk: a.sdk, epoch: a.epoch))
+        let result = try await drive(start, onStep: onStep)
         do {
             return try result.decode(AddResult.self)
         } catch {
@@ -155,28 +230,20 @@ public final class MealioClient {
         }
     }
 
-    /// Make the next call say hello again (after the store-session epoch changed).
-    public func resetHello() {
-        helloDone = false
-    }
-
-    func hello() async throws {
-        if helloDone { return }
-        struct SDKInfo: Encodable { let platform: String; let version: String; let core: String; let ops: [String] }
-        struct Body: Encodable { let sdk: SDKInfo; let epoch: Int }
-        let body = Body(sdk: SDKInfo(platform: config.platform, version: config.sdkVersion, core: SDK_CORE_VERSION, ops: SUPPORTED_OPS),
-                        epoch: config.epochProvider())
-        let res = try await post("/api/v1/sdk/hello", body: body)
-        if let envJson = res["allowlist"], envJson != .null {
-            // An allowlist we cannot verify is ignored; the bundled one stands.
-            if let p = try? openEnvelope(Envelope(json: envJson), keys: config.keys), let a = p.asAllowlist() {
-                runner.allowlist.widen(a)
-            }
+    /// Apply a signed allowlist widening, if the server ever sends one. An
+    /// allowlist that does not verify is ignored; the bundled one stands.
+    public func widenAllowlist(_ env: Envelope) {
+        if let p = try? openEnvelope(env, keys: config.keys), let a = p.asAllowlist() {
+            runner.allowlist.widen(a)
         }
-        helloDone = true
     }
 
-    private func drive(_ start: JSONValue) async throws -> JSONValue {
+    /// There is no hello call any more: every call carries the epoch. Kept so
+    /// 0.1 code still compiles.
+    @available(*, deprecated, message: "No longer needed: the epoch rides on every call.")
+    public func resetHello() {}
+
+    private func drive(_ start: JSONValue, onStep: StepListener?) async throws -> JSONValue {
         guard let job = start["job"]?.stringValue else {
             throw MealioError(code: MealioError.Code.server, message: "Mealio did not start a job")
         }
@@ -185,7 +252,11 @@ public final class MealioClient {
         for _ in 0..<MealioClient.maxSteps {
             let out: StepOutcome
             do {
-                out = try await runner.run(env, job: job, lastSeq: seq)
+                if let onStep = onStep {
+                    out = try await runner.run(env, job: job, lastSeq: seq) { ins in onStep(stepOf(ins), ins) }
+                } else {
+                    out = try await runner.run(env, job: job, lastSeq: seq)
+                }
             } catch let e as EnvelopeError {
                 let code = e.reason == .unsupportedOp ? MealioError.Code.unsupported : MealioError.Code.badEnvelope
                 throw MealioError(code: code, message: e.description)
@@ -250,7 +321,6 @@ public final class MealioClient {
 
         if status == 401 && !retried {
             self.token = nil
-            self.helloDone = false
             return try await post(path, data: data, retried: true)
         }
         let json = JSONValue.parse(responseData)

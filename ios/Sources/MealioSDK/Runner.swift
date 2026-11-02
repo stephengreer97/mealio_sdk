@@ -33,7 +33,10 @@ public final class Runner {
     }
 
     /// Verify and run one envelope. Throws `EnvelopeError` when it must be refused.
-    public func run(_ env: Envelope?, job: String?, lastSeq: Int) async throws -> StepOutcome {
+    /// `onStep` is called before each instruction that actually runs (not for
+    /// `done`, `fail` or skipped ones), for a progress screen.
+    public func run(_ env: Envelope?, job: String?, lastSeq: Int,
+                    onStep: (@MainActor (Instruction) -> Void)? = nil) async throws -> StepOutcome {
         let payload = try checkInstructions(try openEnvelope(env, keys: keys), job: job, lastSeq: lastSeq)
         var results: [InstructionResult] = []
         var terminal: Terminal?
@@ -43,6 +46,7 @@ public final class Runner {
             if case .done(let d) = ins { terminal = .done(d.result); break }
             if case .fail(let f) = ins { terminal = .fail(code: f.code, message: f.message); break }
             if failed { results.append(Runner.skipped(ins)); continue }
+            onStep?(ins)
             let r = try await one(payload.store, ins)
             results.append(r)
             if !r.ok { failed = true }

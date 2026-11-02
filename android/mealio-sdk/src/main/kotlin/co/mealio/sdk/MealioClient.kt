@@ -13,9 +13,10 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 
-// The partner-facing flow. Port of packages/core/src/client.ts: hello, start a
-// cart, drive the job through step calls until done or fail, and a single
-// retry with a fresh session token on 401.
+// The partner-facing flow. Port of packages/core/src/client.ts: start a job
+// (cart, search or add, each carrying who is calling and the device epoch),
+// drive it through step calls until done or fail, and a single retry with a
+// fresh session token on 401.
 
 const val SDK_CORE_VERSION = "0.1.0"
 const val DEFAULT_BASE_URL = "https://mealio.co"
@@ -23,10 +24,37 @@ const val DEFAULT_BASE_URL = "https://mealio.co"
 /**
  * An error raised to the app. `code` is one of the PROTOCOL.md codes:
  * bad_envelope, blocked, store_unavailable, login_cancelled, session_expired,
- * network, unsupported. Also "server" (Mealio answered with an error),
+ * network, unsupported, store_required. Also "server" (Mealio answered with an error),
  * "unknown_item" / "unknown_product" (CartSession.choose), or any code the
  * server's `fail` instruction carries.
  */
+/**
+ * What the SDK is doing right now, for a progress screen. Inferred from the
+ * server's instruction ids (open-, session-, login-, search-, add-), never from
+ * store specifics.
+ */
+enum class Step(val wire: String) {
+    CONNECTING("connecting"),
+    CHECKING_SIGN_IN("checking_sign_in"),
+    SIGNING_IN("signing_in"),
+    SEARCHING("searching"),
+    ADDING("adding"),
+}
+
+/** Called before each instruction the SDK runs. */
+typealias StepListener = (step: Step, instruction: Instruction) -> Unit
+
+fun stepOf(ins: Instruction): Step {
+    if (ins is Instruction.ShowLogin) return Step.SIGNING_IN
+    val id = ins.id
+    return when {
+        id.startsWith("search") -> Step.SEARCHING
+        id.startsWith("add") -> Step.ADDING
+        id.startsWith("session") || id.startsWith("resession") -> Step.CHECKING_SIGN_IN
+        else -> Step.CONNECTING
+    }
+}
+
 class MealioException(val code: String, message: String, cause: Throwable? = null) : Exception(message, cause)
 
 class MealioConfig(
@@ -50,6 +78,10 @@ data class HttpResponse(val status: Int, val body: String?)
 /** How the client reaches Mealio. Swappable for tests. Throw IOException when there is no answer. */
 interface HttpTransport {
     suspend fun post(url: String, headers: Map<String, String>, body: String): HttpResponse
+
+    /** A plain GET (the public store list). */
+    suspend fun get(url: String, headers: Map<String, String>): HttpResponse =
+        throw IOException("This transport does not do GET")
 }
 
 /** HttpURLConnection on Dispatchers.IO. Never sends store cookies (it has no cookie handler of ours). */
@@ -71,6 +103,25 @@ class UrlConnectionTransport(
                 c.doOutput = true
                 c.setFixedLengthStreamingMode(bytes.size)
                 c.outputStream.use { it.write(bytes) }
+                val status = c.responseCode
+                val stream = if (status >= 400) c.errorStream else c.inputStream
+                val text = stream?.use { it.readBytes().toString(Charsets.UTF_8) }
+                HttpResponse(status, text)
+            } finally {
+                c.disconnect()
+            }
+        }
+
+    override suspend fun get(url: String, headers: Map<String, String>): HttpResponse =
+        withContext(Dispatchers.IO) {
+            val c = URL(url).openConnection() as HttpURLConnection
+            try {
+                c.requestMethod = "GET"
+                c.connectTimeout = connectTimeoutMs
+                c.readTimeout = readTimeoutMs
+                c.useCaches = false
+                c.instanceFollowRedirects = false
+                for ((k, v) in headers) c.setRequestProperty(k, v)
                 val status = c.responseCode
                 val stream = if (status >= 400) c.errorStream else c.inputStream
                 val text = stream?.use { it.readBytes().toString(Charsets.UTF_8) }
@@ -104,62 +155,93 @@ class MealioClient @JvmOverloads constructor(
     /** One run at a time: there is one hidden WebView. */
     private val runLock = Mutex()
 
-    @Volatile private var helloDone = false
     @Volatile private var token: String? = null
 
-    /** The allowlist in force, including hosts a signed hello widened. */
+    /** The allowlist in force, including hosts a signed widening added. */
     val allowlist: Allowlist get() = runner.allowlist
 
-    /** Start a cart: signs in to the store if needed, searches every ingredient. */
-    suspend fun prepareCart(store: String, recipe: Recipe, zip: String? = null): CartSession = runLock.withLock {
-        hello()
-        val body = JSONObject().put("store", store).put("recipe", recipe.toJson()).putNullable("zip", zip)
-        val result = drive(post("/api/v1/sdk/carts", body))
-        val o = result as? JSONObject ?: throw MealioException("server", "Mealio returned no cart")
-        CartSession(this, PreparedCart.fromJson(o))
+    /** Stores the SDK supports right now. Public, no session needed. Throws MealioException "network". */
+    suspend fun stores(): List<StoreInfo> {
+        val res = try {
+            transport.get("$base/api/v1/stores", mapOf("Accept" to "application/json"))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: IOException) {
+            throw MealioException("network", "Could not reach Mealio", e)
+        }
+        val json = try {
+            res.body?.let { parseJson(it) }
+        } catch (e: JSONException) {
+            null
+        } ?: throw MealioException("network", "Could not reach Mealio")
+        return (json as? JSONObject)?.arr("stores")?.objects()?.map { StoreInfo.fromJson(it) } ?: emptyList()
     }
+
+    /**
+     * Start a cart: signs in to the store if needed, searches every ingredient.
+     * `store` is optional: null uses the user's default store, and the job fails
+     * with "store_required" when they have none yet.
+     */
+    @JvmOverloads
+    suspend fun prepareCart(store: String?, recipe: Recipe, zip: String? = null, onStep: StepListener? = null): CartSession =
+        runLock.withLock {
+            val body = about(JSONObject().putNullable("store", store).put("recipe", recipe.toJson()).putNullable("zip", zip))
+            val result = drive(post("/api/v1/sdk/carts", body), onStep)
+            val o = result as? JSONObject ?: throw MealioException("server", "Mealio returned no cart")
+            CartSession(this, PreparedCart.fromJson(o))
+        }
+
+    /** Search the store again for one item ("minced garlic jar"). */
+    @JvmOverloads
+    suspend fun search(cartId: String, key: String, query: String, onStep: StepListener? = null): SearchResult =
+        runLock.withLock {
+            val body = about(JSONObject().put("key", key).put("query", query))
+            val result = drive(post("/api/v1/sdk/carts/${encodeUriComponent(cartId)}/search", body), onStep)
+            val o = result as? JSONObject ?: throw MealioException("server", "Mealio returned no search result")
+            SearchResult.fromJson(o)
+        }
 
     /** Fill the store cart with the user's choices. */
-    suspend fun addToCart(cartId: String, selections: List<Selection>): AddResult = runLock.withLock {
-        hello()
-        val body = JSONObject().put("selections", JSONArray(selections.map { it.toJson() }))
-        val result = drive(post("/api/v1/sdk/carts/${encodeUriComponent(cartId)}/add", body))
-        val o = result as? JSONObject ?: throw MealioException("server", "Mealio returned no add result")
-        AddResult.fromJson(o)
+    @JvmOverloads
+    suspend fun addToCart(cartId: String, selections: List<Selection>, onStep: StepListener? = null): AddResult =
+        runLock.withLock {
+            val body = about(JSONObject().put("selections", JSONArray(selections.map { it.toJson() })))
+            val result = drive(post("/api/v1/sdk/carts/${encodeUriComponent(cartId)}/add", body), onStep)
+            val o = result as? JSONObject ?: throw MealioException("server", "Mealio returned no add result")
+            AddResult.fromJson(o)
+        }
+
+    /** There is no hello call any more; every job-starting call says who is calling. */
+    @Deprecated("No hello call any more. Nothing to reset.")
+    fun resetHello() = Unit
+
+    /** Apply a signed allowlist widening, if the server ever sends one. Unverifiable ones are ignored. */
+    fun widenAllowlist(env: Envelope) {
+        try {
+            AllowlistPayload.fromJson(openEnvelope(env, config.keys))?.let { runner.allowlist.widen(it) }
+        } catch (e: EnvelopeException) {
+            // An allowlist we cannot verify is ignored; the bundled one stands.
+        }
     }
 
-    /** Send hello again on the next run (after a sign-out bumps the epoch). */
-    fun resetHello() {
-        helloDone = false
-    }
-
-    internal suspend fun hello() {
-        if (helloDone) return
+    /** Who is calling and the device epoch, carried on every job-starting call. */
+    private suspend fun about(body: JSONObject): JSONObject {
         val epoch = config.epochProvider?.invoke() ?: 0
         val sdk = JSONObject()
             .put("platform", config.platform)
             .put("version", config.sdkVersion)
             .put("core", SDK_CORE_VERSION)
             .put("ops", JSONArray(SUPPORTED_OPS))
-        val res = post("/api/v1/sdk/hello", JSONObject().put("sdk", sdk).put("epoch", epoch))
-        val env = Envelope.fromJson(res.opt("allowlist"))
-        if (env != null) {
-            try {
-                AllowlistPayload.fromJson(openEnvelope(env, config.keys))?.let { runner.allowlist.widen(it) }
-            } catch (e: EnvelopeException) {
-                // An allowlist we cannot verify is ignored; the bundled one stands.
-            }
-        }
-        helloDone = true
+        return body.put("sdk", sdk).put("epoch", epoch)
     }
 
-    private suspend fun drive(start: JSONObject): Any? {
+    private suspend fun drive(start: JSONObject, onStep: StepListener?): Any? {
         val job = start.opt("job") as? String
         var env = Envelope.fromJson(start.opt("envelope"))
         var seq = 0
         repeat(200) {
             val out = try {
-                runner.run(env, job, seq)
+                runner.run(env, job, seq, onStep?.let { l -> { ins: Instruction -> l(stepOf(ins), ins) } })
             } catch (e: EnvelopeException) {
                 throw MealioException(if (e.why == "unsupported_op") "unsupported" else "bad_envelope", e.message ?: e.why, e)
             }
@@ -203,7 +285,6 @@ class MealioClient @JvmOverloads constructor(
 
         if (res.status == 401 && !retried) {
             token = null
-            helloDone = false
             return post(path, body, true)
         }
         val json = res.body?.let {

@@ -9,7 +9,7 @@ import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
 
 // The user's store logins live in CookieManager and WebStorage. Signing out
-// clears them and bumps a device "epoch" that hello sends, so the server knows
+// clears them and bumps a device "epoch" sent with every job, so the server knows
 // any session it remembers for this device is gone too.
 
 internal class StoreSessions(context: Context) {

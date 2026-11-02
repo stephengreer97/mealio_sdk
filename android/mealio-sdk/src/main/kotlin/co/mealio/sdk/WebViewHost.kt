@@ -30,8 +30,8 @@ import java.net.URL
 import java.nio.charset.Charset
 
 // The Android Host. One hidden WebView holds the store session (cookies and
-// storage, shared process-wide through CookieManager with the login sheet's
-// visible WebView). Every WebView call happens on the main thread.
+// storage, shared process-wide through CookieManager with the visible login
+// WebView, in the cart flow sheet or the login activity). Every WebView call happens on the main thread.
 
 /** The name the page sees for the JavascriptInterface. */
 internal const val NATIVE_BRIDGE_NAME = "__mealioNativeBridge"
@@ -233,10 +233,16 @@ class WebViewHost(context: Context) : Host {
 
     override suspend fun showLogin(request: LoginRequest): LoginResult {
         val session = LoginBroker.open(request)
+        var inline: InlineLogin? = null
         try {
             onMain {
                 CookieManager.getInstance() // make sure the cookie store is up before the sheet
-                appContext.startActivity(MealioLoginActivity.intent(appContext, session.id))
+                if (MealioInlineLogin.hasSheet) {
+                    // A cart flow sheet is open: it shows the sign-in itself.
+                    inline = InlineLogin(session).also { MealioInlineLogin.publish(it) }
+                } else {
+                    appContext.startActivity(MealioLoginActivity.intent(appContext, session.id))
+                }
             }
             val outcome = withTimeoutOrNull(request.timeoutMs) { session.result.await() }
                 ?: run {
@@ -248,6 +254,7 @@ class WebViewHost(context: Context) : Host {
             // Closes the sheet if it is still up (timeout or a cancelled run).
             session.complete(LoginOutcome.CANCELLED)
             LoginBroker.close(session.id)
+            inline?.let { l -> withContext(NonCancellable + Dispatchers.Main) { MealioInlineLogin.clear(l) } }
         }
     }
 

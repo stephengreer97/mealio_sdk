@@ -12,7 +12,8 @@ public let MAX_INSTRUCTIONS = 64
 /// Clock skew allowed when checking `exp`, in seconds.
 public let EXP_SKEW_SECONDS: Double = 120
 
-/// Every instruction `op` this SDK can run. Sent to the server in `hello`.
+/// Every instruction `op` this SDK can run. Sent to the server in the `sdk`
+/// field of every job-starting call.
 public let SUPPORTED_OPS: [String] = ["page_open", "page_script", "show_login", "fetch", "done", "fail"]
 
 // MARK: - JSON
@@ -482,6 +483,11 @@ public struct StepRequest: Codable, Equatable {
 public struct ProductPreference: Codable, Equatable, Identifiable {
     public let id: String
     public let label: String
+
+    public init(id: String, label: String) {
+        self.id = id
+        self.label = label
+    }
 }
 
 public struct Product: Codable, Equatable, Identifiable {
@@ -497,28 +503,178 @@ public struct Product: Codable, Equatable, Identifiable {
     /// Variants the user must pick one of before this product can be added.
     /// Pass the chosen id as `preferenceId`.
     public let preferences: [ProductPreference]?
+    /// One unit's price as a number, for an estimated total.
+    public let unitPrice: Double?
+    /// Sold by weight: the price is the store's estimate. False when the
+    /// server did not say.
+    public let estimated: Bool
+
+    public init(id: String, name: String, price: String? = nil, imageUrl: String? = nil, size: String? = nil,
+                outOfStock: Bool? = nil, badge: String? = nil, preferences: [ProductPreference]? = nil,
+                unitPrice: Double? = nil, estimated: Bool = false) {
+        self.id = id
+        self.name = name
+        self.price = price
+        self.imageUrl = imageUrl
+        self.size = size
+        self.outOfStock = outOfStock
+        self.badge = badge
+        self.preferences = preferences
+        self.unitPrice = unitPrice
+        self.estimated = estimated
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, price, imageUrl, size, outOfStock, badge, preferences, unitPrice, estimated
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+        price = try c.decodeIfPresent(String.self, forKey: .price)
+        imageUrl = try c.decodeIfPresent(String.self, forKey: .imageUrl)
+        size = try c.decodeIfPresent(String.self, forKey: .size)
+        outOfStock = try c.decodeIfPresent(Bool.self, forKey: .outOfStock)
+        badge = try c.decodeIfPresent(String.self, forKey: .badge)
+        preferences = try c.decodeIfPresent([ProductPreference].self, forKey: .preferences)
+        unitPrice = try c.decodeIfPresent(Double.self, forKey: .unitPrice)
+        estimated = try c.decodeIfPresent(Bool.self, forKey: .estimated) ?? false
+    }
+}
+
+/// Where an item stands when the cart is prepared.
+public enum ItemStatus: String, Codable, Equatable {
+    /// The user's remembered product, in stock, pre-selected.
+    case remembered
+    /// Nothing remembered yet: the user picks.
+    case choose
+    /// The remembered product is out of stock or gone this time.
+    case rememberedUnavailable = "remembered_unavailable"
+    /// Nothing found; `reason` says why.
+    case unavailable
 }
 
 public struct CartItem: Codable, Equatable, Identifiable {
     public let key: String
     public let ingredient: String
     public let quantity: Int
-    /// Set when the user chose this product before for this recipe and it is in stock.
-    public let chosen: Product?
-    /// Up to 8 options, best first. Present when the user still has to choose.
-    public let options: [Product]?
+    public let status: ItemStatus
+    /// Every option, best first. The remembered product leads when the store has it.
+    public let options: [Product]
+    /// Pre-selected product id for this run, or nil.
+    public let selectedId: String?
+    /// The user's remembered product, whatever its stock.
+    public let remembered: Product?
+    public let rememberedPreferenceId: String?
     /// Why nothing could be offered, e.g. "no_results".
     public let reason: String?
+    /// Deprecated 0.1 shape: the remembered product when it was in stock.
+    public let chosen: Product?
 
     public var id: String { key }
+
+    public init(key: String, ingredient: String, quantity: Int = 1, status: ItemStatus, options: [Product] = [],
+                selectedId: String? = nil, remembered: Product? = nil, rememberedPreferenceId: String? = nil,
+                reason: String? = nil, chosen: Product? = nil) {
+        self.key = key
+        self.ingredient = ingredient
+        self.quantity = quantity
+        self.status = status
+        self.options = options
+        self.selectedId = selectedId
+        self.remembered = remembered
+        self.rememberedPreferenceId = rememberedPreferenceId
+        self.reason = reason
+        self.chosen = chosen
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case key, ingredient, quantity, status, options, selectedId, remembered, rememberedPreferenceId, reason, chosen
+    }
+
+    /// Every field past `key` is optional, so a 0.1 payload (chosen / options /
+    /// reason only) still decodes, with the new fields derived from it.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        key = try c.decode(String.self, forKey: .key)
+        ingredient = try c.decodeIfPresent(String.self, forKey: .ingredient) ?? key
+        quantity = try c.decodeIfPresent(Int.self, forKey: .quantity) ?? 1
+        reason = try c.decodeIfPresent(String.self, forKey: .reason)
+        chosen = try c.decodeIfPresent(Product.self, forKey: .chosen)
+        let opts = try c.decodeIfPresent([Product].self, forKey: .options)
+        remembered = try c.decodeIfPresent(Product.self, forKey: .remembered) ?? chosen
+        rememberedPreferenceId = try c.decodeIfPresent(String.self, forKey: .rememberedPreferenceId)
+        let derived: ItemStatus = chosen != nil ? .remembered : ((opts?.isEmpty ?? true) ? .unavailable : .choose)
+        let st = (try c.decodeIfPresent(String.self, forKey: .status)).flatMap { ItemStatus(rawValue: $0) } ?? derived
+        status = st
+        options = opts ?? (chosen.map { [$0] } ?? [])
+        if c.contains(.selectedId) {
+            selectedId = try c.decodeIfPresent(String.self, forKey: .selectedId)
+        } else {
+            selectedId = st == .remembered ? (chosen ?? remembered)?.id : nil
+        }
+    }
 }
 
 public struct PreparedCart: Codable, Equatable {
     public let cartId: String
     public let store: String
+    /// Display name, e.g. "H-E-B".
+    public let storeName: String?
+    /// Every recipe line, in recipe order. Show them all. Rebuilt from the
+    /// 0.1 groupings when an older server leaves it out.
+    public let items: [CartItem]
+    /// Deprecated 0.1 groupings derived from `items`.
     public let ready: [CartItem]
     public let needsChoice: [CartItem]
     public let unavailable: [CartItem]
+
+    public init(cartId: String, store: String, storeName: String? = nil, items: [CartItem],
+                ready: [CartItem] = [], needsChoice: [CartItem] = [], unavailable: [CartItem] = []) {
+        self.cartId = cartId
+        self.store = store
+        self.storeName = storeName
+        self.items = items
+        self.ready = ready
+        self.needsChoice = needsChoice
+        self.unavailable = unavailable
+    }
+
+    private enum CodingKeys: String, CodingKey { case cartId, store, storeName, items, ready, needsChoice, unavailable }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        cartId = try c.decode(String.self, forKey: .cartId)
+        store = try c.decode(String.self, forKey: .store)
+        storeName = try c.decodeIfPresent(String.self, forKey: .storeName)
+        ready = try c.decodeIfPresent([CartItem].self, forKey: .ready) ?? []
+        needsChoice = try c.decodeIfPresent([CartItem].self, forKey: .needsChoice) ?? []
+        unavailable = try c.decodeIfPresent([CartItem].self, forKey: .unavailable) ?? []
+        items = try c.decodeIfPresent([CartItem].self, forKey: .items) ?? (ready + needsChoice + unavailable)
+    }
+}
+
+/// What `POST /api/v1/sdk/carts/{cartId}/search` hands back when its job is done.
+public struct SearchResult: Codable, Equatable {
+    public let key: String
+    public let query: String
+    public let options: [Product]
+
+    private enum CodingKeys: String, CodingKey { case key, query, options }
+
+    public init(key: String, query: String, options: [Product]) {
+        self.key = key
+        self.query = query
+        self.options = options
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        key = try c.decodeIfPresent(String.self, forKey: .key) ?? ""
+        query = try c.decodeIfPresent(String.self, forKey: .query) ?? ""
+        options = try c.decodeIfPresent([Product].self, forKey: .options) ?? []
+    }
 }
 
 public struct AddResult: Codable, Equatable {
@@ -532,9 +688,29 @@ public struct AddResult: Codable, Equatable {
     public let skipped: [Skipped]
     public let failed: [Failed]
     public let storeCartUrl: String?
+    /// True when a cart read after adding confirmed every added item. An
+    /// item the read did not find comes back in `failed` with reason
+    /// "not_confirmed".
+    public let verified: Bool?
 }
 
-/// The user's decision for one item. `productId` nil means skip it.
+/// One store the SDK supports, from `GET /api/v1/stores`.
+public struct StoreInfo: Codable, Equatable, Identifiable {
+    public let id: String
+    public let name: String
+    /// "device": runs on the phone with the user's store login.
+    /// "kroger_api": through Kroger's API.
+    public let via: String?
+
+    public init(id: String, name: String, via: String? = nil) {
+        self.id = id
+        self.name = name
+        self.via = via
+    }
+}
+
+/// The user's decision for one item. `productId` nil leaves it out of this
+/// run; with `remember: false` the remembered choice is kept for next time.
 public struct Selection: Codable, Equatable {
     public let key: String
     public let productId: String?

@@ -27,9 +27,11 @@ import org.json.JSONObject
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
-// The store login sheet: a full-screen activity with a title bar, a Close
-// button and a VISIBLE WebView. It shares the hidden WebView's session because
-// CookieManager and WebStorage are process-wide.
+// The store login. A VISIBLE WebView shares the hidden WebView's session
+// because CookieManager and WebStorage are process-wide. It shows either inside
+// an open MealioCartFlow sheet (MealioInlineLogin) or, when no flow sheet is
+// open, in this full-screen activity with a title bar and a Close button.
+// LoginWebController holds the one copy of the WebView rules both use.
 //
 // The host hands the request over through LoginBroker (in-process, by id)
 // because a LoginRequest holds a callback and cannot go in an Intent.
@@ -69,20 +71,134 @@ internal object LoginBroker {
     }
 }
 
-class MealioLoginActivity : Activity() {
+/**
+ * The visible login WebView and its rules: every top-frame navigation is asked
+ * of allowNavigation, a doneWhenUrl match or a doneWhen message means signed
+ * in, and the check script is injected after each load and on its interval.
+ * Main thread only.
+ */
+internal class LoginWebController(
+    context: Context,
+    private val session: LoginSession,
+    /** The renderer died; the session is already completed as cancelled. */
+    private val onGone: () -> Unit = {},
+) {
     private val handler = Handler(Looper.getMainLooper())
-    private var session: LoginSession? = null
-    private var webView: WebView? = null
     private var docStartScript = false
-    private var doneUrl: Regex? = null
+    // doneWhenUrl is a JavaScript regex source. java.util.regex reads the
+    // patterns the server uses (plain URL prefixes and escapes) the same way.
+    private val doneUrl: Regex? = session.request.doneWhenUrl?.takeIf { it.isNotEmpty() }
+        ?.let { runCatching { Regex(it) }.getOrNull() }
+
+    var webView: WebView? = null
+        private set
 
     private val tick = object : Runnable {
         override fun run() {
             injectCheck()
-            val c = session?.request?.check ?: return
+            val c = session.request.check ?: return
             handler.postDelayed(this, c.intervalMs.coerceAtLeast(MIN_INTERVAL_MS))
         }
     }
+
+    init {
+        val wv = WebView(context)
+        docStartScript = configureMealioWebView(wv, MealioNativeBridge { raw -> session.onMessage(raw) })
+        wv.webViewClient = LoginClient()
+        webView = wv
+    }
+
+    fun start() {
+        val wv = webView ?: return
+        wv.loadUrl(session.request.url)
+        session.request.check?.let { handler.postDelayed(tick, it.intervalMs.coerceAtLeast(MIN_INTERVAL_MS)) }
+    }
+
+    /** Back inside the store's pages. False when there is nowhere to go back to. */
+    fun goBack(): Boolean {
+        val wv = webView ?: return false
+        if (!wv.canGoBack()) return false
+        wv.goBack()
+        return true
+    }
+
+    fun destroy() {
+        handler.removeCallbacksAndMessages(null)
+        CookieManager.getInstance().flush()
+        webView?.let {
+            it.stopLoading()
+            (it.parent as? ViewGroup)?.removeView(it)
+            it.destroy()
+        }
+        webView = null
+    }
+
+    /** Inject GUARD_SCRIPT then the server's check script into the visible page. */
+    private fun injectCheck() {
+        val wv = webView ?: return
+        val c = session.request.check ?: return
+        if (session.result.isCompleted) return
+        wv.evaluateJavascript(BOOTSTRAP_SCRIPT, null)
+        wv.evaluateJavascript(session.request.guard, null)
+        wv.evaluateJavascript(c.script, null)
+    }
+
+    /** A main-frame URL matching doneWhenUrl means signed in. */
+    private fun urlMeansDone(url: String): Boolean {
+        val re = doneUrl ?: return false
+        if (!re.containsMatchIn(url)) return false
+        session.complete(LoginOutcome.SIGNED_IN)
+        return true
+    }
+
+    /** May the main frame go to `url`? Asks the allowlist through the runner. */
+    private fun admit(url: String): Boolean {
+        if (urlMeansDone(url)) return false // signed in; no need to load it
+        if (url == "about:blank") return true
+        return session.request.allowNavigation(url)
+    }
+
+    private inner class LoginClient : WebViewClient() {
+        override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+            if (request == null || !request.isForMainFrame) return false
+            val url = request.url?.toString() ?: return true
+            return !admit(url)
+        }
+
+        override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+            if (!docStartScript) view?.evaluateJavascript(BOOTSTRAP_SCRIPT, null)
+            // Backstop for navigations shouldOverrideUrlLoading does not see
+            // (POST form submissions).
+            if (url != null && !admit(url)) view?.stopLoading()
+        }
+
+        override fun onPageFinished(view: WebView?, url: String?) {
+            if (url != null && urlMeansDone(url)) return
+            injectCheck()
+        }
+
+        override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+            session.complete(LoginOutcome.CANCELLED)
+            if (view != null && view === webView) {
+                webView = null
+                handler.removeCallbacksAndMessages(null)
+                (view.parent as? ViewGroup)?.removeView(view)
+                view.destroy()
+            }
+            onGone()
+            return true
+        }
+    }
+
+    companion object {
+        private const val MIN_INTERVAL_MS = 500L
+    }
+}
+
+class MealioLoginActivity : Activity() {
+    private val handler = Handler(Looper.getMainLooper())
+    private var session: LoginSession? = null
+    private var controller: LoginWebController? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -93,22 +209,13 @@ class MealioLoginActivity : Activity() {
             return
         }
         session = s
-        val req = s.request
-        // doneWhenUrl is a JavaScript regex source. java.util.regex reads the
-        // patterns the server uses (plain URL prefixes and escapes) the same way.
-        doneUrl = req.doneWhenUrl?.takeIf { it.isNotEmpty() }?.let { runCatching { Regex(it) }.getOrNull() }
-
-        val wv = WebView(this)
-        docStartScript = configureMealioWebView(wv, MealioNativeBridge { raw -> s.onMessage(raw) })
-        wv.webViewClient = LoginClient()
-        webView = wv
-        setContentView(layout(req.title, wv))
+        val c = LoginWebController(this, s, onGone = { finish() })
+        controller = c
+        setContentView(layout(s.request.title, c.webView!!))
 
         // Any outcome (signed in, Close, timeout, cancelled run) closes the sheet.
         s.result.invokeOnCompletion { handler.post { if (!isFinishing) finish() } }
-
-        wv.loadUrl(req.url)
-        req.check?.let { handler.postDelayed(tick, it.intervalMs.coerceAtLeast(MIN_INTERVAL_MS)) }
+        c.start()
     }
 
     private fun layout(title: String, wv: WebView): View {
@@ -156,73 +263,12 @@ class MealioLoginActivity : Activity() {
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
-    /** Inject GUARD_SCRIPT then the server's check script into the visible page. */
-    private fun injectCheck() {
-        val wv = webView ?: return
-        val s = session ?: return
-        val c = s.request.check ?: return
-        if (s.result.isCompleted) return
-        wv.evaluateJavascript(BOOTSTRAP_SCRIPT, null)
-        wv.evaluateJavascript(s.request.guard, null)
-        wv.evaluateJavascript(c.script, null)
-    }
-
-    /** A main-frame URL matching doneWhenUrl means signed in. */
-    private fun urlMeansDone(url: String): Boolean {
-        val re = doneUrl ?: return false
-        if (!re.containsMatchIn(url)) return false
-        session?.complete(LoginOutcome.SIGNED_IN)
-        return true
-    }
-
-    /** May the main frame go to `url`? Asks the allowlist through the runner. */
-    private fun admit(url: String): Boolean {
-        if (urlMeansDone(url)) return false // signed in; no need to load it
-        if (url == "about:blank") return true
-        return session?.request?.allowNavigation?.invoke(url) == true
-    }
-
-    private inner class LoginClient : WebViewClient() {
-        override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-            if (request == null || !request.isForMainFrame) return false
-            val url = request.url?.toString() ?: return true
-            return !admit(url)
-        }
-
-        override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-            if (!docStartScript) view?.evaluateJavascript(BOOTSTRAP_SCRIPT, null)
-            // Backstop for navigations shouldOverrideUrlLoading does not see
-            // (POST form submissions).
-            if (url != null && !admit(url)) view?.stopLoading()
-        }
-
-        override fun onPageFinished(view: WebView?, url: String?) {
-            if (url != null && urlMeansDone(url)) return
-            injectCheck()
-        }
-
-        override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
-            session?.complete(LoginOutcome.CANCELLED)
-            if (view != null && view === webView) {
-                webView = null
-                (view.parent as? ViewGroup)?.removeView(view)
-                view.destroy()
-            }
-            finish()
-            return true
-        }
-    }
-
     // On apps that opt in to predictive back (enableOnBackInvokedCallback) this
     // is not called; back then closes the sheet, which onDestroy reports as cancelled.
     @Deprecated("Deprecated in Java")
     @Suppress("DEPRECATION")
     override fun onBackPressed() {
-        val wv = webView
-        if (wv != null && wv.canGoBack()) {
-            wv.goBack()
-            return
-        }
+        if (controller?.goBack() == true) return
         session?.complete(LoginOutcome.CANCELLED)
         super.onBackPressed()
     }
@@ -230,19 +276,13 @@ class MealioLoginActivity : Activity() {
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
         session?.complete(LoginOutcome.CANCELLED)
-        CookieManager.getInstance().flush()
-        webView?.let {
-            it.stopLoading()
-            (it.parent as? ViewGroup)?.removeView(it)
-            it.destroy()
-        }
-        webView = null
+        controller?.destroy()
+        controller = null
         super.onDestroy()
     }
 
     companion object {
         private const val EXTRA_SESSION = "co.mealio.sdk.LOGIN_SESSION"
-        private const val MIN_INTERVAL_MS = 500L
 
         internal fun intent(context: Context, sessionId: String): Intent =
             Intent(context, MealioLoginActivity::class.java)

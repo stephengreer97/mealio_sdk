@@ -1,71 +1,177 @@
 package co.mealio.sdk
 
+import kotlin.math.roundToLong
+
+/** The selected items' total, for "Estimated total about $12.40". */
+data class Estimate(
+    /** Unit price times quantity over the selected items that have a unit price, to the cent. */
+    val total: Double,
+    /** Selected items. */
+    val count: Int,
+    /** True when any selected item is sold by weight or has no price: show it as "about". */
+    val estimated: Boolean,
+    /** Selected items with no unit price (left out of `total`). */
+    val unpriced: Int,
+)
+
 /**
- * A prepared cart the app can show and edit before filling the store cart.
- * Port of CartSession in packages/core/src/client.ts.
+ * A prepared cart. Port of CartSession in packages/core/src/client.ts.
  *
- * Items in `ready` with a `chosen` product start out selected (the user's
- * earlier pick for this recipe). Items in `needsChoice` wait for choose() or
- * skip(). Nothing here picks a product on its own.
+ * Every item is shown every run. Remembered products start selected; the user
+ * can select another option, search for something else, or deselect an item to
+ * leave it out of THIS run (its remembered choice is kept for next time).
+ * Nothing here picks a product on its own.
  */
 class CartSession internal constructor(
     private val client: MealioClient,
     val cart: PreparedCart,
 ) {
-    private val picks = LinkedHashMap<String, Selection>()
+    private data class Pick(val productId: String, val preferenceId: String?)
+
+    private val picks = LinkedHashMap<String, Pick>()
+    private val extra = HashMap<String, List<Product>>()
 
     init {
-        for (item in cart.ready) {
-            val chosen = item.chosen ?: continue
-            picks[item.key] = Selection(item.key, chosen.id, quantity = item.quantity, remember = true)
+        for (it in items) {
+            val id = it.selectedId ?: continue
+            picks[it.key] = Pick(id, it.rememberedPreferenceId)
         }
     }
 
     val cartId: String get() = cart.cartId
     val store: String get() = cart.store
-    val ready: List<CartItem> get() = cart.ready
-    val needsChoice: List<CartItem> get() = cart.needsChoice
-    val unavailable: List<CartItem> get() = cart.unavailable
+    /** Display name, e.g. "H-E-B", when the server sent one. */
+    val storeName: String? get() = cart.storeName
 
-    /** Items still waiting on the user. */
+    /** Every item in recipe order. */
+    val items: List<CartItem> get() = cart.items
+
+    @Deprecated("Use items") val ready: List<CartItem> get() = cart.ready
+    @Deprecated("Use items") val needsChoice: List<CartItem> get() = cart.needsChoice
+    @Deprecated("Use items") val unavailable: List<CartItem> get() = cart.unavailable
+
+    /** Options for an item, including any found with search(), without repeats. */
     @Synchronized
-    fun pending(): List<CartItem> = cart.needsChoice.filter { it.key !in picks }
+    fun options(key: String): List<Product> {
+        val it = find(key)
+        val base = it?.options?.takeIf { o -> o.isNotEmpty() } ?: listOfNotNull(it?.chosen)
+        val more = extra[key] ?: emptyList()
+        val seen = base.mapTo(HashSet()) { p -> p.id }
+        return base + more.filter { p -> p.id !in seen }
+    }
+
+    @Synchronized
+    fun selectedId(key: String): String? = picks[key]?.productId
+
+    @Synchronized
+    fun isSelected(key: String): Boolean = key in picks
+
+    @Synchronized
+    fun selectedCount(): Int = picks.size
+
+    /** The preference chosen with the selected product, if any. */
+    @Synchronized
+    fun selectedPreferenceId(key: String): String? = picks[key]?.preferenceId
+
+    /** The selected product for an item, from its options. */
+    @Synchronized
+    fun selected(key: String): Product? {
+        val id = picks[key]?.productId ?: return null
+        return options(key).firstOrNull { it.id == id }
+    }
 
     /**
-     * Pick `productId` for the item `key`. The product must be one the server
-     * offered for that item. Throws MealioException "unknown_item" or
-     * "unknown_product" otherwise.
+     * Select `productId` for the item `key`. The product must be one of
+     * options(key). Throws MealioException "unknown_item" or "unknown_product".
      */
+    @Synchronized
+    @JvmOverloads
+    fun select(key: String, productId: String, preferenceId: String? = null) {
+        if (find(key) == null) throw MealioException("unknown_item", "No item $key")
+        if (options(key).none { it.id == productId }) {
+            throw MealioException("unknown_product", "Product $productId was not offered for $key")
+        }
+        picks[key] = Pick(productId, preferenceId)
+    }
+
+    /** Leave the item out of this run. Its remembered choice is kept on the server. */
+    @Synchronized
+    fun deselect(key: String) {
+        picks.remove(key)
+    }
+
+    /** Search the store for something else and add the results to this item's options. */
+    @JvmOverloads
+    suspend fun search(key: String, query: String, onStep: StepListener? = null): List<Product> {
+        val r = client.search(cart.cartId, key, query, onStep)
+        synchronized(this) {
+            val prev = extra[key] ?: emptyList()
+            val seen = prev.mapTo(HashSet()) { it.id }
+            extra[key] = r.options.filter { it.id !in seen } + prev
+        }
+        return r.options
+    }
+
+    /**
+     * One selection for EVERY item: selected ones as {productId, quantity,
+     * remember: true, preferenceId}, the rest as {productId: null, remember: false}.
+     */
+    @Synchronized
+    fun selections(): List<Selection> = items.map { it ->
+        val p = picks[it.key]
+        if (p != null) Selection(it.key, p.productId, quantity = it.quantity, remember = true, preferenceId = p.preferenceId)
+        else Selection(it.key, null, remember = false)
+    }
+
+    /**
+     * Estimated total of the selected items: unit price times quantity.
+     * `estimated` is true when any item is sold by weight or has no price.
+     */
+    @Synchronized
+    fun estimate(): Estimate {
+        var total = 0.0
+        var count = 0
+        var unpriced = 0
+        var estimated = false
+        for (it in items) {
+            val p = selected(it.key) ?: continue
+            count += 1
+            val u = p.unitPrice
+            if (u != null) total += u * (if (it.quantity == 0) 1 else it.quantity) else unpriced += 1
+            if (p.estimated) estimated = true
+        }
+        // Math.round(total * 100) / 100 in the reference (half rounds up).
+        val cents = Math.floor(total * 100 + 0.5).roundToLong()
+        return Estimate(cents / 100.0, count, estimated || unpriced > 0, unpriced)
+    }
+
+    /** Fill the store cart with the current selections. */
+    @JvmOverloads
+    suspend fun addToCart(onStep: StepListener? = null): AddResult = client.addToCart(cart.cartId, selections(), onStep)
+
+    // ── 0.1 API ──────────────────────────────────────────────────────────
+
+    @Deprecated("Use select()", ReplaceWith("select(key, productId, preferenceId)"))
     @Synchronized
     @JvmOverloads
     fun choose(
         key: String,
         productId: String,
-        quantity: Int? = null,
-        remember: Boolean = true,
+        @Suppress("UNUSED_PARAMETER") quantity: Int? = null,
+        @Suppress("UNUSED_PARAMETER") remember: Boolean = true,
         preferenceId: String? = null,
-    ) {
-        val item = find(key) ?: throw MealioException("unknown_item", "No item $key")
-        val known = (listOfNotNull(item.chosen) + item.options).any { it.id == productId }
-        if (!known) throw MealioException("unknown_product", "Product $productId was not offered for $key")
-        picks[key] = Selection(key, productId, quantity ?: item.quantity, remember, preferenceId)
-    }
+    ) = select(key, productId, preferenceId)
 
-    /** Leave this ingredient out of the store cart. */
+    @Deprecated("Use deselect()", ReplaceWith("deselect(key)"))
+    fun skip(key: String) = deselect(key)
+
+    /** Items that can be added but have nothing selected. */
+    @Deprecated("Every item is shown and decided by its checkbox; see isSelected()")
     @Synchronized
-    fun skip(key: String) {
-        picks[key] = Selection(key, null, remember = false)
-    }
+    fun pending(): List<CartItem> = items.filter { it.status != ItemStatus.UNAVAILABLE && it.key !in picks }
 
-    /** The current selection for `key`, if any. */
-    @Synchronized
-    fun selectionFor(key: String): Selection? = picks[key]
+    @Deprecated("Use selectedId() / selections()")
+    fun selectionFor(key: String): Selection? = selections().firstOrNull { it.key == key }
 
-    @Synchronized
-    fun selections(): List<Selection> = picks.values.toList()
-
-    /** Fill the store cart with the current selections. */
-    suspend fun addToCart(): AddResult = client.addToCart(cart.cartId, selections())
-
-    private fun find(key: String): CartItem? = (cart.ready + cart.needsChoice).firstOrNull { it.key == key }
+    private fun find(key: String): CartItem? = items.firstOrNull { it.key == key }
 }

@@ -1,8 +1,18 @@
 # Mealio Cart SDK for iOS
 
-Add an "Add to my grocery cart" button to your recipe app. The user picks a
-store, signs in to it once, and the recipe's ingredients land in their own
-store cart.
+Add an "Add to my grocery cart" button to your recipe app. One view does it:
+
+```swift
+import MealioSDK
+
+MealioCartButton(recipe: recipe, store: "heb")
+```
+
+Tapping it opens ONE sheet over your app that runs the whole flow: checking
+the store sign-in, the store's own sign-in page when needed, the list of every
+ingredient with the user's usual products already checked, adding, and a done
+screen. The user checks out on the store's own site or app later; the SDK never
+opens the store cart.
 
 How it works, in one line: Mealio's server decides every step and sends it as
 a signed instruction batch. The SDK checks the signature, checks every URL
@@ -11,6 +21,100 @@ phone with the user's own store login. It never decides what to buy.
 
 - iOS 15+, Swift 5.9, no third-party dependencies (CryptoKit, WebKit, SwiftUI).
 - The wire protocol is in [`../PROTOCOL.md`](../PROTOCOL.md).
+
+## Quick start
+
+1. Configure once, at launch (your server creates the session token, see
+   "Your server creates an SDK session" below):
+
+   ```swift
+   @main
+   struct RecipeApp: App {
+       init() {
+           MealioCart.configure(publishableKey: "pk_live_...",
+                                sessionTokenProvider: { try await MyAPI.mealioSessionToken() },
+                                theme: MealioTheme(accent: Color(mealioHex: 0x1F6B47)))
+       }
+       var body: some Scene { WindowGroup { ContentView() } }
+   }
+   ```
+
+2. Drop the button on your recipe screen:
+
+   ```swift
+   let recipe = Recipe(id: "r_123", title: "Chicken Tacos", ingredients: [
+       RecipeIngredient(name: "chicken thighs", amount: 1.5, unit: "lb"),
+       RecipeIngredient(name: "corn tortillas"),
+       RecipeIngredient(name: "limes", quantity: 2),
+   ])
+
+   MealioCartButton(recipe: recipe, store: "heb", zip: "78701",
+                    onAdded: { result in /* result.added, result.failed */ },
+                    onClose: { result in /* nil when nothing was added */ })
+   ```
+
+That is the whole integration.
+
+- `store` is optional. Without it Mealio uses the user's default store, and when
+  they have none yet the sheet asks them to choose one. The list also has a
+  store chip ("H-E-B  Change") to switch stores.
+- `zip` is needed for Kroger family stores.
+- `label:` changes the button text (default "Add to my grocery cart");
+  `disabled:` fades it.
+
+### Your own button
+
+Present the same sheet from any control with the view modifier:
+
+```swift
+@State private var showCart = false
+
+Button("Shop this recipe") { showCart = true }
+    .mealioCartFlow(isPresented: $showCart, recipe: recipe, store: "heb",
+                    onAdded: { result in ... },
+                    onError: { error in ... },
+                    onClose: { result in ... })
+```
+
+Or put `MealioCartFlow(recipe:store:zip:onAdded:onError:onClose:)` in a
+`.sheet` of your own. `onClose` is called exactly once, whether the user taps
+Close, Done, or swipes the sheet away.
+
+### What the user sees
+
+- **Loading:** "Checking your H-E-B sign-in", then "Finding your 6 ingredients".
+- **Store sign-in**, inside the same sheet, when the store needs it: the store's
+  own page in a visible `WKWebView` with "Sign in on H-E-B's own page. Mealio
+  never sees your password."
+- **The list:** every ingredient, every time. Products the user picked before
+  ("Your usual") come back checked. Each card expands to show other options,
+  a search box ("Search H-E-B for something else") and, for products like deli
+  meat, preference chips (sliced / shaved). Unchecking an item leaves it out of
+  this run only; the usual pick stays saved. The footer shows the total
+  ("about $31.20" when some items are sold by weight) and "Add 5 items to H-E-B".
+- **Done:** "Added 5 items to H-E-B", anything that failed in plain words (out
+  of stock, not confirmed in your cart, the store did not answer), and a Done
+  button that closes the sheet.
+
+### Theme
+
+```swift
+MealioCart.configure(theme: MealioTheme(
+    accent: .green,          // buttons, checkmarks, selected rings
+    onAccent: .white,        // text on the accent
+    background: .white,      // the sheet
+    surface: Color(mealioHex: 0xF2F1EE),   // thumbnails, search box, chips
+    text: .black,
+    muted: .gray,            // secondary text; keep 4.5:1 against background
+    border: Color(mealioHex: 0xE4E2DD),
+    radius: 14,              // cards and buttons
+    fontName: "Avenir Next", // nil for the system font
+    warnBackground: Color(mealioHex: 0xFFF4E5),
+    warnText: Color(mealioHex: 0x7A4A06)
+))
+```
+
+Every field has a default (`MealioTheme.default`), so pass only what you change.
 
 ## Install
 
@@ -23,7 +127,7 @@ Or in `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/mealio/mealio_sdk.git", from: "0.1.0"),
+    .package(url: "https://github.com/mealio/mealio_sdk.git", from: "0.2.0"),
 ],
 targets: [
     .target(name: "MyApp", dependencies: [.product(name: "MealioSDK", package: "mealio_sdk")]),
@@ -36,10 +140,10 @@ the repository root, add the package from a local checkout of `ios/` instead.
 ### CocoaPods
 
 ```ruby
-pod 'MealioSDK', :git => 'https://github.com/mealio/mealio_sdk.git', :tag => 'ios-v0.1.0'
+pod 'MealioSDK', :git => 'https://github.com/mealio/mealio_sdk.git', :tag => 'ios-v0.2.0'
 ```
 
-## Step 1: your server creates an SDK session
+## Your server creates an SDK session
 
 Your publishable key is safe to ship in the app. Your **secret** key is not.
 Your server uses the secret key to create a short-lived SDK session for the
@@ -57,7 +161,7 @@ The SDK asks your app for this token when it needs one, and asks again if the
 token expires (a 401 from Mealio), so your provider should always fetch a
 fresh one from your server.
 
-## Step 2: configure once
+## Configure
 
 ```swift
 import MealioSDK
@@ -75,86 +179,86 @@ struct RecipeApp: App {
 
 `configure` also takes:
 
+- `theme:` the drop-in's look (see "Theme" above).
 - `presenter:` returns the view controller to present the store login sheet
-  from. The default is the key window's top-most view controller.
+  from when no cart flow sheet is open (for example if you call
+  `prepareCart` yourself). The default is the key window's top-most view
+  controller.
 - `attestationProvider:` returns an App Attest token, if you turned
   attestation on in the Mealio dashboard.
 - `baseURL:` for testing against a non-production Mealio.
 
-## Step 3: prepare a cart and show it
+## Building your own UI
+
+Everything the sheet does is public, if you want your own screens.
 
 ```swift
-let recipe = Recipe(id: "r_123", title: "Chicken Tacos", ingredients: [
-    RecipeIngredient(name: "chicken thighs", amount: 1.5, unit: "lb"),
-    RecipeIngredient(name: "corn tortillas"),
-    RecipeIngredient(name: "limes", quantity: 2),
-])
-
-do {
-    let session = try await MealioCart.prepareCart(store: "heb", recipe: recipe, zip: "78701")
-    // Show the drop-in sheet...
-    self.cartSession = session
-} catch let error as MealioError {
-    // error.code is one of MealioError.Code (see "Errors" below)
-}
+let stores = try await MealioCart.stores()          // [StoreInfo]: id, name, via
+let session = try await MealioCart.prepareCart(store: "heb", recipe: recipe, zip: "78701",
+                                               onStep: { step, _ in progress = step })
 ```
 
-`prepareCart` signs the user in to the store if needed (see "Store login"
-below), then searches every ingredient. The `CartSession` it returns sorts
-items into:
+`onStep` reports a `Step`: `.connecting`, `.checkingSignIn`, `.signingIn`,
+`.searching`, `.adding`. While no cart flow sheet is open, a store sign-in is
+presented in a sheet of its own.
 
-- `ready`: the user picked a product for this ingredient before and it is in
-  stock. Already selected.
-- `needsChoice`: up to 8 options, best first. The user picks one or skips.
-- `unavailable`: nothing could be offered (`reason`, for example `no_results`).
+`CartSession` is an `ObservableObject`. `session.items` is every recipe line in
+order; each `CartItem` has a `status`:
 
-### The drop-in SwiftUI sheet
+| status | meaning |
+| --- | --- |
+| `.remembered` | the user's usual product, in stock, already selected |
+| `.choose` | nothing remembered yet; the user picks from `options` |
+| `.rememberedUnavailable` | the usual is out of stock or gone today; `remembered` still says what it was |
+| `.unavailable` | nothing found; `reason` says why (for example `no_results`) |
 
 ```swift
-.sheet(item: $cartSession) { session in
-    MealioCartSheet(session: session, accentColor: .green,
-                    onFinished: { result in
-                        // result.added / result.skipped / result.failed / result.storeCartUrl
-                        cartSession = nil
-                    },
-                    onCancel: { cartSession = nil })
-}
+session.options(for: key)                        // options, plus any found by search
+session.isSelected(key); session.selectedId(for: key); session.selected(for: key)
+try session.select(key: key, productId: id, preferenceId: "sliced")
+session.deselect(key: key)                       // leave out of THIS run; the usual stays saved
+try await session.search(key: key, query: "minced garlic jar")   // adds to options(for:)
+let est = session.estimate()                     // total, count, estimated ("about"), unpriced
+let result = try await session.addToCart(onStep: { step, _ in })
 ```
 
-(`CartSession` is a class; wrap it in an `Identifiable` value of your own, or
-present with `isPresented:`, as suits your app.)
+`selections()` sends one entry for every item: selected ones with
+`remember: true` (and the preference), the rest with `productId: nil,
+remember: false`, which leaves them out without forgetting the usual pick.
+`select` throws `unknown_item` / `unknown_product` if the key or product was not
+part of the cart.
 
-When a product has `preferences` (for example H-E-B deli meat: sliced or
-shaved), the sheet asks for one before selecting it.
+`MealioCartList(cart:storeName:theme:busy:onChangeStore:onAdd:)` is the list
+screen on its own, for hosting in a sheet of yours. `MealioCartSheet` (the 0.1
+sheet) still works and now draws that list.
 
-### Or build your own UI
+`AddResult` has `added`, `skipped` (reason `deselected` for unchecked items),
+`failed` (reason `not_confirmed` when the cart read after adding did not find
+the item) and `verified` (true when that read confirmed everything).
 
-`CartSession` is an `ObservableObject`:
+### Upgrading from 0.1
 
-```swift
-try session.choose(key: item.key, productId: product.id)                     // pick
-try session.choose(key: item.key, productId: product.id, preferenceId: "sliced")
-session.skip(key: item.key)                                                  // leave out
-session.pending()                                                            // still waiting on the user
-let result = try await session.addToCart()                                   // fill the store cart
-```
-
-`choose` throws `unknown_item` / `unknown_product` if the key or product was
-not part of the cart the server sent.
+- There is no separate hello call: `prepareCart`, `search` and `addToCart` send
+  the SDK version and store-session epoch in their bodies. `resetHello()` is a
+  no-op.
+- `ready` / `needsChoice` / `unavailable`, `choose`, `skip` and `pending()` still
+  work but are deprecated: use `items`, `select`, `deselect` and `isSelected`.
+- `CartItem.options` is no longer optional. `Product` gains `unitPrice` and
+  `estimated`. Older server payloads still decode.
 
 ## Store login
 
-When the store needs the user to sign in, the SDK presents a sheet with a
-visible `WKWebView` showing the store's own login page, with the store's name
-as the title and a Close button. The user types their password into the
-store's page; neither your app nor Mealio sees it.
+When the store needs the user to sign in, a visible `WKWebView` shows the
+store's own login page: inside the cart flow sheet when one is open, otherwise
+in a sheet of its own with the store's title and a Close button. The user types
+their password into the store's page; neither your app nor Mealio sees it.
 
 - The login sheet and the SDK's hidden working `WKWebView` share the default
   persistent `WKWebsiteDataStore`, so the user stays signed in across launches.
 - Top-frame navigations in the sheet are limited to the store's hosts, its
   identity providers and `mealio.co`. Checkout, payment, billing, gift card,
   password and address pages are blocked everywhere, always.
-- Closing the sheet raises `login_cancelled` (via the server).
+- Closing the sign-in raises `login_cancelled` (via the server).
 
 To sign a user out of stores (for example from your app's settings):
 
@@ -180,13 +284,15 @@ All errors are `MealioError` with a `code` and a readable `message`:
 | `network` | Could not reach Mealio |
 | `unsupported` | An instruction this SDK version does not know (update the SDK) |
 | `server` | Mealio answered with an error, or something the SDK could not read |
+| `store_required` | No store was given and the user has no default store yet (the drop-in shows its store picker) |
 | `not_configured` | `MealioCart.configure` was not called |
 
 ## Development
 
 The package builds for iOS. It also lists macOS 12 so the platform-neutral
-tests (signatures, allowlist, runner, client) run with plain `swift test` on a
-Mac. The WebView host, `MealioCart` and the SwiftUI sheet are iOS only.
+tests (signatures, allowlist, runner, client, cart session) run with plain
+`swift test` on a Mac. The WebView host, `MealioCart` and the SwiftUI views
+are iOS only.
 
 ```bash
 cd ios

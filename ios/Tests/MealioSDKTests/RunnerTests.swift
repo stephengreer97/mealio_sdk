@@ -80,6 +80,30 @@ final class RunnerTests: XCTestCase {
     }
 
     @MainActor
+    func testOnStepRunsBeforeEachExecutedInstructionOnly() async throws {
+        let payload = TestSigner.payload(seq: 1, instructions: [
+            pageOpen("open-1", "https://www.heb.com/robots.txt"),
+            fetch("search-1"),
+            pageOpen("add-1", "https://www.heb.com/checkout"),   // blocked: runs, fails
+            fetch("add-2"),                                        // skipped after the failure
+            ["op": "done", "id": "done-1", "result": .null],
+        ])
+        let host = FakeHost()
+        var seen: [String] = []
+        var callsAtStep: [Int] = []
+        _ = try await Runner(host: host, allowlist: Allowlist(), keys: TestSigner.keys)
+            .run(TestSigner.envelope(payload), job: "job_test", lastSeq: 0) { ins in
+                seen.append(ins.id)
+                callsAtStep.append(host.calls.count)
+            }
+        XCTAssertEqual(seen, ["open-1", "search-1", "add-1"])
+        // Called before the host ran the instruction.
+        XCTAssertEqual(callsAtStep, [0, 1, 2])
+        XCTAssertEqual(seen.map { id in stepOf(Instruction(json: ["op": "page_open", "id": .string(id), "url": "https://www.heb.com/"])) },
+                       [.connecting, .searching, .adding])
+    }
+
+    @MainActor
     func testFailIsTerminal() async throws {
         let payload = TestSigner.payload(seq: 1, instructions: [
             ["op": "fail", "id": "i1", "code": "store_unavailable", "message": "H-E-B is not answering right now."],

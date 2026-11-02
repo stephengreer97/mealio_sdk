@@ -32,8 +32,17 @@ class Runner @JvmOverloads constructor(
 ) {
     private val fetchStamps = HashMap<String, ArrayDeque<Long>>()
 
-    /** Verify and run one envelope. Throws EnvelopeException when it must be refused. */
-    suspend fun run(env: Envelope?, job: String?, lastSeq: Int): StepOutcome {
+    /**
+     * Verify and run one envelope. Throws EnvelopeException when it must be refused.
+     * `onStep` is called before each instruction that is executed (not for
+     * done/fail or skipped ones). An exception it throws never breaks the run.
+     */
+    suspend fun run(
+        env: Envelope?,
+        job: String?,
+        lastSeq: Int,
+        onStep: ((Instruction) -> Unit)? = null,
+    ): StepOutcome {
         val payload = checkInstructions(openEnvelope(env, keys, clock()), job, lastSeq)
         val results = ArrayList<InstructionResult>()
         var terminal: Terminal? = null
@@ -44,6 +53,13 @@ class Runner @JvmOverloads constructor(
             if (ins is Instruction.Fail) { terminal = Terminal.Fail(ins.code, ins.message); break }
             // After a failure the rest of the envelope is reported, not run.
             if (failed) { results.add(skipped(ins)); continue }
+            if (onStep != null) {
+                try {
+                    onStep(ins)
+                } catch (e: Exception) {
+                    // a progress callback never breaks a run
+                }
+            }
             val r = one(payload.store, ins)
             results.add(r)
             if (!r.ok) failed = true

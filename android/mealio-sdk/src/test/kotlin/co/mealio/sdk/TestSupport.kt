@@ -98,8 +98,16 @@ class FakeHost(
 /** Records every Mealio call; `handler` gets the path (base URL removed). */
 class FakeTransport(
     private val base: String = "https://mealio.test",
+    private val onGet: ((path: String) -> HttpResponse)? = null,
     private val handler: (path: String, headers: Map<String, String>, body: JSONObject) -> HttpResponse,
 ) : HttpTransport {
+    override suspend fun get(url: String, headers: Map<String, String>): HttpResponse {
+        val path = url.removePrefix(base)
+        seen.add("GET $path")
+        this.headers.add(headers)
+        return onGet?.invoke(path) ?: error("unexpected GET $path")
+    }
+
     val seen = mutableListOf<String>()
     val headers = mutableListOf<Map<String, String>>()
 

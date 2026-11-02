@@ -1,11 +1,11 @@
 Pod::Spec.new do |s|
   s.name             = 'MealioSDK'
-  s.version          = '0.1.0'
+  s.version          = '0.2.0'
   s.summary          = 'Mealio Cart SDK: add a recipe to the user\'s own grocery store cart.'
   s.description      = <<-DESC
     The Mealio Cart SDK carries out signed instructions from Mealio's server on
     the user's device, with the user's own store login, to fill their grocery
-    cart from a recipe. Store login happens in a WKWebView sheet.
+    cart from a recipe. One SwiftUI sheet runs the whole flow, store sign-in included.
   DESC
   s.homepage         = 'https://mealio.co'
   s.license          = { :type => 'Proprietary', :text => 'Copyright Mealio. All rights reserved.' }

@@ -32,7 +32,6 @@ class ClientTest {
         val c2 = Vectors.case("valid_unicode_done").getJSONObject("envelope")
         val transport = FakeTransport { path, _, body ->
             when {
-                path.endsWith("/hello") -> ok(JSONObject().put("ok", true))
                 path.endsWith("/carts") -> ok(JSONObject().put("job", "job_test").put("envelope", c1))
                 path.endsWith("/step") -> {
                     assertEquals(1, body.getInt("seq"))
@@ -49,7 +48,8 @@ class ClientTest {
         } catch (e: MealioException) {
             // fine either way
         }
-        assertEquals(listOf("/api/v1/sdk/hello", "/api/v1/sdk/carts", "/api/v1/sdk/jobs/job_test/step"), transport.seen)
+        // No hello round trip: the first call starts the job.
+        assertEquals(listOf("/api/v1/sdk/carts", "/api/v1/sdk/jobs/job_test/step"), transport.seen)
     }
 
     @Test
@@ -61,7 +61,8 @@ class ClientTest {
             if (calls == 1) HttpResponse(401, "{}") else ok(JSONObject().put("ok", true))
         }
         val client = MealioClient(config { "t${++tokens}" }, FakeHost(), transport)
-        client.hello()
+        // The answer has no job; the point is the retry.
+        try { client.addToCart("c1", emptyList()) } catch (e: MealioException) { }
         assertEquals(2, tokens)
         assertEquals("Bearer t2", transport.headers[1]["Authorization"])
     }
@@ -70,43 +71,65 @@ class ClientTest {
     fun secondUnauthorizedIsSessionExpired(): Unit = runBlocking {
         val transport = FakeTransport { _, _, _ -> HttpResponse(401, "{}") }
         val client = MealioClient(config(), FakeHost(), transport)
-        assertEquals("session_expired", code { client.hello() })
+        assertEquals("session_expired", code { client.addToCart("c1", emptyList()) })
         assertEquals(2, transport.seen.size)
     }
 
     @Test
-    fun sendsTheProtocolHeadersAndHello(): Unit = runBlocking {
-        var hello: JSONObject? = null
-        val transport = FakeTransport { _, _, body -> hello = body; ok(JSONObject().put("ok", true)) }
+    fun sendsTheProtocolHeadersAndWhoIsCallingInEveryJobBody(): Unit = runBlocking {
+        val bodies = mutableListOf<JSONObject>()
+        val transport = FakeTransport { _, _, body -> bodies.add(body); HttpResponse(503, "{}") }
         val client = MealioClient(config().let { MealioConfig(it.publishableKey, it.sessionTokenProvider, baseUrl = it.baseUrl, keys = it.keys, epochProvider = { 7 }, attestationProvider = { "att" }) }, FakeHost(), transport)
-        client.hello()
+        code { client.prepareCart("heb", Recipe("r1", listOf(RecipeIngredient("milk")), title = "Tacos"), zip = "78701") }
+        code { client.search("cart 1", "k1", "minced garlic") }
+        code { client.addToCart("cart 1", listOf(Selection("k1", "p1", 1, true))) }
+        assertEquals(listOf("/api/v1/sdk/carts", "/api/v1/sdk/carts/cart%201/search", "/api/v1/sdk/carts/cart%201/add"), transport.seen)
+
         val h = transport.headers[0]
         assertEquals("application/json", h["Content-Type"])
         assertEquals("Bearer tok", h["Authorization"])
         assertEquals("pk_test", h["X-Mealio-Publishable-Key"])
         assertEquals("android/${MealioCart.SDK_VERSION}", h["X-Mealio-SDK"])
         assertEquals("att", h["X-Mealio-Attestation"])
-        val b = hello!!
-        assertEquals(7, b.getInt("epoch"))
-        assertEquals("android", b.getJSONObject("sdk").getString("platform"))
-        assertEquals(SUPPORTED_OPS.size, b.getJSONObject("sdk").getJSONArray("ops").length())
-        assertEquals(transport.seen, listOf("/api/v1/sdk/hello"))
+
+        for (b in bodies) {
+            assertEquals(7, b.getInt("epoch"))
+            val sdk = b.getJSONObject("sdk")
+            assertEquals("android", sdk.getString("platform"))
+            assertEquals(MealioCart.SDK_VERSION, sdk.getString("version"))
+            assertEquals(SDK_CORE_VERSION, sdk.getString("core"))
+            assertEquals(SUPPORTED_OPS, sdk.getJSONArray("ops").strings())
+        }
+        assertEquals("heb", bodies[0].getString("store"))
+        assertEquals("78701", bodies[0].getString("zip"))
+        assertEquals("Tacos", bodies[0].getJSONObject("recipe").getString("title"))
+        assertEquals("k1", bodies[1].getString("key"))
+        assertEquals("minced garlic", bodies[1].getString("query"))
+        assertEquals("p1", bodies[2].getJSONArray("selections").getJSONObject(0).getString("productId"))
     }
 
     @Test
-    fun helloWidensTheAllowlistOnlyWhenSigned(): Unit = runBlocking {
+    fun epochDefaultsToZero(): Unit = runBlocking {
+        var body: JSONObject? = null
+        val client = MealioClient(config(), FakeHost(), FakeTransport { _, _, b -> body = b; HttpResponse(503, "{}") })
+        code { client.addToCart("c", emptyList()) }
+        assertEquals(0, body!!.getInt("epoch"))
+    }
+
+    @Test
+    fun widensTheAllowlistOnlyWhenSigned() {
         val payload = JSONObject().put("v", 1).put("kind", "allowlist").put("exp", 4102444800L)
             .put("stores", JSONObject().put("heb", JSONObject().put("hosts", JSONArray().put("api.heb.com").put("evil.io"))))
             .toString()
         val good = TestSigner.sign(payload)
-        val client = MealioClient(config(), FakeHost(), FakeTransport { _, _, _ -> ok(JSONObject().put("ok", true).put("allowlist", good.toJson())) })
-        client.hello()
+        val client = MealioClient(config(), FakeHost(), FakeTransport { _, _, _ -> error("no calls") })
+        client.widenAllowlist(good)
         assertTrue("api.heb.com" in client.allowlist.hostsFor("heb")!!.hosts)
         assertFalse("evil.io" in client.allowlist.hostsFor("heb")!!.hosts)
 
         val forged = Envelope(payload.replace("api.heb.com", "www.heb.com"), good.sig, good.kid)
-        val client2 = MealioClient(config(), FakeHost(), FakeTransport { _, _, _ -> ok(JSONObject().put("ok", true).put("allowlist", forged.toJson())) })
-        client2.hello()
+        val client2 = MealioClient(config(), FakeHost(), FakeTransport { _, _, _ -> error("no calls") })
+        client2.widenAllowlist(forged)
         assertEquals(listOf("heb.com"), client2.allowlist.hostsFor("heb")!!.hosts)
     }
 
@@ -115,16 +138,16 @@ class ClientTest {
         val serverErr = FakeTransport { _, _, _ ->
             HttpResponse(503, JSONObject().put("error", JSONObject().put("code", "store_unavailable").put("message", "down")).toString())
         }
-        assertEquals("store_unavailable", code { MealioClient(config(), FakeHost(), serverErr).hello() })
-        assertEquals("server", code { MealioClient(config(), FakeHost(), FakeTransport { _, _, _ -> HttpResponse(500, "oops") }).hello() })
-        assertEquals("network", code { MealioClient(config(), FakeHost(), FakeTransport { _, _, _ -> throw IOException("down") }).hello() })
-        assertEquals("session_expired", code { MealioClient(config { throw RuntimeException("no") }, FakeHost(), serverErr).hello() })
+        val r = Recipe("r", emptyList())
+        assertEquals("store_unavailable", code { MealioClient(config(), FakeHost(), serverErr).prepareCart("heb", r) })
+        assertEquals("server", code { MealioClient(config(), FakeHost(), FakeTransport { _, _, _ -> HttpResponse(500, "oops") }).prepareCart("heb", r) })
+        assertEquals("network", code { MealioClient(config(), FakeHost(), FakeTransport { _, _, _ -> throw IOException("down") }).prepareCart("heb", r) })
+        assertEquals("session_expired", code { MealioClient(config { throw RuntimeException("no") }, FakeHost(), serverErr).prepareCart("heb", r) })
     }
 
     private fun cartFlow(first: Envelope, onStep: (JSONObject) -> HttpResponse = { error("no step expected") }) =
         FakeTransport { path, _, body ->
             when {
-                path.endsWith("/hello") -> ok(JSONObject().put("ok", true))
                 path.endsWith("/carts") -> ok(JSONObject().put("job", "job_test").put("envelope", first.toJson()))
                 path.endsWith("/step") -> onStep(body)
                 else -> error("unexpected $path")
@@ -152,7 +175,8 @@ class ClientTest {
     }
 
     @Test
-    fun cartSessionChoosesAndAdds(): Unit = runBlocking {
+    @Suppress("DEPRECATION")
+    fun legacyServerShapeStillWorksThroughTheOldApi(): Unit = runBlocking {
         val prepared = JSONObject()
             .put("cartId", "cart 1")
             .put("store", "heb")
@@ -178,7 +202,6 @@ class ClientTest {
         var job = 0
         val transport = FakeTransport { path, _, body ->
             when {
-                path.endsWith("/hello") -> ok(JSONObject().put("ok", true))
                 path == "/api/v1/sdk/carts" -> ok(JSONObject().put("job", "job_test").put("envelope", TestSigner.instructions(1, listOf(doneOp("i1", prepared))).toJson()))
                 path == "/api/v1/sdk/carts/cart%201/add" -> {
                     addBody = body
@@ -190,6 +213,9 @@ class ClientTest {
         }
         val session = MealioClient(config(), FakeHost(), transport).prepareCart("heb", Recipe("r1", listOf(RecipeIngredient("milk"))), zip = "78701")
         assertEquals("cart 1", session.cartId)
+        assertEquals(listOf("a", "b", "c", "d"), session.items.map { it.key })
+        assertEquals(ItemStatus.REMEMBERED, session.items[0].status)
+        assertEquals(ItemStatus.UNAVAILABLE, session.items[3].status)
         assertEquals(listOf("b", "c"), session.pending().map { it.key })
         assertEquals("p1", session.selectionFor("a")!!.productId)
         assertEquals("popular", session.needsChoice[0].options[0].badge)
@@ -200,7 +226,8 @@ class ClientTest {
         assertEquals("unknown_item", code { session.choose("zzz", "p2") })
         session.choose("b", "p2", preferenceId = "sliced")
         session.skip("c")
-        assertTrue(session.pending().isEmpty())
+        // skip() is deselect() now: the item is simply not selected this run.
+        assertEquals(listOf("c"), session.pending().map { it.key })
 
         val result = session.addToCart()
         assertEquals(1, job)
@@ -215,6 +242,50 @@ class ClientTest {
         assertTrue(sel["b"]!!.getBoolean("remember"))
         assertTrue(sel["c"]!!.isNull("productId"))
         assertFalse(sel["c"]!!.getBoolean("remember"))
+        // Every item is sent, the unavailable one too.
+        assertTrue(sel["d"]!!.isNull("productId"))
+    }
+
+    @Test
+    fun storesIsAPublicGetWithNoSession(): Unit = runBlocking {
+        var tokens = 0
+        val list = JSONObject().put("stores", JSONArray()
+            .put(JSONObject().put("id", "heb").put("name", "H-E-B").put("via", "device"))
+            .put(JSONObject().put("id", "kroger").put("name", "Kroger").put("via", "kroger_api")))
+        val transport = FakeTransport(onGet = { HttpResponse(200, list.toString()) }) { _, _, _ -> error("no POST") }
+        val client = MealioClient(config { tokens += 1; "tok" }, FakeHost(), transport)
+        assertEquals(listOf(StoreInfo("heb", "H-E-B", "device"), StoreInfo("kroger", "Kroger", "kroger_api")), client.stores())
+        assertEquals(listOf("GET /api/v1/stores"), transport.seen)
+        assertEquals(0, tokens)
+        assertFalse(transport.headers[0].containsKey("Authorization"))
+
+        val odd = MealioClient(config(), FakeHost(), FakeTransport(onGet = { HttpResponse(200, "{}") }) { _, _, _ -> error("no POST") })
+        assertTrue(odd.stores().isEmpty())
+        val down = MealioClient(config(), FakeHost(), FakeTransport(onGet = { throw IOException("down") }) { _, _, _ -> error("no POST") })
+        assertEquals("network", code { down.stores() })
+        val html = MealioClient(config(), FakeHost(), FakeTransport(onGet = { HttpResponse(502, "<html>") }) { _, _, _ -> error("no POST") })
+        assertEquals("network", code { html.stores() })
+    }
+
+    @Test
+    fun storeIsOptionalAndStoreRequiredSurfaces(): Unit = runBlocking {
+        var body: JSONObject? = null
+        val fail = TestSigner.instructions(1, listOf(failOp("i1", "store_required", "Pick a store")))
+        val transport = FakeTransport { _, _, b -> body = b; ok(JSONObject().put("job", "job_test").put("envelope", fail.toJson())) }
+        val client = MealioClient(config(), FakeHost(), transport)
+        assertEquals("store_required", code { client.prepareCart(null, Recipe("r", emptyList())) })
+        assertTrue(body!!.has("store"))
+        assertTrue(body!!.isNull("store"))
+    }
+
+    @Test
+    fun addResultCarriesVerified() {
+        val base = JSONObject().put("cartId", "c").put("store", "heb").put("added", JSONArray()).put("skipped", JSONArray())
+            .put("failed", JSONArray().put(JSONObject().put("key", "k").put("productId", "p").put("name", "Milk").put("reason", "not_confirmed")))
+            .put("storeCartUrl", JSONObject.NULL)
+        assertEquals(null, AddResult.fromJson(base).verified)
+        assertEquals(false, AddResult.fromJson(JSONObject(base.toString()).put("verified", false)).verified)
+        assertEquals("not_confirmed", AddResult.fromJson(base).failed[0].reason)
     }
 
     @Test
