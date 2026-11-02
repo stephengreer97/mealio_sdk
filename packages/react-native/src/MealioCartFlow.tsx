@@ -303,7 +303,7 @@ function ItemRow({ t, cart, item, storeName, open, onToggleOpen, onChange, disab
   };
 
   const meta = picked
-    ? [picked.price, picked.estimated ? 'est.' : null, picked.id === item.remembered?.id ? 'Your usual' : null].filter(Boolean).join(' · ')
+    ? [priceText(picked), picked.id === item.remembered?.id ? 'Your usual' : null].filter(Boolean).join(' · ')
     : item.status === 'remembered' ? 'Not adding this time'
       : item.status === 'remembered_unavailable' ? 'Your usual is out of stock'
         : `${options.length} option${options.length === 1 ? '' : 's'}`;
@@ -326,22 +326,41 @@ function ItemRow({ t, cart, item, storeName, open, onToggleOpen, onChange, disab
         </Pressable>
       </View>
 
-      {on && picked ? (
-        <View style={s.qtyRow}>
-          <Text style={s.small}>{picked.soldByWeight ? 'Sold by weight' : 'Quantity'}</Text>
-          <View style={s.stepper}>
-            <Pressable onPress={() => { cart.setQuantity(item.key, cart.quantity(item.key) - 1); onChange(); }} disabled={disabled || cart.quantity(item.key) <= 1}
-              accessibilityRole="button" accessibilityLabel={`Fewer ${item.ingredient}`} style={[s.stepBtn, cart.quantity(item.key) <= 1 && s.stepOff]}>
-              <Text style={s.qtyText}>−</Text>
-            </Pressable>
-            <Text style={s.stepValue} accessibilityLabel={`Quantity ${cart.quantity(item.key)}`}>{cart.quantity(item.key)}</Text>
-            <Pressable onPress={() => { cart.setQuantity(item.key, cart.quantity(item.key) + 1); onChange(); }} disabled={disabled || cart.quantity(item.key) >= cart.maxQuantity(item.key)}
-              accessibilityRole="button" accessibilityLabel={`More ${item.ingredient}`} style={[s.stepBtn, cart.quantity(item.key) >= cart.maxQuantity(item.key) && s.stepOff]}>
-              <Text style={s.qtyText}>+</Text>
-            </Pressable>
+      {on && picked ? (() => {
+        // Sold by weight: the stepper is pounds, stepping through the store's
+        // weights (else 0.25 lb). Otherwise a count, clamped to the store cap.
+        const byWeight = !!picked.soldByWeight;
+        const range = byWeight ? cart.weightRange(item.key) : null;
+        const lb = byWeight ? cart.weight(item.key) : 0;
+        const n = cart.quantity(item.key);
+        const atMin = byWeight ? lb <= range!.min : n <= 1;
+        const atMax = byWeight ? lb >= range!.max : n >= cart.maxQuantity(item.key);
+        const step = (dir: 1 | -1) => {
+          if (byWeight) cart.stepWeight(item.key, dir);
+          else cart.setQuantity(item.key, n + dir);
+          onChange();
+        };
+        return (
+          <View style={s.qtyRow}>
+            <Text style={s.small}>{byWeight ? 'Weight' : 'Quantity'}</Text>
+            <View style={s.stepper}>
+              <Pressable onPress={() => step(-1)} disabled={disabled || atMin}
+                accessibilityRole="button" accessibilityLabel={`Less ${item.ingredient}`} accessibilityState={{ disabled: disabled || atMin }}
+                style={[s.stepBtn, atMin && s.stepOff]}>
+                <Text style={s.qtyText}>−</Text>
+              </Pressable>
+              <Text style={[s.stepValue, byWeight && s.stepValueWide]} accessibilityLabel={byWeight ? `Weight ${lbText(lb)}` : `Quantity ${n}`}>
+                {byWeight ? lbText(lb) : n}
+              </Text>
+              <Pressable onPress={() => step(1)} disabled={disabled || atMax}
+                accessibilityRole="button" accessibilityLabel={`More ${item.ingredient}`} accessibilityState={{ disabled: disabled || atMax }}
+                style={[s.stepBtn, atMax && s.stepOff]}>
+                <Text style={s.qtyText}>+</Text>
+              </Pressable>
+            </View>
           </View>
-        </View>
-      ) : null}
+        );
+      })() : null}
 
       {item.status === 'remembered_unavailable' && !on ? (
         <View style={s.warn}>
@@ -360,7 +379,7 @@ function ItemRow({ t, cart, item, storeName, open, onToggleOpen, onChange, disab
                   style={[s.opt, sel && { borderColor: t.accent, borderWidth: 2, margin: 0 }]}>
                   <Thumb t={t} product={o} big />
                   <Text style={[s.optName, o.outOfStock && s.muted]} numberOfLines={3}>{o.name}</Text>
-                  <Text style={s.optPrice}>{o.outOfStock ? 'Out of stock' : `${o.price || ''}${o.estimated ? ' est.' : ''}`}</Text>
+                  <Text style={s.optPrice}>{o.outOfStock ? 'Out of stock' : priceText(o)}</Text>
                   {usual ? <Text style={[s.tag, { color: t.accent }]}>Your usual</Text> : o.badge === 'popular' ? <Text style={s.tag}>Popular</Text> : null}
                 </Pressable>
               );
@@ -404,7 +423,7 @@ function Thumb({ t, product, dim, big }: { t: MealioTheme; product: Product | nu
 
 function Done({ t, cart, result, storeName, onDone }: { t: MealioTheme; cart: CartSession; result: AddResult; storeName: string; onDone: () => void }) {
   const s = styles(t);
-  const price = (key: string) => cart.selected(key)?.price || '';
+  const price = (key: string) => { const p = cart.selected(key); return p ? priceText(p) : ''; };
   return (
     <View style={s.flex}>
       <ScrollView style={s.flex} contentContainerStyle={s.body}>
@@ -418,7 +437,7 @@ function Done({ t, cart, result, storeName, onDone }: { t: MealioTheme; cart: Ca
           </View>
         ) : null}
         {result.added.map((a) => (
-          <View key={a.key} style={s.doneRow}><Text style={[s.flex, s.doneName]} numberOfLines={2}>{a.name}</Text><Text style={s.bold}>{price(a.key)}</Text></View>
+          <View key={a.key} style={s.doneRow}><Text style={[s.flex, s.doneName]} numberOfLines={2}>{a.name}{typeof a.weightLb === 'number' ? `, ${lbText(a.weightLb)}` : ''}</Text><Text style={s.bold}>{price(a.key)}</Text></View>
         ))}
         {result.skipped.filter((x) => x.reason === 'deselected').map((x) => (
           <View key={x.key} style={s.doneRow}><Text style={[s.flex, s.muted]}>{cart.items.find((i) => i.key === x.key)?.ingredient}</Text><Text style={s.muted}>Left out</Text></View>
@@ -431,8 +450,20 @@ function Done({ t, cart, result, storeName, onDone }: { t: MealioTheme; cart: Ca
   );
 }
 
+/** "0.75 lb", "1 lb". */
+function lbText(lb: number): string {
+  return `${+lb.toFixed(2)} lb`;
+}
+
+/** The price as a row shows it. Sold by the pound: "$9.99/lb est.". */
+function priceText(p: Product): string {
+  if (p.soldByWeight && typeof p.pricePerLb === 'number') return `${money(p.pricePerLb)}/lb est.`;
+  return `${p.price || ''}${p.estimated ? ' est.' : ''}`.trim();
+}
+
 function reasonText(r: string): string {
   if (r === 'not_confirmed') return 'not confirmed in your cart';
+  if (r === 'weight_not_supported') return 'sold by weight, which this store cannot take here';
   if (/stock/.test(r)) return 'out of stock';
   if (/timeout|no_answer/.test(r)) return 'the store did not answer';
   return 'the store refused it';
@@ -539,10 +570,11 @@ function make(t: MealioTheme) {
     warn: { marginHorizontal: 12, marginBottom: 12, padding: 12, borderRadius: 10, backgroundColor: t.warnBackground },
     qtyRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingLeft: 58, paddingRight: 12, paddingBottom: 10 },
     stepper: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-    stepBtn: { width: 44, height: 36, borderRadius: 10, backgroundColor: t.surface, alignItems: 'center', justifyContent: 'center' },
+    stepBtn: { width: 44, height: 44, borderRadius: 10, backgroundColor: t.surface, alignItems: 'center', justifyContent: 'center' },
     stepOff: { opacity: 0.4 },
     qtyText: { ...f, fontSize: 20, fontWeight: '600', color: t.text },
     stepValue: { ...f, minWidth: 28, textAlign: 'center', fontSize: 16, fontWeight: '700', color: t.text },
+    stepValueWide: { minWidth: 64 },
     warnText: { ...f, fontSize: 13, lineHeight: 18, color: t.warnText },
     expand: { borderTopWidth: 1, borderTopColor: t.border, paddingVertical: 12, gap: 12 },
     optRow: { paddingHorizontal: 12, gap: 10 },
