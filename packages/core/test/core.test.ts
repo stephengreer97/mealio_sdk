@@ -2,8 +2,8 @@ import { describe, it, expect } from 'vitest';
 import vm from 'node:vm';
 import vectors from '../../../protocol/test-vectors.json';
 import {
-  Allowlist, GUARD_SCRIPT, Runner, matches, openEnvelope, checkInstructions, EnvelopeError, MealioClient, CartSession,
-  type Host, type Envelope, type Matcher,
+  Allowlist, GUARD_SCRIPT, Runner, matches, openEnvelope, checkInstructions, EnvelopeError, MealioClient, CartSession, addedPrice,
+  type AddResult, type Host, type Envelope, type Matcher,
 } from '../src';
 
 const KEYS = { [vectors.kid]: vectors.publicKey };
@@ -292,6 +292,60 @@ describe('cart session', () => {
       cs.select('turkey', 'b1');
       cs.setWeight('turkey', 3);
       expect(cs.estimate()).toMatchObject({ total: 34, estimated: true });
+    });
+  });
+
+  describe('no partial totals', () => {
+    const priced = (over: Record<string, unknown>[] = []) => ({
+      cartId: 'c1', store: 'heb', ready: [], needsChoice: [], unavailable: [],
+      items: [
+        { key: 'onion', ingredient: 'onion', quantity: 2, status: 'remembered', selectedId: 'o1', remembered: null, options: [{ id: 'o1', name: 'Onion', unitPrice: 1, ...over[0] }] },
+        { key: 'turkey', ingredient: 'deli turkey', quantity: 1, weightLb: 0.5, status: 'remembered', selectedId: 't1', remembered: null,
+          options: [{ id: 't1', name: 'Deli Turkey', soldByWeight: true, estimated: true, pricePerLb: 12, unitPrice: 12, ...over[1] }] },
+        { key: 'chipotle', ingredient: 'chipotle in adobo', quantity: 1, status: 'choose', selectedId: null, remembered: null,
+          options: [{ id: 'c1', name: 'Chipotle Peppers', unitPrice: null }] },
+      ],
+    }) as any;
+
+    it('totals when every selected item has a price; a weight item priced per lb counts as priced', () => {
+      expect(new CartSession({} as any, priced()).estimate()).toEqual({ total: 8, count: 2, estimated: true, unpriced: 0 });
+    });
+
+    it('total is null when even one selected item has no price', () => {
+      const cs = new CartSession({} as any, priced());
+      cs.select('chipotle', 'c1');
+      expect(cs.estimate()).toEqual({ total: null, count: 3, estimated: true, unpriced: 1 });
+      // A weight item with neither a per-lb nor a package price is unpriced too.
+      const w = new CartSession({} as any, priced([{}, { pricePerLb: null, unitPrice: null }]));
+      expect(w.estimate()).toMatchObject({ total: null, unpriced: 1 });
+      // Deselecting the unpriced item brings the number back.
+      cs.deselect('chipotle');
+      expect(cs.estimate().total).toBe(8);
+    });
+
+    const result = (added: AddResult['added']): AddResult => ({ cartId: 'c1', store: 'heb', added, skipped: [], failed: [], storeCartUrl: null, verified: true });
+
+    it('prices added items from their own fields: unit times quantity, per lb times pounds, a package once', () => {
+      expect(addedPrice({ key: 'a', productId: '1', name: 'Onion', quantity: 2, unitPrice: 0.37 })).toEqual({ amount: 0.74, estimated: false });
+      expect(addedPrice({ key: 'b', productId: '2', name: 'Salmon', quantity: 1, weightLb: 1.25, pricePerLb: 10.9, unitPrice: 10.9, estimated: true })).toEqual({ amount: 13.63, estimated: true });
+      expect(addedPrice({ key: 'c', productId: '3', name: 'Brisket', quantity: 1, weightLb: 4, unitPrice: 32, estimated: true })).toEqual({ amount: 32, estimated: true });
+      expect(addedPrice({ key: 'd', productId: '4', name: 'Chipotle', quantity: 1 })).toBeNull();
+    });
+
+    it('addedTotal reads the added entries, falls back to the session product, and is null when any is unpriced', () => {
+      const cs = new CartSession({} as any, priced());
+      const full = result([
+        { key: 'onion', productId: 'o1', name: 'Onion', quantity: 2, imageUrl: 'https://img/o.jpg', ingredient: '2 onions', unitPrice: 1.25 },
+        { key: 'turkey', productId: 't1', name: 'Deli Turkey', quantity: 1, weightLb: 0.5, pricePerLb: 12, estimated: true },
+      ]);
+      expect(cs.addedTotal(full)).toEqual({ total: 8.5, count: 2, estimated: true, unpriced: 0 });
+      // An older server: no prices on the entries, the selected products stand in.
+      const old = result([{ key: 'onion', productId: 'o1', name: 'Onion', quantity: 2 }, { key: 'turkey', productId: 't1', name: 'Deli Turkey', quantity: 1, weightLb: 0.5 }]);
+      expect(cs.addedTotal(old)).toEqual({ total: 8, count: 2, estimated: true, unpriced: 0 });
+      cs.select('chipotle', 'c1');
+      expect(cs.addedTotal(result([...full.added, { key: 'chipotle', productId: 'c1', name: 'Chipotle Peppers', quantity: 1 }])))
+        .toEqual({ total: null, count: 3, estimated: true, unpriced: 1 });
+      expect(cs.addedPrice(full.added[0])).toEqual({ amount: 2.5, estimated: false });
     });
   });
 

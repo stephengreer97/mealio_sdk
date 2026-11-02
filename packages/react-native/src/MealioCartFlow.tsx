@@ -9,7 +9,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator, Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View,
 } from 'react-native';
-import type { AddResult, CartItem, CartSession, MealioError, Product, Recipe, Step, StoreInfo } from '@mealio/sdk-core';
+import type { AddedItem, AddResult, CartItem, CartSession, MealioError, Product, Recipe, Step, StoreInfo } from '@mealio/sdk-core';
 import { useMealio, useMealioInternal } from './MealioProvider';
 import { money, type MealioTheme } from './theme';
 
@@ -140,7 +140,7 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
 }
 
 function headerTitle(phase: Phase, storeName: string): string {
-  if (phase === 'done') return 'All set';
+  if (phase === 'done') return storeName === 'your store' ? 'In your cart' : `In your ${storeName} cart`;
   if (phase === 'loading') return storeName === 'your store' ? 'Getting your cart ready' : `Getting your ${storeName} cart ready`;
   if (phase === 'error') return 'Something went wrong';
   if (phase === 'stores') return 'Choose your store';
@@ -236,9 +236,12 @@ export function CartList({ t, cart, storeName, busy, onChange, onAdd, onChangeSt
             {cart.pendingPreferences().length === 1 ? '1 checked item needs' : `${cart.pendingPreferences().length} checked items need`} an option chosen before adding.
           </Text>
         ) : null}
+        {/* No partial totals: one unpriced item and there is no number to show. */}
         <View style={s.totalRow}>
-          <Text style={s.totalLabel}>{est.estimated ? 'Estimated total' : 'Total'}</Text>
-          <Text style={s.totalValue}>{est.estimated ? 'about ' : ''}{money(est.total)}</Text>
+          <Text style={s.totalLabel}>{est.total != null && est.estimated ? 'Estimated total' : 'Total'}</Text>
+          {est.total != null
+            ? <Text style={s.totalValue}>{est.estimated ? 'about ' : ''}{money(est.total)}</Text>
+            : <Text style={s.totalNone}>Prices at checkout</Text>}
         </View>
         <Pressable onPress={onAdd} disabled={busy || est.count === 0} accessibilityRole="button"
           style={[s.cta, (busy || est.count === 0) && s.ctaOff]}>
@@ -432,33 +435,134 @@ function Thumb({ t, product, dim, big }: { t: MealioTheme; product: Product | nu
     : <View style={st} />;
 }
 
+/**
+ * The finished run. What the store took, row by row (image, product, the
+ * recipe line, amount, price), then what was left out. No total unless every
+ * added item has a price. No open-cart button: the user's next step is the
+ * store's own app or site, not ours.
+ */
 function Done({ t, cart, result, storeName, onDone }: { t: MealioTheme; cart: CartSession; result: AddResult; storeName: string; onDone: () => void }) {
   const s = styles(t);
-  const price = (key: string) => { const p = cart.selected(key); return p ? priceText(p) : ''; };
+  const n = result.added.length;
+  const sum = cart.addedTotal(result);
+  const left = leftOut(cart, result, storeName);
+  const [open, setOpen] = useState(() => result.failed.length > 0);
+  const subtitle = [
+    sum.total != null ? `${sum.estimated ? 'about ' : ''}${money(sum.total)}` : 'Prices at checkout',
+    result.verified ? 'checked in your cart' : null,
+  ].filter(Boolean).join(' · ');
+  const title = n ? `${n} item${n === 1 ? '' : 's'} added` : 'Nothing was added';
   return (
     <View style={s.flex}>
-      <ScrollView style={s.flex} contentContainerStyle={s.body}>
-        <View style={s.doneTop}>
-          <View style={[s.doneIcon, { backgroundColor: t.surface }]}><Text style={[s.doneCheck, { color: t.accent }]}>✓</Text></View>
-          <Text style={s.h2}>{result.added.length ? `Added ${result.added.length} item${result.added.length === 1 ? '' : 's'} to ${storeName}` : `Nothing was added to ${storeName}`}</Text>
+      <ScrollView style={s.flex} contentContainerStyle={s.doneBody}>
+        <View style={[s.banner, { backgroundColor: n ? soft(t.accent, t.surface) : t.warnBackground }]}
+          accessible accessibilityLabel={n ? `${title}, ${subtitle}` : `${title}. Your cart did not change.`} accessibilityLiveRegion="polite">
+          <View style={[s.bannerIcon, { backgroundColor: n ? t.accent : t.warnText }]}>
+            <Text style={[s.bannerCheck, { color: t.onAccent }]}>{n ? '✓' : '!'}</Text>
+          </View>
+          <View style={s.flex}>
+            <Text style={[s.bannerTitle, !n && { color: t.warnText }]}>{title}</Text>
+            <Text style={[s.bannerSub, !n && { color: t.warnText }]}>{n ? subtitle : 'Your cart did not change.'}</Text>
+          </View>
         </View>
-        {result.failed.length ? (
-          <View style={s.warn}>
-            <Text style={s.warnText}>{result.failed.length} item{result.failed.length === 1 ? '' : 's'} could not be added: {result.failed.map((f) => `${f.name} (${reasonText(f.reason)})`).join(', ')}.</Text>
+
+        {n ? (
+          <View style={s.addedCard}>
+            {result.added.map((a, i) => <AddedRow key={a.key} t={t} cart={cart} item={a} first={i === 0} />)}
           </View>
         ) : null}
-        {result.added.map((a) => (
-          <View key={a.key} style={s.doneRow}><Text style={[s.flex, s.doneName]} numberOfLines={2}>{a.name}{typeof a.weightLb === 'number' ? `, ${lbText(a.weightLb)}` : ''}</Text><Text style={s.bold}>{price(a.key)}</Text></View>
-        ))}
-        {result.skipped.filter((x) => x.reason === 'deselected').map((x) => (
-          <View key={x.key} style={s.doneRow}><Text style={[s.flex, s.muted]}>{cart.items.find((i) => i.key === x.key)?.ingredient}</Text><Text style={s.muted}>Left out</Text></View>
-        ))}
+
+        {left.length ? (
+          <View style={s.leftCard}>
+            <Pressable onPress={() => setOpen(!open)} accessibilityRole="button" accessibilityState={{ expanded: open }}
+              accessibilityLabel={`Left out this time: ${left.map((x) => x.label).join(', ')}`} style={s.leftHead}>
+              <View style={s.flex}>
+                <Text style={s.leftTitle}>Left out this time</Text>
+                {!open ? <Text style={s.small} numberOfLines={2}>{sentence(left.map((x) => x.label).join(', '))}</Text> : null}
+              </View>
+              <Text style={s.chevron} accessibilityElementsHidden importantForAccessibility="no">{open ? '▴' : '▾'}</Text>
+            </Pressable>
+            {open ? left.map((x) => (
+              <View key={x.key} style={s.leftRow} accessible accessibilityLabel={`${x.label}, ${x.why}`}>
+                <Text style={s.leftName} numberOfLines={2}>{sentence(x.label)}</Text>
+                <Text style={[s.small, x.failed && { color: t.warnText }]}>{x.why}</Text>
+              </View>
+            )) : null}
+          </View>
+        ) : null}
       </ScrollView>
-      <View style={s.footer}>
+      <View style={[s.footer, s.doneFooter]}>
         <Pressable onPress={onDone} accessibilityRole="button" style={s.cta}><Text style={s.ctaText}>Done</Text></Pressable>
+        <Text style={[s.small, s.center]}>Cart by Mealio</Text>
       </View>
     </View>
   );
+}
+
+function AddedRow({ t, cart, item, first }: { t: MealioTheme; cart: CartSession; item: AddedItem; first: boolean }) {
+  const s = styles(t);
+  const product = cart.selected(item.key);
+  const image = item.imageUrl || product?.imageUrl || null;
+  const line = item.ingredient || cart.items.find((i) => i.key === item.key)?.ingredient || '';
+  const byWeight = typeof item.weightLb === 'number';
+  const amount = byWeight ? lbText(item.weightLb as number) : `×${item.quantity}`;
+  const p = cart.addedPrice(item);
+  const price = p ? `${p.estimated ? 'about ' : ''}${money(p.amount)}` : '';
+  const spoken = [item.name, line ? `for ${line}` : null,
+    byWeight ? `${+(item.weightLb as number).toFixed(2)} pounds` : `quantity ${item.quantity}`, price || null].filter(Boolean).join(', ');
+  return (
+    <View style={[s.addedRow, !first && s.addedRule]} accessible accessibilityLabel={spoken}>
+      {image
+        ? <Image source={{ uri: image }} style={[s.addedThumb, { backgroundColor: '#FFFFFF' }]} resizeMode="contain" accessibilityIgnoresInvertColors />
+        : <View style={s.addedThumb}><Text style={s.mono}>{monogram(item.name)}</Text></View>}
+      <View style={s.flex}>
+        <Text style={s.addedName} numberOfLines={1}>{item.name}</Text>
+        {line ? <Text style={s.small} numberOfLines={1}>{line}</Text> : null}
+      </View>
+      <View style={s.addedEnd}>
+        <Text style={s.pill}>{amount}</Text>
+        {price ? <Text style={s.small}>{price}</Text> : null}
+      </View>
+    </View>
+  );
+}
+
+interface LeftOut { key: string; label: string; why: string; failed: boolean }
+
+/** Everything the store did not take this run: unchecked, skipped, or failed (with its reason). */
+function leftOut(cart: CartSession, result: AddResult, storeName: string): LeftOut[] {
+  const item = (key: string) => cart.items.find((i) => i.key === key);
+  const out: LeftOut[] = [];
+  for (const f of result.failed) {
+    out.push({ key: f.key, label: item(f.key)?.ingredient || f.name, why: sentence(`${f.name}: ${reasonText(f.reason)}`), failed: true });
+  }
+  for (const x of result.skipped) {
+    const it = item(x.key);
+    const why = it?.status === 'unavailable' ? `Not found at ${storeName}`
+      : x.reason === 'preference_required' ? 'Needed an option chosen'
+        : x.reason === 'deselected' ? 'Unchecked this time' : 'Not chosen';
+    out.push({ key: x.key, label: it?.ingredient || x.key, why, failed: false });
+  }
+  return out;
+}
+
+/** First letter up: "Corn tortillas, chipotle peppers". */
+function sentence(x: string): string {
+  return x ? x[0].toUpperCase() + x.slice(1) : x;
+}
+
+/** Two letters for an image-less product tile: "Fresh Yellow Onion" -> "FY". */
+function monogram(name: string): string {
+  const w = name.replace(/[^A-Za-z0-9 ]+/g, ' ').trim().split(/\s+/).filter(Boolean);
+  return ((w[0]?.[0] || '') + (w[1]?.[0] || '')).toUpperCase();
+}
+
+/** The accent at 10% for the banner, when it is a hex color; else the surface. */
+function soft(color: string, fallback: string): string {
+  const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(color.trim());
+  if (!m) return fallback;
+  const hex = m[1].length === 3 ? m[1].split('').map((c) => c + c).join('') : m[1];
+  return `#${hex}1A`;
 }
 
 /** "0.75 lb", "1 lb". */
@@ -617,10 +721,27 @@ function make(t: MealioTheme) {
     ctaOff: { opacity: 0.5 },
     ctaQuiet: { backgroundColor: t.surface },
     ctaText: { ...f, color: t.onAccent, fontSize: 16, fontWeight: '700' },
-    doneTop: { alignItems: 'center', gap: 12, marginVertical: 16 },
-    doneIcon: { width: 64, height: 64, borderRadius: 32, alignItems: 'center', justifyContent: 'center' },
-    doneCheck: { fontSize: 28, fontWeight: '800' },
-    doneRow: { flexDirection: 'row', gap: 12, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.border },
-    doneName: { ...f, fontSize: 14, color: t.text },
+    totalNone: { ...f, fontSize: 15, fontWeight: '600', color: t.muted },
+    doneBody: { paddingHorizontal: 20, paddingTop: 8, paddingBottom: 24, gap: 16 },
+    banner: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 14, paddingHorizontal: 16, borderRadius: t.radius + 2 },
+    bannerIcon: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
+    bannerCheck: { fontSize: 18, fontWeight: '800' },
+    bannerTitle: { ...f, fontSize: 15, fontWeight: '700', color: t.text },
+    bannerSub: { ...f, fontSize: 13, lineHeight: 18, color: t.text, opacity: 0.85 },
+    addedCard: { borderRadius: t.radius + 2, borderWidth: 1, borderColor: t.border, backgroundColor: t.background, overflow: 'hidden' },
+    addedRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, paddingHorizontal: 14, minHeight: 68 },
+    addedRule: { borderTopWidth: 1, borderTopColor: t.border },
+    addedThumb: { width: 44, height: 44, borderRadius: 10, backgroundColor: t.surface, alignItems: 'center', justifyContent: 'center' },
+    mono: { ...f, fontSize: 13, fontWeight: '700', color: t.muted },
+    addedName: { ...f, fontSize: 14, lineHeight: 19, fontWeight: '600', color: t.text },
+    addedEnd: { alignItems: 'flex-end', gap: 4 },
+    pill: { ...f, fontSize: 12, fontWeight: '700', color: t.text, paddingVertical: 3, paddingHorizontal: 8, borderRadius: 999, backgroundColor: t.surface, overflow: 'hidden' },
+    leftCard: { borderRadius: t.radius + 2, borderWidth: 1, borderColor: t.border, backgroundColor: t.background, overflow: 'hidden' },
+    leftHead: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 56, paddingVertical: 10, paddingHorizontal: 16 },
+    leftTitle: { ...f, fontSize: 14, fontWeight: '600', color: t.text },
+    chevron: { ...f, fontSize: 18, color: t.muted },
+    leftRow: { gap: 2, paddingVertical: 10, paddingHorizontal: 16, borderTopWidth: 1, borderTopColor: t.border },
+    leftName: { ...f, fontSize: 14, fontWeight: '500', color: t.text },
+    doneFooter: { borderTopWidth: 0, gap: 10 },
   });
 }

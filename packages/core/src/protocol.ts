@@ -199,11 +199,35 @@ export interface SearchResult {
   options: Product[];
 }
 
+/**
+ * One line the store took. Everything after weightLb is for the finished-run
+ * screen and comes from the product the user chose (the server does not
+ * search again). Each is optional: present only when known, and absent from
+ * servers older than the finished-run screen.
+ */
+export interface AddedItem {
+  key: string;
+  productId: string;
+  name: string;
+  quantity: number;
+  /** Set on an item added by weight: the pounds asked for. */
+  weightLb?: number;
+  /** The product's image, from the search that offered it. */
+  imageUrl?: string;
+  /** The recipe line it was added for, as the partner wrote it. */
+  ingredient?: string;
+  /** One unit's price. On a weight item priced as a package, the package price. */
+  unitPrice?: number;
+  /** Price per lb for a weight item priced by the pound. */
+  pricePerLb?: number;
+  /** The price is the store's estimate (weighed or "Avg." items). */
+  estimated?: boolean;
+}
+
 export interface AddResult {
   cartId: string;
   store: string;
-  /** weightLb is set on an item added by weight: the pounds asked for. */
-  added: Array<{ key: string; productId: string; name: string; quantity: number; weightLb?: number }>;
+  added: AddedItem[];
   skipped: Array<{ key: string; reason: string }>;
   failed: Array<{ key: string; productId: string; name: string; reason: string }>;
   storeCartUrl: string | null;

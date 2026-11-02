@@ -224,6 +224,41 @@ holds a weight line of the product of at least `weightLb`, and the added entry
 carries `weightLb`. A weight item retried after the first read is written only
 if the cart holds no line of it, so its pounds are never added twice.
 
+## The add result
+
+An add job's `done.result` is an `AddResult` (`packages/core/src/protocol.ts`):
+`added`, `skipped`, `failed`, `storeCartUrl`, and `verified` (true when a cart
+read after the write confirmed every added item).
+
+Each `added` entry is an `AddedItem`. `key`, `productId`, `name` and
+`quantity` are always there. The rest is for the finished-run screen and comes
+from the product the prepare or search step already offered: the server does
+not search again. Each is present only when known, and absent from servers
+older than these fields, so an SDK falls back to the product it selected.
+
+| Field | Meaning |
+| --- | --- |
+| `weightLb` | Set on an item added by weight: the pounds asked for |
+| `imageUrl` | The product's image |
+| `ingredient` | The recipe line it was added for, as the partner wrote it |
+| `unitPrice` | One unit's price. On a weight item priced as a package, the package price |
+| `pricePerLb` | Price per lb, for a weight item priced by the pound |
+| `estimated` | The price is the store's estimate (weighed or "Avg." items) |
+
+A line's price is `pricePerLb × weightLb` for a weight item (else its
+`unitPrice` once), otherwise `unitPrice × quantity`.
+
+## Totals
+
+**No partial totals.** If even one counted item has no price, there is no
+total: the SDK shows no number ("Prices at checkout"), never a sum of the
+items it could price. This holds for the list's estimate (the selected items)
+and the finished-run total (the added items). A weight item with a
+`pricePerLb`, or a package `unitPrice`, counts as priced. Per-row prices still
+show where they are known. In core, `CartSession.estimate()` and
+`CartSession.addedTotal(result)` return `total: null` whenever `unpriced` is
+above 0.
+
 ## Allowlist
 
 The SDK refuses (`error: "blocked"`) any `page_open`, `fetch` or login

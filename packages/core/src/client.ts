@@ -6,7 +6,7 @@ import { Allowlist } from './allowlist';
 import { openEnvelope, EnvelopeError } from './verify';
 import { SUPPORTED_OPS } from './protocol';
 import type {
-  AddResult, AllowlistPayload, CartItem, Envelope, Instruction, PreparedCart, Product, Recipe, SearchResult, Selection, StepRequest, StoreInfo,
+  AddedItem, AddResult, AllowlistPayload, CartItem, Envelope, Instruction, PreparedCart, Product, Recipe, SearchResult, Selection, StepRequest, StoreInfo,
 } from './protocol';
 
 export const SDK_CORE_VERSION = '0.1.0';
@@ -183,6 +183,29 @@ function nearestIndex(opts: number[], v: number): number {
   let best = 0;
   opts.forEach((o, i) => { if (Math.abs(o - v) < Math.abs(opts[best] - v) - 1e-9) best = i; });
   return best;
+}
+
+/** A total. `total` is null when any counted item has no price: show no number then. */
+export interface Estimate { total: number | null; count: number; estimated: boolean; unpriced: number }
+
+/**
+ * What one added line cost, or null when its price is unknown. By weight:
+ * price per lb times the pounds, else the package price once. Otherwise unit
+ * price times quantity. `fallback` is the chosen Product, for servers whose
+ * added entries carry no prices.
+ */
+export function addedPrice(a: AddedItem, fallback?: Product | null): { amount: number; estimated: boolean } | null {
+  const perLb = typeof a.pricePerLb === 'number' ? a.pricePerLb : (typeof fallback?.pricePerLb === 'number' ? fallback.pricePerLb : null);
+  const unit = typeof a.unitPrice === 'number' ? a.unitPrice : (typeof fallback?.unitPrice === 'number' ? fallback.unitPrice : null);
+  const est = !!(a.estimated ?? fallback?.estimated);
+  const round = (n: number) => Math.round(n * 100) / 100;
+  if (typeof a.weightLb === 'number') {
+    if (perLb != null) return { amount: round(perLb * a.weightLb), estimated: true };
+    if (unit != null) return { amount: round(unit), estimated: true };
+    return null;
+  }
+  if (unit == null) return null;
+  return { amount: round(unit * Math.max(1, a.quantity || 1)), estimated: est };
 }
 
 export class CartSession {
@@ -363,8 +386,12 @@ export class CartSession {
    * sold-by-weight item price per lb times the weight (one package price when
    * the store prices it as a package). `estimated` is true when any item is
    * sold by weight or has no price, so show it as "about".
+   *
+   * `total` is null when even one selected item has no price (`unpriced` > 0):
+   * a total that leaves an item out is wrong, so show no number at all
+   * ("Prices at checkout"). A weight item priced per lb counts as priced.
    */
-  estimate(): { total: number; count: number; estimated: boolean; unpriced: number } {
+  estimate(): Estimate {
     let total = 0, count = 0, unpriced = 0, estimated = false;
     for (const it of this.items) {
       const p = this.selected(it.key);
@@ -381,7 +408,29 @@ export class CartSession {
       else unpriced += 1;
       if (p.estimated) estimated = true;
     }
-    return { total: Math.round(total * 100) / 100, count, estimated: estimated || unpriced > 0, unpriced };
+    return { total: unpriced > 0 ? null : Math.round(total * 100) / 100, count, estimated: estimated || unpriced > 0, unpriced };
+  }
+
+  /**
+   * The total of what the store took, for the finished-run screen. Same rule
+   * as estimate(): `total` is null when any added item has no price. Prices
+   * come from the added entries, else (an older server) from the product
+   * selected in this session.
+   */
+  addedTotal(result: AddResult): Estimate {
+    let total = 0, unpriced = 0, estimated = false;
+    for (const a of result.added) {
+      const p = addedPrice(a, this.selected(a.key));
+      if (!p) { unpriced += 1; continue; }
+      total += p.amount;
+      if (p.estimated) estimated = true;
+    }
+    return { total: unpriced > 0 ? null : Math.round(total * 100) / 100, count: result.added.length, estimated: estimated || unpriced > 0, unpriced };
+  }
+
+  /** One added line's price (see addedPrice), with this session's product as the fallback. */
+  addedPrice(a: AddedItem): { amount: number; estimated: boolean } | null {
+    return addedPrice(a, this.selected(a.key));
   }
 
   /** @deprecated use select() */
