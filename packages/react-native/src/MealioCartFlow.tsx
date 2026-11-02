@@ -209,7 +209,6 @@ export function CartList({ t, cart, storeName, busy, onChange, onAdd }: CartList
           {busy ? <ActivityIndicator color={t.onAccent} />
             : <Text style={s.ctaText}>{est.count ? `Add ${est.count} item${est.count === 1 ? '' : 's'} to ${storeName}` : 'Select items to add'}</Text>}
         </Pressable>
-        <Text style={[s.small, s.center]}>You check out on {storeName}</Text>
       </View>
     </View>
   );
@@ -379,7 +378,6 @@ function Done({ t, cart, result, storeName, onDone }: { t: MealioTheme; cart: Ca
       </ScrollView>
       <View style={s.footer}>
         <Pressable onPress={onDone} accessibilityRole="button" style={s.cta}><Text style={s.ctaText}>Done</Text></Pressable>
-        <Text style={[s.small, s.center]}>Check out on {storeName} when you are ready.</Text>
       </View>
     </View>
   );
