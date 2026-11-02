@@ -9,7 +9,8 @@ import { MealioCartFlow } from './MealioCartFlow';
 
 export interface MealioCartButtonProps {
   recipe: Recipe;
-  store: string;
+  /** Optional. Without it the user's default store is used, or they pick one. */
+  store?: string | null;
   zip?: string | null;
   /** Defaults to "Add to my grocery cart". */
   label?: string;

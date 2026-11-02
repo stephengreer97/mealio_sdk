@@ -10,5 +10,5 @@ export { DEFAULT_THEME } from './theme';
 export type { MealioTheme } from './theme';
 export { CartSession, MealioError } from '@mealio/sdk-core';
 export type {
-  AddResult, CartItem, ItemStatus, PreparedCart, Product, Recipe, RecipeIngredient, Selection, Step,
+  AddResult, CartItem, ItemStatus, PreparedCart, Product, Recipe, RecipeIngredient, Selection, Step, StoreInfo,
 } from '@mealio/sdk-core';

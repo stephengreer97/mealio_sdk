@@ -9,15 +9,19 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator, Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View,
 } from 'react-native';
-import type { AddResult, CartItem, CartSession, MealioError, Product, Recipe, Step } from '@mealio/sdk-core';
+import type { AddResult, CartItem, CartSession, MealioError, Product, Recipe, Step, StoreInfo } from '@mealio/sdk-core';
 import { useMealio, useMealioInternal } from './MealioProvider';
 import { money, type MealioTheme } from './theme';
 
 export interface MealioCartFlowProps {
   visible: boolean;
   recipe: Recipe;
-  /** Store id from GET /api/v1/stores, e.g. "heb". */
-  store: string;
+  /**
+   * Store id from GET /api/v1/stores, e.g. "heb". Optional: without it the
+   * user's default store is used, and the sheet asks them to pick one the
+   * first time. The user can change store from the sheet either way.
+   */
+  store?: string | null;
   /** 5-digit zip. Needed for Kroger family stores. */
   zip?: string | null;
   /** Called when the sheet closes. `result` is null when nothing was added. */
@@ -27,7 +31,7 @@ export interface MealioCartFlowProps {
   onError?: (e: MealioError | Error) => void;
 }
 
-type Phase = 'loading' | 'list' | 'adding' | 'done' | 'error';
+type Phase = 'loading' | 'list' | 'adding' | 'done' | 'error' | 'stores';
 
 export function MealioCartFlow(props: MealioCartFlowProps) {
   const { visible } = props;
@@ -41,6 +45,9 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
   const [error, setError] = useState<{ code: string; message: string } | null>(null);
   const [, setVersion] = useState(0);
   const run = useRef(0);
+  const [store, setStore] = useState<string | null>(props.store ?? null);
+  const [stores, setStores] = useState<StoreInfo[] | null>(null);
+  const backTo = useRef<Phase>('list');
   const bump = useCallback(() => setVersion((v) => v + 1), []);
 
   useEffect(() => {
@@ -50,23 +57,32 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
 
-  const start = useCallback(async () => {
+  const openStores = useCallback(async (from: Phase) => {
+    backTo.current = from;
+    setPhase('stores');
+    if (!stores) {
+      try { setStores(await mealio.stores()); } catch { setStores([]); }
+    }
+  }, [stores, mealio]);
+
+  const start = useCallback(async (storeId: string | null) => {
     const id = ++run.current;
     setPhase('loading'); setStep('connecting'); setCart(null); setResult(null); setError(null);
     try {
-      const c = await mealio.prepareCart({ store: props.store, recipe: props.recipe, zip: props.zip }, { onStep: (s) => run.current === id && setStep(s) });
+      const c = await mealio.prepareCart({ store: storeId, recipe: props.recipe, zip: props.zip }, { onStep: (s) => run.current === id && setStep(s) });
       if (run.current !== id) return;
-      setCart(c); setPhase('list');
+      setStore(c.store); setCart(c); setPhase('list');
     } catch (e: any) {
       if (run.current !== id) return;
+      if (e?.code === 'store_required') { openStores('error'); return; }
       setError({ code: e?.code || 'error', message: e?.message || 'Something went wrong.' });
       setPhase('error');
       props.onError?.(e);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.store, props.zip, props.recipe]);
+  }, [props.zip, props.recipe]);
 
-  useEffect(() => { if (visible) start(); else run.current += 1; }, [visible, start]);
+  useEffect(() => { if (visible) start(props.store ?? null); else run.current += 1; }, [visible]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const add = useCallback(async () => {
     if (!cart) return;
@@ -90,7 +106,7 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, result, internal.login]);
 
-  const storeName = cart?.cart.storeName || storeLabel(props.store);
+  const storeName = cart?.cart.storeName || (store ? storeLabel(store) : 'your store');
   const s = useMemo(() => styles(t), [t]);
 
   return (
@@ -106,12 +122,16 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
             </View>
           ) : phase === 'loading' ? (
             <Loading t={t} step={step} storeName={storeName} count={props.recipe.ingredients.length} />
+          ) : phase === 'stores' ? (
+            <StorePicker t={t} stores={stores} current={store} onPick={(id) => { setStore(id); start(id); }}
+              onBack={cart && backTo.current === 'list' ? () => setPhase('list') : null} />
           ) : (phase === 'list' || phase === 'adding') && cart ? (
-            <CartList t={t} cart={cart} storeName={storeName} busy={phase === 'adding'} onChange={bump} onAdd={add} />
+            <CartList t={t} cart={cart} storeName={storeName} busy={phase === 'adding'} onChange={bump} onAdd={add}
+              onChangeStore={() => openStores('list')} />
           ) : phase === 'done' && result && cart ? (
             <Done t={t} cart={cart} result={result} storeName={storeName} onDone={close} />
           ) : (
-            <ErrorView t={t} error={error} onRetry={start} onClose={close} />
+            <ErrorView t={t} error={error} onRetry={() => start(store)} onClose={close} />
           )}
         </KeyboardAvoidingView>
       </View>
@@ -123,6 +143,7 @@ function headerTitle(phase: Phase, storeName: string): string {
   if (phase === 'done') return 'All set';
   if (phase === 'loading') return `Getting your ${storeName} cart ready`;
   if (phase === 'error') return 'Something went wrong';
+  if (phase === 'stores') return 'Choose your store';
   return `Your ${storeName} list`;
 }
 
@@ -181,17 +202,27 @@ export interface CartListProps {
   busy: boolean;
   onChange: () => void;
   onAdd: () => void;
+  /** Shows a tappable store chip. */
+  onChangeStore?: (() => void) | null;
 }
 
 /** The list screen on its own, for partners who host it in their own sheet. */
-export function CartList({ t, cart, storeName, busy, onChange, onAdd }: CartListProps) {
+export function CartList({ t, cart, storeName, busy, onChange, onAdd, onChangeStore }: CartListProps) {
   const s = styles(t);
   const [open, setOpen] = useState<string | null>(() => cart.items.find((i) => i.status === 'choose' || i.status === 'remembered_unavailable')?.key ?? null);
   const est = cart.estimate();
   const selectable = cart.items.filter((i) => i.status !== 'unavailable');
   return (
     <View style={s.flex}>
-      <Text style={[s.muted, s.pad]}>{est.count} of {selectable.length} items selected</Text>
+      <View style={s.chipRow}>
+        {onChangeStore ? (
+          <Pressable onPress={onChangeStore} disabled={busy} accessibilityRole="button" accessibilityLabel={`Store: ${storeName}. Change store`} style={s.chip}>
+            <Text style={s.chipText}>{storeName}</Text>
+            <Text style={[s.chipText, { color: t.accent }]}>Change</Text>
+          </Pressable>
+        ) : null}
+        <Text style={s.muted}>{est.count} of {selectable.length} selected</Text>
+      </View>
       <ScrollView style={s.flex} contentContainerStyle={s.list} keyboardShouldPersistTaps="handled">
         {cart.items.map((it) => (
           <ItemRow key={it.key} t={t} cart={cart} item={it} storeName={storeName} open={open === it.key}
@@ -384,9 +415,36 @@ function Done({ t, cart, result, storeName, onDone }: { t: MealioTheme; cart: Ca
 }
 
 function reasonText(r: string): string {
+  if (r === 'not_confirmed') return 'not confirmed in your cart';
   if (/stock/.test(r)) return 'out of stock';
   if (/timeout|no_answer/.test(r)) return 'the store did not answer';
   return 'the store refused it';
+}
+
+function StorePicker({ t, stores, current, onPick, onBack }: {
+  t: MealioTheme; stores: StoreInfo[] | null; current: string | null; onPick: (id: string) => void; onBack: (() => void) | null;
+}) {
+  const s = styles(t);
+  if (!stores) return <View style={s.body}><ActivityIndicator color={t.accent} /></View>;
+  return (
+    <View style={s.flex}>
+      <ScrollView style={s.flex} contentContainerStyle={s.list}>
+        {stores.length === 0 ? <Text style={s.muted}>Could not load stores. Close and try again.</Text> : null}
+        {stores.map((st) => (
+          <Pressable key={st.id} onPress={() => onPick(st.id)} accessibilityRole="radio" accessibilityState={{ selected: st.id === current }}
+            style={[s.storeRow, st.id === current && { borderColor: t.accent, borderWidth: 2 }]}>
+            <Text style={s.name}>{st.name}</Text>
+            {st.id === current ? <Text style={[s.small, { color: t.accent }]}>Current</Text> : null}
+          </Pressable>
+        ))}
+      </ScrollView>
+      {onBack ? (
+        <View style={s.footer}>
+          <Pressable onPress={onBack} accessibilityRole="button" style={[s.cta, s.ctaQuiet]}><Text style={[s.ctaText, { color: t.text }]}>Back to your list</Text></Pressable>
+        </View>
+      ) : null}
+    </View>
+  );
 }
 
 function ErrorView({ t, error, onRetry, onClose }: { t: MealioTheme; error: { code: string; message: string } | null; onRetry: () => void; onClose: () => void }) {
@@ -426,6 +484,10 @@ function make(t: MealioTheme) {
     closeX: { fontSize: 16, color: t.text },
     body: { padding: 20, gap: 12 },
     pad: { paddingHorizontal: 20, paddingBottom: 8 },
+    chipRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 20, paddingBottom: 10 },
+    chip: { flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 36, paddingHorizontal: 12, borderRadius: 18, backgroundColor: t.surface },
+    chipText: { ...f, fontSize: 13, fontWeight: '600', color: t.text },
+    storeRow: { minHeight: 56, paddingHorizontal: 16, borderRadius: t.radius, borderWidth: 1, borderColor: t.border, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', margin: 1 },
     pad12: { paddingHorizontal: 12 },
     muted: { ...f, color: t.muted, fontSize: 14 },
     small: { ...f, color: t.muted, fontSize: 12, lineHeight: 17 },

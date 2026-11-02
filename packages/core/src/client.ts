@@ -6,7 +6,7 @@ import { Allowlist } from './allowlist';
 import { openEnvelope, EnvelopeError } from './verify';
 import { SUPPORTED_OPS } from './protocol';
 import type {
-  AddResult, AllowlistPayload, CartItem, Envelope, Instruction, PreparedCart, Product, Recipe, SearchResult, Selection, StepRequest,
+  AddResult, AllowlistPayload, CartItem, Envelope, Instruction, PreparedCart, Product, Recipe, SearchResult, Selection, StepRequest, StoreInfo,
 } from './protocol';
 
 export const SDK_CORE_VERSION = '0.1.0';
@@ -67,7 +67,23 @@ export class MealioClient {
   }
 
   /** Start a cart: signs in to the store if needed, searches every ingredient. */
-  async prepareCart(input: { store: string; recipe: Recipe; zip?: string | null }, opts: { onStep?: StepListener } = {}): Promise<CartSession> {
+  /** Stores the SDK supports right now. Public, no session needed. */
+  async stores(): Promise<StoreInfo[]> {
+    try {
+      const res = await this.f(this.base + '/api/v1/stores');
+      const j = await res.json();
+      return Array.isArray(j?.stores) ? j.stores : [];
+    } catch {
+      throw new MealioError('network', 'Could not reach Mealio');
+    }
+  }
+
+  /**
+   * Start a cart: signs in to the store if needed, searches every ingredient.
+   * `store` is optional: without it Mealio uses the user's default store, and
+   * fails with `store_required` when they have none yet.
+   */
+  async prepareCart(input: { store?: string | null; recipe: Recipe; zip?: string | null }, opts: { onStep?: StepListener } = {}): Promise<CartSession> {
     const start = await this.post<JobStart>('/api/v1/sdk/carts', { ...input, ...(await this.about()) });
     const result = await this.drive(start, opts.onStep) as unknown as PreparedCart;
     return new CartSession(this, result);

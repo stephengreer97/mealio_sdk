@@ -193,6 +193,15 @@ export interface AddResult {
   skipped: Array<{ key: string; reason: string }>;
   failed: Array<{ key: string; productId: string; name: string; reason: string }>;
   storeCartUrl: string | null;
+  /** True when a cart read after adding confirmed every added item. */
+  verified?: boolean;
+}
+
+export interface StoreInfo {
+  id: string;
+  name: string;
+  /** "device": runs on the phone with the user's store login. "kroger_api": through Kroger's API. */
+  via: 'device' | 'kroger_api';
 }
 
 export interface Selection {
