@@ -516,6 +516,8 @@ class Product {
     this.outOfStock = false,
     this.badge,
     this.preferences = const <ProductPreference>[],
+    this.unitPrice,
+    this.estimated = false,
   });
 
   factory Product.fromJson(Object? json) {
@@ -529,11 +531,15 @@ class Product {
       outOfStock: _bool(m['outOfStock']),
       badge: _strOrNull(m['badge']),
       preferences: _list(m['preferences']).map(ProductPreference.fromJson).toList(),
+      unitPrice: m['unitPrice'] is num ? (m['unitPrice']! as num).toDouble() : null,
+      estimated: _bool(m['estimated']),
     );
   }
 
   final String id;
   final String name;
+
+  /// Display price, e.g. "$3.48" or "$3.48/lb".
   final String? price;
   final String? imageUrl;
   final String? size;
@@ -547,6 +553,12 @@ class Product {
   /// Pass the chosen id as `preferenceId`.
   final List<ProductPreference> preferences;
 
+  /// One unit's price as a number, for an estimated total.
+  final double? unitPrice;
+
+  /// Sold by weight: the price is the store's estimate.
+  final bool estimated;
+
   Map<String, Object?> toJson() {
     final out = <String, Object?>{'id': id, 'name': name};
     _put(out, 'price', price);
@@ -555,7 +567,36 @@ class Product {
     out['outOfStock'] = outOfStock;
     _put(out, 'badge', badge);
     if (preferences.isNotEmpty) out['preferences'] = preferences.map((ProductPreference p) => p.toJson()).toList();
+    _put(out, 'unitPrice', unitPrice);
+    if (estimated) out['estimated'] = true;
     return out;
+  }
+}
+
+/// Where an item stands when the cart is prepared.
+enum ItemStatus {
+  /// The user's remembered product, in stock, pre-selected.
+  remembered('remembered'),
+
+  /// Nothing remembered yet: the user picks.
+  choose('choose'),
+
+  /// The remembered product is out of stock or gone this time.
+  rememberedUnavailable('remembered_unavailable'),
+
+  /// Nothing found; `CartItem.reason` says why.
+  unavailable('unavailable');
+
+  const ItemStatus(this.wire);
+
+  /// The string on the wire.
+  final String wire;
+
+  static ItemStatus? fromWire(Object? v) {
+    for (final ItemStatus s in ItemStatus.values) {
+      if (s.wire == v) return s;
+    }
+    return null;
   }
 }
 
@@ -564,20 +605,49 @@ class CartItem {
     required this.key,
     required this.ingredient,
     required this.quantity,
-    this.chosen,
+    this.status = ItemStatus.choose,
     this.options = const <Product>[],
+    this.selectedId,
+    this.remembered,
+    this.rememberedPreferenceId,
     this.reason,
+    this.chosen,
   });
 
-  factory CartItem.fromJson(Object? json) {
+  /// Reads the 0.2 shape. An item without `status` (a 0.1 server) gets one
+  /// from `group` (`ready`, `needsChoice` or `unavailable`) or from its fields.
+  factory CartItem.fromJson(Object? json, {String? group}) {
     final m = _mapOrNull(json) ?? const <String, Object?>{};
+    final chosen = m['chosen'] == null ? null : Product.fromJson(m['chosen']);
+    final remembered = m['remembered'] == null ? null : Product.fromJson(m['remembered']);
+    var options = _list(m['options']).map(Product.fromJson).toList();
+    var status = ItemStatus.fromWire(m['status']);
+    var selectedId = _strOrNull(m['selectedId']);
+    var rememberedProduct = remembered;
+    if (status == null) {
+      // 0.1 shape: `chosen` means ready and pre-selected.
+      if (chosen != null && group != 'unavailable') {
+        status = ItemStatus.remembered;
+        selectedId ??= chosen.id;
+        rememberedProduct ??= chosen;
+        if (!options.any((Product p) => p.id == chosen.id)) options = <Product>[chosen, ...options];
+      } else if (group == 'unavailable' || (group == null && options.isEmpty && m['reason'] != null)) {
+        status = ItemStatus.unavailable;
+      } else {
+        status = ItemStatus.choose;
+      }
+    }
     return CartItem(
       key: _str(m['key']),
       ingredient: _str(m['ingredient']),
       quantity: _int(m['quantity'], 1),
-      chosen: m['chosen'] == null ? null : Product.fromJson(m['chosen']),
-      options: _list(m['options']).map(Product.fromJson).toList(),
+      status: status,
+      options: options,
+      selectedId: selectedId,
+      remembered: rememberedProduct,
+      rememberedPreferenceId: _strOrNull(m['rememberedPreferenceId']),
       reason: _strOrNull(m['reason']),
+      chosen: chosen,
     );
   }
 
@@ -585,58 +655,131 @@ class CartItem {
   final String ingredient;
   final int quantity;
 
-  /// Set when the user chose this product before for this recipe and it is in stock.
-  final Product? chosen;
+  final ItemStatus status;
 
-  /// Up to 8 options, best first. Present when the user still has to choose.
+  /// Every option, best first. The remembered product leads when the store has it.
   final List<Product> options;
 
-  /// Why nothing could be offered, e.g. "no_results".
+  /// Pre-selected product id for this run, or null.
+  final String? selectedId;
+
+  /// The user's remembered product, whatever its stock.
+  final Product? remembered;
+  final String? rememberedPreferenceId;
+
+  /// Why nothing could be offered, e.g. "no_results", or why the remembered
+  /// product is unavailable ("out_of_stock", "not_found").
   final String? reason;
 
+  /// 0.1 shape: the remembered product when it was in stock.
+  @Deprecated('Use remembered and selectedId')
+  final Product? chosen;
+
   Map<String, Object?> toJson() {
-    final out = <String, Object?>{'key': key, 'ingredient': ingredient, 'quantity': quantity};
-    _put(out, 'chosen', chosen?.toJson());
-    out['options'] = options.map((Product p) => p.toJson()).toList();
+    final out = <String, Object?>{
+      'key': key,
+      'ingredient': ingredient,
+      'quantity': quantity,
+      'status': status.wire,
+      'options': options.map((Product p) => p.toJson()).toList(),
+      'selectedId': selectedId,
+      'remembered': remembered?.toJson(),
+    };
+    _put(out, 'rememberedPreferenceId', rememberedPreferenceId);
     _put(out, 'reason', reason);
+    // ignore: deprecated_member_use_from_same_package
+    _put(out, 'chosen', chosen?.toJson());
     return out;
   }
 }
 
-List<CartItem> _items(Object? v) => _list(v).map(CartItem.fromJson).toList();
+List<CartItem> _items(Object? v, String group) =>
+    _list(v).map((Object? j) => CartItem.fromJson(j, group: group)).toList();
 
 class PreparedCart {
   const PreparedCart({
     required this.cartId,
     required this.store,
-    required this.ready,
-    required this.needsChoice,
-    required this.unavailable,
+    this.storeName,
+    required this.items,
+    this.ready = const <CartItem>[],
+    this.needsChoice = const <CartItem>[],
+    this.unavailable = const <CartItem>[],
   });
 
+  /// Reads `items`; a 0.1 server without it gets items rebuilt from the
+  /// groupings, in the order ready, needsChoice, unavailable.
   factory PreparedCart.fromJson(Object? json) {
     final m = _mapOrNull(json) ?? const <String, Object?>{};
+    final ready = _items(m['ready'], 'ready');
+    final needsChoice = _items(m['needsChoice'], 'needsChoice');
+    final unavailable = _items(m['unavailable'], 'unavailable');
+    final items = m['items'] is List
+        ? _list(m['items']).map((Object? j) => CartItem.fromJson(j)).toList()
+        : <CartItem>[...ready, ...needsChoice, ...unavailable];
     return PreparedCart(
       cartId: _str(m['cartId']),
       store: _str(m['store']),
-      ready: _items(m['ready']),
-      needsChoice: _items(m['needsChoice']),
-      unavailable: _items(m['unavailable']),
+      storeName: _strOrNull(m['storeName']),
+      items: items,
+      ready: ready,
+      needsChoice: needsChoice,
+      unavailable: unavailable,
     );
   }
 
   final String cartId;
   final String store;
+
+  /// Display name, e.g. "H-E-B".
+  final String? storeName;
+
+  /// Every recipe line, in recipe order. Show them all.
+  final List<CartItem> items;
+
+  /// 0.1 groupings derived from items.
+  @Deprecated('Use items')
   final List<CartItem> ready;
+  @Deprecated('Use items')
   final List<CartItem> needsChoice;
+  @Deprecated('Use items')
   final List<CartItem> unavailable;
 
+  Map<String, Object?> toJson() {
+    final out = <String, Object?>{'cartId': cartId, 'store': store};
+    _put(out, 'storeName', storeName);
+    out['items'] = items.map((CartItem i) => i.toJson()).toList();
+    // ignore: deprecated_member_use_from_same_package
+    out['ready'] = ready.map((CartItem i) => i.toJson()).toList();
+    // ignore: deprecated_member_use_from_same_package
+    out['needsChoice'] = needsChoice.map((CartItem i) => i.toJson()).toList();
+    // ignore: deprecated_member_use_from_same_package
+    out['unavailable'] = unavailable.map((CartItem i) => i.toJson()).toList();
+    return out;
+  }
+}
+
+/// The `done` result of a search job.
+class SearchResult {
+  const SearchResult({required this.key, required this.query, required this.options});
+
+  factory SearchResult.fromJson(Object? json) {
+    final m = _mapOrNull(json) ?? const <String, Object?>{};
+    return SearchResult(
+      key: _str(m['key']),
+      query: _str(m['query']),
+      options: _list(m['options']).map(Product.fromJson).toList(),
+    );
+  }
+
+  final String key;
+  final String query;
+  final List<Product> options;
+
   Map<String, Object?> toJson() => <String, Object?>{
-        'cartId': cartId,
-        'store': store,
-        'ready': ready.map((CartItem i) => i.toJson()).toList(),
-        'needsChoice': needsChoice.map((CartItem i) => i.toJson()).toList(),
-        'unavailable': unavailable.map((CartItem i) => i.toJson()).toList(),
+        'key': key,
+        'query': query,
+        'options': options.map((Product p) => p.toJson()).toList(),
       };
 }
 
@@ -697,6 +840,7 @@ class AddResult {
     required this.skipped,
     required this.failed,
     required this.storeCartUrl,
+    this.verified,
   });
 
   factory AddResult.fromJson(Object? json) {
@@ -708,6 +852,7 @@ class AddResult {
       skipped: _list(m['skipped']).map(SkippedItem.fromJson).toList(),
       failed: _list(m['failed']).map(FailedItem.fromJson).toList(),
       storeCartUrl: _strOrNull(m['storeCartUrl']),
+      verified: m['verified'] is bool ? m['verified']! as bool : null,
     );
   }
 
@@ -718,14 +863,43 @@ class AddResult {
   final List<FailedItem> failed;
   final String? storeCartUrl;
 
-  Map<String, Object?> toJson() => <String, Object?>{
-        'cartId': cartId,
-        'store': store,
-        'added': added.map((AddedItem a) => a.toJson()).toList(),
-        'skipped': skipped.map((SkippedItem s) => s.toJson()).toList(),
-        'failed': failed.map((FailedItem f) => f.toJson()).toList(),
-        'storeCartUrl': storeCartUrl,
-      };
+  /// True when a cart read after adding confirmed every added item. A failed
+  /// item with reason `not_confirmed` was added but not seen in the cart.
+  final bool? verified;
+
+  Map<String, Object?> toJson() {
+    final out = <String, Object?>{
+      'cartId': cartId,
+      'store': store,
+      'added': added.map((AddedItem a) => a.toJson()).toList(),
+      'skipped': skipped.map((SkippedItem s) => s.toJson()).toList(),
+      'failed': failed.map((FailedItem f) => f.toJson()).toList(),
+      'storeCartUrl': storeCartUrl,
+    };
+    _put(out, 'verified', verified);
+    return out;
+  }
+}
+
+/// A store the SDK supports, from `GET /api/v1/stores`.
+class StoreInfo {
+  const StoreInfo({required this.id, required this.name, required this.via});
+
+  factory StoreInfo.fromJson(Object? json) {
+    final m = _mapOrNull(json) ?? const <String, Object?>{};
+    return StoreInfo(id: _str(m['id']), name: _str(m['name']), via: _str(m['via'], 'device'));
+  }
+
+  final String id;
+
+  /// Display name, e.g. "H-E-B".
+  final String name;
+
+  /// `device`: runs on the phone with the user's store login. `kroger_api`:
+  /// through Kroger's API.
+  final String via;
+
+  Map<String, Object?> toJson() => <String, Object?>{'id': id, 'name': name, 'via': via};
 }
 
 /// The user's decision for one item, sent to `/carts/{cart}/add`.
@@ -745,11 +919,12 @@ class Selection {
 
   final String key;
 
-  /// Null means "skip this item".
+  /// Null leaves the item out of this run. It never forgets the remembered
+  /// choice.
   final String? productId;
   final int? quantity;
 
-  /// Save this choice for the next time this recipe is carted. Default true.
+  /// Save this product as the remembered choice. Default true.
   final bool? remember;
 
   /// Required when the chosen Product has `preferences`.

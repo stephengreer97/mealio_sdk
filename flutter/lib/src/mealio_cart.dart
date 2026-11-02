@@ -10,6 +10,7 @@ import 'client.dart';
 import 'errors.dart';
 import 'host.dart';
 import 'protocol.dart';
+import 'theme.dart';
 import 'webview_host.dart';
 
 const String _epochKey = 'mealio_sdk.store_epoch';
@@ -52,8 +53,9 @@ class _ScopedHost implements MealioHost {
 /// MealioCart.configure(
 ///   publishableKey: 'pk_live_...',
 ///   sessionTokenProvider: () => myServer.mealioSessionToken(),
+///   theme: const MealioTheme(accent: Color(0xFF0B5FFF)),
 /// );
-/// final session = await MealioCart.instance.prepareCart(store: 'heb', recipe: recipe);
+/// // Then, anywhere: MealioCartButton(recipe: recipe, store: 'heb')
 /// ```
 class MealioCart {
   MealioCart._(this._client);
@@ -65,12 +67,16 @@ class MealioCart {
   ///
   /// `sessionTokenProvider` returns an SDK session token your server got from
   /// `POST /api/v1/sessions`. It is called again when a token expires.
+  ///
+  /// `theme` styles the drop-in widgets. `MealioScope(theme: ...)` overrides it.
   static MealioCart configure({
     required String publishableKey,
     required Future<String> Function() sessionTokenProvider,
     String baseUrl = defaultBaseUrl,
     Future<String?> Function()? attestationProvider,
+    MealioTheme? theme,
   }) {
+    MealioTheme.configured = theme;
     final client = MealioClient(
       ClientConfig(
         publishableKey: publishableKey,
@@ -100,13 +106,26 @@ class MealioCart {
 
   final MealioClient _client;
 
+  /// The client underneath, for apps that drive the protocol themselves.
+  MealioClient get client => _client;
+
+  /// Stores the SDK supports right now.
+  Future<List<StoreInfo>> stores() => _client.stores();
+
   /// Start a cart for `recipe` at `store`: signs the user in to the store if
-  /// needed and searches every ingredient. Throws [MealioException].
-  Future<CartSession> prepareCart({required String store, required Recipe recipe, String? zip}) async {
+  /// needed and searches every ingredient. Without `store`, Mealio uses the
+  /// user's default store and fails with `store_required` when there is none.
+  /// `onStep` reports progress. Throws [MealioException].
+  Future<CartSession> prepareCart({
+    String? store,
+    required Recipe recipe,
+    String? zip,
+    StepListener? onStep,
+  }) async {
     if (WebViewHost.current == null) {
       throw const MealioException(MealioErrorCode.noScope, 'Place MealioScope near the root of your app.');
     }
-    return _client.prepareCart(store: store, recipe: recipe, zip: zip);
+    return _client.prepareCart(store: store, recipe: recipe, zip: zip, onStep: onStep);
   }
 
   /// Signs the user out of `store`.
@@ -117,7 +136,7 @@ class MealioCart {
   Future<void> signOutOfStore(String store) => signOutOfAllStores();
 
   /// Clears every store login on this device and bumps the stored
-  /// store-session epoch, which the next `hello` reports to Mealio.
+  /// store-session epoch, which the next cart reports to Mealio.
   Future<void> signOutOfAllStores() async {
     final host = WebViewHost.current;
     if (host != null) {
@@ -131,7 +150,6 @@ class MealioCart {
     }
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(_epochKey, (prefs.getInt(_epochKey) ?? 0) + 1);
-    _client.resetHello();
   }
 
   /// The device's store-session epoch. Starts at 0.

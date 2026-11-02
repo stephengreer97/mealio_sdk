@@ -23,6 +23,7 @@ import 'guard.dart';
 import 'host.dart';
 import 'matcher.dart';
 import 'protocol.dart';
+import 'theme.dart';
 
 /// The JavaScriptChannel every Mealio WebView registers.
 const String bridgeChannelName = '__mealioNativeBridge';
@@ -105,6 +106,31 @@ class _LoadEnd {
   final String? error;
 }
 
+/// A store sign-in in progress, handed to an open cart flow sheet so it can
+/// show the sign-in inside itself. [webview] shares the hidden WebView's
+/// cookie store, and its navigation is checked against the allowlist exactly
+/// as on the full-screen login route.
+class MealioLoginView {
+  MealioLoginView({required this.url, required this.title, required this.controller, required VoidCallback cancel})
+      : _cancel = cancel;
+
+  /// The page the sign-in started on.
+  final String url;
+
+  /// The title the server gave, e.g. "Sign in to H-E-B".
+  final String title;
+
+  /// The visible WebView's controller.
+  final WebViewController controller;
+  final VoidCallback _cancel;
+
+  /// The sign-in WebView, ready to place in a sheet. Mount one at a time.
+  Widget get webview => WebViewWidget(controller: controller);
+
+  /// Ends the sign-in as cancelled.
+  void cancel() => _cancel();
+}
+
 /// The Flutter [MealioHost]. One per app, created and drawn by `MealioScope`.
 class WebViewHost implements MealioHost {
   WebViewHost() {
@@ -149,6 +175,29 @@ class WebViewHost implements MealioHost {
 
   /// Where the login sheet is pushed. Set by `MealioScope`.
   NavigatorState? Function()? navigatorProvider;
+
+  /// The theme given to `MealioScope`, if any.
+  MealioTheme? theme;
+
+  /// The sign-in in progress while a cart flow sheet is open, else null.
+  /// The flow sheet listens to this and shows [MealioLoginView.webview].
+  final ValueNotifier<MealioLoginView?> login = ValueNotifier<MealioLoginView?>(null);
+
+  int _flows = 0;
+
+  /// Whether a cart flow sheet is open (and so hosts sign-ins itself).
+  bool get flowOpen => _flows > 0;
+
+  /// Called by a cart flow sheet when it opens. While one is open, sign-ins
+  /// go to [login] instead of a route of their own.
+  void flowOpened() => _flows += 1;
+
+  /// Called by a cart flow sheet when it closes. Closing the last one cancels
+  /// a sign-in it was showing.
+  void flowClosed() {
+    if (_flows > 0) _flows -= 1;
+    if (_flows == 0) login.value?.cancel();
+  }
 
   final StreamController<String> _hiddenMessages = StreamController<String>.broadcast();
   Completer<_LoadEnd>? _load;
@@ -357,10 +406,15 @@ class WebViewHost implements MealioHost {
   ///   signed in.
   /// - A URL matching `doneWhenUrl` also means signed in.
   /// - Close, the system back gesture, or popping the route means cancelled.
+  ///
+  /// When a cart flow sheet is open ([flowOpen]) the sign-in is handed to it
+  /// through [login] and shows inside that sheet. Otherwise it is pushed as a
+  /// route of its own.
   @override
   Future<LoginResult> showLogin(LoginRequest req) async {
-    final nav = navigatorProvider?.call();
-    if (nav == null) {
+    final inFlow = flowOpen;
+    final NavigatorState? nav = inFlow ? null : navigatorProvider?.call();
+    if (!inFlow && nav == null) {
       throw StateError('mealio_sdk: no Navigator for the login sheet. '
           'Pass navigatorKey to MealioScope, or place MealioScope below your Navigator.');
     }
@@ -437,11 +491,35 @@ class WebViewHost implements MealioHost {
       timers.add(Timer.periodic(Duration(milliseconds: every), (_) => unawaited(inject())));
     }
 
+    if (nav == null) {
+      // Inside the open flow sheet.
+      final view = MealioLoginView(
+        url: req.url,
+        title: req.title,
+        controller: c,
+        cancel: () => finish(LoginOutcome.cancelled),
+      );
+      login.value = view;
+      try {
+        await c.loadRequest(Uri.parse(req.url));
+      } catch (_) {
+        finish(LoginOutcome.cancelled);
+      }
+      final outcome = await done.future;
+      for (final Timer t in timers) {
+        t.cancel();
+      }
+      returnTimer?.cancel();
+      if (identical(login.value, view)) login.value = null;
+      return LoginResult(outcome: outcome, messages: List<JsonMessage>.of(messages));
+    }
+
     final route = PageRouteBuilder<void>(
       opaque: true,
       pageBuilder: (BuildContext context, Animation<double> a, Animation<double> b) => _LoginPage(
         title: req.title,
         controller: c,
+        theme: theme ?? MealioTheme.configured ?? MealioTheme.standard,
         onClose: () => finish(LoginOutcome.cancelled),
       ),
       transitionsBuilder: (BuildContext context, Animation<double> a, Animation<double> b, Widget child) {
@@ -511,20 +589,23 @@ class WebViewHost implements MealioHost {
   }
 }
 
-/// The login sheet: a title, a Close button, and the visible WebView. Built
-/// from plain widgets (no AppBar) so it needs no MaterialLocalizations and
-/// works under a CupertinoApp too.
+/// The full-screen login route, used when no cart flow sheet is open: a
+/// title, a Close button, and the visible WebView. Built from plain widgets
+/// (no AppBar) so it needs no MaterialLocalizations and works under a
+/// CupertinoApp too.
 class _LoginPage extends StatelessWidget {
-  const _LoginPage({required this.title, required this.controller, required this.onClose});
+  const _LoginPage({required this.title, required this.controller, required this.theme, required this.onClose});
 
   final String title;
   final WebViewController controller;
+  final MealioTheme theme;
   final VoidCallback onClose;
 
   @override
   Widget build(BuildContext context) {
+    final t = theme;
     return Material(
-      color: Colors.white,
+      color: t.background,
       child: SafeArea(
         bottom: false,
         child: Column(
@@ -535,19 +616,38 @@ class _LoginPage extends StatelessWidget {
                 children: <Widget>[
                   const SizedBox(width: 16),
                   Expanded(
-                    child: Text(
-                      title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600, color: Color(0xFF111111)),
+                    child: Semantics(
+                      header: true,
+                      child: Text(
+                        title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: t.style(size: 16, weight: FontWeight.w600),
+                      ),
                     ),
                   ),
-                  TextButton(onPressed: onClose, child: const Text('Close')),
+                  Semantics(
+                    button: true,
+                    label: 'Close',
+                    excludeSemantics: true,
+                    child: InkWell(
+                      onTap: onClose,
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          child: Center(
+                            child: Text('Close', style: t.style(size: 16, weight: FontWeight.w600, color: t.accent)),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
                   const SizedBox(width: 4),
                 ],
               ),
             ),
-            const Divider(height: 1, thickness: 1, color: Color(0xFFE5E5E5)),
+            Container(height: 1, color: t.border),
             Expanded(child: WebViewWidget(controller: controller)),
           ],
         ),

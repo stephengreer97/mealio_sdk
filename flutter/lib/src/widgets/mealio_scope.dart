@@ -4,6 +4,7 @@
 import 'package:flutter/widgets.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
+import '../theme.dart';
 import '../webview_host.dart';
 
 /// Hosts the SDK's hidden WebView for the whole app.
@@ -24,9 +25,12 @@ import '../webview_host.dart';
 /// If the scope sits below your Navigator instead, `navigatorKey` can be
 /// left out and the nearest Navigator is used.
 class MealioScope extends StatefulWidget {
-  const MealioScope({super.key, required this.child, this.navigatorKey});
+  const MealioScope({super.key, required this.child, this.navigatorKey, this.theme});
 
   final Widget child;
+
+  /// Styles the drop-in widgets. Overrides `MealioCart.configure(theme: ...)`.
+  final MealioTheme? theme;
 
   /// The Navigator the login sheet is pushed on. When null, the Navigator
   /// above this widget is used, if there is one.
@@ -47,7 +51,14 @@ class _MealioScopeState extends State<MealioScope> {
     super.initState();
     _host = WebViewHost();
     _host.navigatorProvider = _navigator;
+    _host.theme = widget.theme;
     WebViewHost.attach(_host);
+  }
+
+  @override
+  void didUpdateWidget(MealioScope oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _host.theme = widget.theme;
   }
 
   NavigatorState? _navigator() {
@@ -66,7 +77,8 @@ class _MealioScopeState extends State<MealioScope> {
 
   @override
   Widget build(BuildContext context) {
-    return Stack(
+    final theme = widget.theme;
+    final Widget stack = Stack(
       // Non-directional alignment, so the Stack works even above the app's
       // Directionality (for example when MealioScope wraps MaterialApp).
       alignment: Alignment.topLeft,
@@ -104,5 +116,6 @@ class _MealioScopeState extends State<MealioScope> {
         ),
       ],
     );
+    return theme == null ? stack : MealioThemeScope(theme: theme, child: stack);
   }
 }

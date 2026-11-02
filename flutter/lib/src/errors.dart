@@ -11,6 +11,9 @@ abstract final class MealioErrorCode {
   static const String network = 'network';
   static const String unsupported = 'unsupported';
 
+  /// No store was given and the user has no default store yet.
+  static const String storeRequired = 'store_required';
+
   /// Mealio answered with an error the protocol does not name.
   static const String server = 'server';
 

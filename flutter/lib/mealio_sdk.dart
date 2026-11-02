@@ -1,14 +1,24 @@
 /// Mealio Cart SDK for Flutter.
 ///
-/// Place [MealioScope] once near the app root, call [MealioCart.configure],
-/// then [MealioCart.prepareCart] and show the result with [MealioCartSheet]
-/// or your own UI on top of [CartSession].
+/// Call [MealioCart.configure] once, place [MealioScope] near the app root,
+/// then drop in a [MealioCartButton]. It runs the whole flow (store sign-in,
+/// the list, adding, done) in one sheet. [MealioCartFlow.show] opens the same
+/// sheet from your own button; [CartSession] is the model under it for apps
+/// that build their own UI.
 library;
 
 export 'src/allowlist.dart';
 export 'src/cart_session.dart';
 export 'src/client.dart'
-    show ClientConfig, MealioClient, defaultBaseUrl, mealioSdkVersion, sdkCoreVersion;
+    show
+        ClientConfig,
+        MealioClient,
+        MealioStep,
+        StepListener,
+        defaultBaseUrl,
+        mealioSdkVersion,
+        sdkCoreVersion,
+        stepOf;
 export 'src/errors.dart';
 export 'src/guard.dart';
 export 'src/host.dart';
@@ -17,7 +27,10 @@ export 'src/matcher.dart';
 export 'src/mealio_cart.dart';
 export 'src/protocol.dart';
 export 'src/runner.dart';
+export 'src/theme.dart';
 export 'src/verify.dart';
-export 'src/webview_host.dart' show WebViewHost, bridgeChannelName, bridgeInjection, fetchResultType;
+export 'src/webview_host.dart' show MealioLoginView, WebViewHost, bridgeChannelName, bridgeInjection, fetchResultType;
+export 'src/widgets/cart_flow.dart';
+export 'src/widgets/cart_list.dart';
 export 'src/widgets/cart_sheet.dart';
 export 'src/widgets/mealio_scope.dart';

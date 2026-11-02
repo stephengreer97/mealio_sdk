@@ -53,7 +53,11 @@ class Runner {
   final Map<String, List<int>> _fetchStamps = <String, List<int>>{};
 
   /// Verify and run one envelope. Throws [EnvelopeError] when it must be refused.
-  Future<StepOutcome> run(Envelope env, String? job, int lastSeq) async {
+  ///
+  /// `onStep` is called before each instruction that actually runs (not for
+  /// skipped ones, nor for `done`/`fail`). An exception it throws is ignored:
+  /// a progress callback never breaks a run.
+  Future<StepOutcome> run(Envelope env, String? job, int lastSeq, {void Function(Instruction ins)? onStep}) async {
     final payload = checkInstructions(await openEnvelope(env, _keys), job, lastSeq);
     final results = <InstructionResult>[];
     Terminal? terminal;
@@ -72,6 +76,11 @@ class Runner {
       if (failed) {
         results.add(_skipped(ins));
         continue;
+      }
+      try {
+        onStep?.call(ins);
+      } catch (_) {
+        // A progress callback never breaks a run.
       }
       final r = await _one(payload.store, ins);
       results.add(r);

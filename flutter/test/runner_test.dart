@@ -289,7 +289,29 @@ void main() {
   });
 
   group('client', () {
-    test('drives a job to done through step calls', () async {
+    MealioClient clientWith(MockClient mock, {Future<int> Function()? getEpoch, Future<String> Function()? token}) =>
+        MealioClient(
+          ClientConfig(
+            publishableKey: 'pk_test',
+            getSessionToken: token ?? () async => 'tok',
+            baseUrl: 'https://mealio.test/',
+            getEpoch: getEpoch,
+            httpClient: mock,
+            keys: testKeys,
+          ),
+          FakeHost(),
+        );
+
+    void expectAbout(Map<String, Object?> b, int epoch) {
+      final sdk = b['sdk']! as Map<String, Object?>;
+      expect(sdk['platform'], 'flutter');
+      expect(sdk['version'], mealioSdkVersion);
+      expect(sdk['core'], sdkCoreVersion);
+      expect(sdk['ops'], supportedOps);
+      expect(b['epoch'], epoch);
+    }
+
+    test('drives a job to done through step calls, with sdk and epoch on the start call and no hello', () async {
       final c1 = vectorList('cases')[0]['envelope'];
       final c2 = vectorList('cases')[1]['envelope'];
       final seen = <String>[];
@@ -299,74 +321,114 @@ void main() {
         expect(req.headers['x-mealio-publishable-key'], 'pk_test');
         expect(req.headers['authorization'], 'Bearer tok');
         expect(req.headers['content-type'], 'application/json');
-        if (req.url.path.endsWith('/hello')) {
-          final b = jsonDecode(utf8.decode(req.bodyBytes)) as Map<String, Object?>;
-          final sdk = b['sdk']! as Map<String, Object?>;
-          expect(sdk['platform'], 'flutter');
-          expect(sdk['core'], sdkCoreVersion);
-          expect(sdk['ops'], supportedOps);
-          expect(b['epoch'], 3);
-          return _json(<String, Object?>{'ok': true});
+        final b = jsonDecode(utf8.decode(req.bodyBytes)) as Map<String, Object?>;
+        if (req.url.path.endsWith('/carts')) {
+          expect(b['store'], 'heb');
+          expect(b['zip'], '78701');
+          expect((b['recipe']! as Map<String, Object?>)['id'], 'r1');
+          expectAbout(b, 3);
+          return _json(<String, Object?>{'job': 'job_test', 'envelope': c1});
         }
-        if (req.url.path.endsWith('/carts')) return _json(<String, Object?>{'job': 'job_test', 'envelope': c1});
         if (req.url.path.endsWith('/step')) {
-          final b = jsonDecode(utf8.decode(req.bodyBytes)) as Map<String, Object?>;
           expect(b['seq'], 1);
           expect(b['results']! as List<Object?>, hasLength(2));
           return _json(<String, Object?>{'envelope': c2});
         }
         throw StateError('unexpected ${req.url}');
       });
-      final client = MealioClient(
-        ClientConfig(
-          publishableKey: 'pk_test',
-          getSessionToken: () async => 'tok',
-          baseUrl: 'https://mealio.test/',
-          getEpoch: () async => 3,
-          httpClient: mock,
-          keys: testKeys,
-        ),
-        FakeHost(),
+      final steps = <MealioStep>[];
+      final session = await clientWith(mock, getEpoch: () async => 3).prepareCart(
+        store: 'heb',
+        zip: '78701',
+        recipe: const Recipe(id: 'r1', ingredients: <RecipeIngredient>[]),
+        onStep: (MealioStep s, Instruction ins) => steps.add(s),
       );
-      // The done result is not a PreparedCart here; the point is the loop.
-      final session = await client.prepareCart(store: 'heb', recipe: const Recipe(id: 'r1', ingredients: <RecipeIngredient>[]));
-      expect(seen, <String>['/api/v1/sdk/hello', '/api/v1/sdk/carts', '/api/v1/sdk/jobs/job_test/step']);
+      expect(seen, <String>['/api/v1/sdk/carts', '/api/v1/sdk/jobs/job_test/step']);
       expect(session, isA<CartSession>());
+      expect(steps, hasLength(2));
+    });
+
+    test('addToCart sends selections with sdk and epoch', () async {
+      final failEnv = await signInstructions(<Map<String, Object?>>[
+        <String, Object?>{
+          'op': 'done',
+          'id': 'i1',
+          'result': <String, Object?>{'cartId': 'c1', 'store': 'heb', 'added': <Object?>[]},
+        },
+      ]);
+      Map<String, Object?>? body;
+      String? path;
+      final mock = MockClient((http.Request req) async {
+        path = req.url.path;
+        body = jsonDecode(utf8.decode(req.bodyBytes)) as Map<String, Object?>;
+        return _json(<String, Object?>{'job': 'job_test', 'envelope': failEnv.toJson()});
+      });
+      final r = await clientWith(mock).addToCart('c 1', const <Selection>[
+        Selection(key: 'milk', productId: 'p1', quantity: 1, remember: true),
+        Selection(key: 'salt', productId: null, remember: false),
+      ]);
+      expect(r.cartId, 'c1');
+      expect(path, '/api/v1/sdk/carts/c%201/add');
+      expect(body!['selections'], <Object?>[
+        <String, Object?>{'key': 'milk', 'productId': 'p1', 'quantity': 1, 'remember': true},
+        <String, Object?>{'key': 'salt', 'productId': null, 'remember': false},
+      ]);
+      expectAbout(body!, 0);
+    });
+
+    test('search posts key, query, sdk and epoch and returns the options', () async {
+      final env = await signInstructions(<Map<String, Object?>>[
+        <String, Object?>{
+          'op': 'done',
+          'id': 'i1',
+          'result': <String, Object?>{
+            'key': 'garlic',
+            'query': 'jar',
+            'options': <Object?>[
+              <String, Object?>{'id': 'g9', 'name': 'Minced Garlic Jar', 'unitPrice': 2.5},
+            ],
+          },
+        },
+      ]);
+      Map<String, Object?>? body;
+      String? path;
+      final mock = MockClient((http.Request req) async {
+        path = req.url.path;
+        body = jsonDecode(utf8.decode(req.bodyBytes)) as Map<String, Object?>;
+        return _json(<String, Object?>{'job': 'job_test', 'envelope': env.toJson()});
+      });
+      final r = await clientWith(mock, getEpoch: () async => 7).search('c1', 'garlic', 'jar');
+      expect(path, '/api/v1/sdk/carts/c1/search');
+      expect(body!['key'], 'garlic');
+      expect(body!['query'], 'jar');
+      expectAbout(body!, 7);
+      expect(r.key, 'garlic');
+      expect(r.options.single.id, 'g9');
+      expect(r.options.single.unitPrice, 2.5);
     });
 
     test('retries once with a fresh token on 401', () async {
       var tokens = 0;
       var calls = 0;
       final auth = <String?>[];
+      final env = await signInstructions(<Map<String, Object?>>[
+        <String, Object?>{'op': 'done', 'id': 'i1', 'result': <String, Object?>{}},
+      ]);
       final mock = MockClient((http.Request req) async {
         calls += 1;
         auth.add(req.headers['authorization']);
         if (calls == 1) return _json(<String, Object?>{}, 401);
-        return _json(<String, Object?>{'ok': true});
+        return _json(<String, Object?>{'job': 'job_test', 'envelope': env.toJson()});
       });
-      final client = MealioClient(
-        ClientConfig(
-          publishableKey: 'pk',
-          getSessionToken: () async => 't${++tokens}',
-          sdkVersion: '0',
-          httpClient: mock,
-          keys: testKeys,
-        ),
-        FakeHost(),
-      );
-      await client.hello();
+      await clientWith(mock, token: () async => 't${++tokens}').addToCart('c1', const <Selection>[]);
       expect(tokens, 2);
       expect(auth, <String?>['Bearer t1', 'Bearer t2']);
     });
 
     test('a second 401 is session_expired', () async {
       final mock = MockClient((http.Request req) async => _json(<String, Object?>{}, 401));
-      final client = MealioClient(
-        ClientConfig(publishableKey: 'pk', getSessionToken: () async => 't', httpClient: mock, keys: testKeys),
-        FakeHost(),
-      );
       await expectLater(
-        client.hello(),
+        clientWith(mock).addToCart('c1', const <Selection>[]),
         throwsA(isA<MealioException>().having((MealioException e) => e.code, 'code', 'session_expired')),
       );
     });
@@ -375,12 +437,8 @@ void main() {
       final mock = MockClient((http.Request req) async => _json(<String, Object?>{
             'error': <String, Object?>{'code': 'store_unavailable', 'message': 'H-E-B is down'},
           }, 503));
-      final client = MealioClient(
-        ClientConfig(publishableKey: 'pk', getSessionToken: () async => 't', httpClient: mock, keys: testKeys),
-        FakeHost(),
-      );
       await expectLater(
-        client.hello(),
+        clientWith(mock).prepareCart(store: 'heb', recipe: const Recipe(id: 'r', ingredients: <RecipeIngredient>[])),
         throwsA(isA<MealioException>()
             .having((MealioException e) => e.code, 'code', 'store_unavailable')
             .having((MealioException e) => e.message, 'message', 'H-E-B is down')),
@@ -389,12 +447,8 @@ void main() {
 
     test('a transport failure is network', () async {
       final mock = MockClient((http.Request req) async => throw http.ClientException('offline'));
-      final client = MealioClient(
-        ClientConfig(publishableKey: 'pk', getSessionToken: () async => 't', httpClient: mock, keys: testKeys),
-        FakeHost(),
-      );
       await expectLater(
-        client.hello(),
+        clientWith(mock).search('c1', 'k', 'q'),
         throwsA(isA<MealioException>().having((MealioException e) => e.code, 'code', 'network')),
       );
     });
@@ -405,22 +459,51 @@ void main() {
         <String, Object?>{'op': 'fail', 'id': 'i1', 'code': 'store_unavailable', 'message': 'down'},
       ]);
       for (final (Object? env, String code) in <(Object?, String)>[(tampered, 'bad_envelope'), (failEnv.toJson(), 'store_unavailable')]) {
-        final mock = MockClient((http.Request req) async {
-          if (req.url.path.endsWith('/hello')) return _json(<String, Object?>{'ok': true});
-          return _json(<String, Object?>{'job': 'job_test', 'envelope': env});
-        });
-        final client = MealioClient(
-          ClientConfig(publishableKey: 'pk', getSessionToken: () async => 't', httpClient: mock, keys: testKeys),
-          FakeHost(),
-        );
+        final mock = MockClient((http.Request req) async => _json(<String, Object?>{'job': 'job_test', 'envelope': env}));
         await expectLater(
-          client.prepareCart(store: 'heb', recipe: const Recipe(id: 'r', ingredients: <RecipeIngredient>[])),
+          clientWith(mock).prepareCart(store: 'heb', recipe: const Recipe(id: 'r', ingredients: <RecipeIngredient>[])),
           throwsA(isA<MealioException>().having((MealioException e) => e.code, 'code', code)),
         );
       }
     });
 
-    test('hello widens the allowlist from a signed allowlist envelope', () async {
+    test('stores is a public GET with no auth; prepareCart without a store leaves it out', () async {
+      final seen = <String>[];
+      Map<String, Object?>? body;
+      final mock = MockClient((http.Request req) async {
+        seen.add('${req.method} ${req.url.path}');
+        if (req.method == 'GET') {
+          expect(req.headers['authorization'], isNull);
+          return _json(<String, Object?>{
+            'stores': <Object?>[
+              <String, Object?>{'id': 'heb', 'name': 'H-E-B', 'via': 'device'},
+              <String, Object?>{'id': 'kroger', 'name': 'Kroger', 'via': 'kroger_api'},
+            ],
+          });
+        }
+        body = jsonDecode(utf8.decode(req.bodyBytes)) as Map<String, Object?>;
+        return _json(<String, Object?>{
+          'error': <String, Object?>{'code': 'store_required', 'message': 'Pick a store'},
+        }, 400);
+      });
+      final client = clientWith(mock);
+      final stores = await client.stores();
+      expect(stores.map((StoreInfo s) => s.name), <String>['H-E-B', 'Kroger']);
+      expect(stores.last.via, 'kroger_api');
+      await expectLater(
+        client.prepareCart(recipe: const Recipe(id: 'r', ingredients: <RecipeIngredient>[])),
+        throwsA(isA<MealioException>().having((MealioException e) => e.code, 'code', MealioErrorCode.storeRequired)),
+      );
+      expect(body!.containsKey('store'), isFalse);
+      expect(seen, <String>['GET /api/v1/stores', 'POST /api/v1/sdk/carts']);
+    });
+
+    test('AddResult reads verified', () {
+      expect(AddResult.fromJson(<String, Object?>{'verified': true}).verified, isTrue);
+      expect(AddResult.fromJson(<String, Object?>{}).verified, isNull);
+    });
+
+    test('widenAllowlist applies a signed allowlist envelope and ignores a bad one', () async {
       final allow = await signText(jsonEncode(<String, Object?>{
         'v': 1,
         'kind': 'allowlist',
@@ -431,81 +514,289 @@ void main() {
           },
         },
       }));
-      final mock = MockClient((http.Request req) async => _json(<String, Object?>{'ok': true, 'allowlist': allow.toJson()}));
-      final client = MealioClient(
-        ClientConfig(publishableKey: 'pk', getSessionToken: () async => 't', httpClient: mock, keys: testKeys),
-        FakeHost(),
-      );
-      await client.hello();
+      final client = clientWith(MockClient((http.Request req) async => _json(<String, Object?>{})));
+      await client.widenAllowlist(const Envelope(payload: '{}', sig: 'AAAA', kid: 'ktest'));
+      expect(client.allowlist.hostsFor('heb')!.hosts, isNot(contains('api.heb.com')));
+      await client.widenAllowlist(allow);
       expect(client.allowlist.hostsFor('heb')!.hosts, contains('api.heb.com'));
     });
   });
 
-  group('cart session', () {
-    CartSession session() {
-      final mock = MockClient((http.Request req) async => _json(<String, Object?>{}));
-      final client = MealioClient(
-        ClientConfig(publishableKey: 'pk', getSessionToken: () async => 't', httpClient: mock, keys: testKeys),
-        FakeHost(),
+  group('stepOf', () {
+    test('maps instruction ids to progress steps', () {
+      Instruction open(String id) => PageOpen(id: id, url: 'https://www.heb.com/', timeoutMs: 1);
+      expect(stepOf(open('open-1')), MealioStep.connecting);
+      expect(stepOf(open('session-check')), MealioStep.checkingSignIn);
+      expect(stepOf(open('resession-2')), MealioStep.checkingSignIn);
+      expect(stepOf(open('search-onion')), MealioStep.searching);
+      expect(stepOf(open('add-3')), MealioStep.adding);
+      expect(stepOf(open('whatever')), MealioStep.connecting);
+      expect(
+        stepOf(const ShowLogin(
+          id: 'session-login',
+          url: 'https://www.heb.com/login',
+          title: 'Sign in',
+          check: null,
+          doneWhen: <MessageMatcher>[],
+          doneWhenUrl: null,
+          timeoutMs: 1,
+        )),
+        MealioStep.signingIn,
       );
-      return CartSession(
-        client,
-        PreparedCart.fromJson(<String, Object?>{
+      expect(MealioStep.checkingSignIn.wire, 'checking_sign_in');
+    });
+
+    test('Runner.run calls onStep before each instruction it runs, never for skipped ones', () async {
+      final env = await signInstructions(<Map<String, Object?>>[
+        _open('open-1', 'https://www.heb.com/'),
+        _open('search-1', 'https://evil.example/'),
+        _open('add-1', 'https://www.heb.com/'),
+      ]);
+      final seen = <String>[];
+      final out = await Runner(FakeHost(), keys: testKeys).run(env, 'job_test', 0, onStep: (Instruction i) {
+        seen.add(i.id);
+        throw StateError('a progress callback never breaks a run');
+      });
+      expect(seen, <String>['open-1', 'search-1']);
+      expect(out.results.map((InstructionResult r) => r.skipped), <bool>[false, false, true]);
+    });
+  });
+
+  group('cart session', () {
+    Map<String, Object?> prepared() => <String, Object?>{
           'cartId': 'c1',
           'store': 'heb',
-          'ready': <Object?>[
+          'storeName': 'H-E-B',
+          'items': <Object?>[
             <String, Object?>{
-              'key': 'milk',
-              'ingredient': 'milk',
-              'quantity': 1,
-              'chosen': <String, Object?>{'id': 'p1', 'name': 'Milk'},
-            },
-          ],
-          'needsChoice': <Object?>[
-            <String, Object?>{
-              'key': 'ham',
-              'ingredient': 'ham',
+              'key': 'onion',
+              'ingredient': 'onion',
               'quantity': 2,
+              'status': 'remembered',
+              'selectedId': 'o1',
+              'rememberedPreferenceId': 'diced',
+              'remembered': <String, Object?>{'id': 'o1', 'name': 'Onion'},
               'options': <Object?>[
-                <String, Object?>{
-                  'id': 'p2',
-                  'name': 'Ham',
-                  'preferences': <Object?>[
-                    <String, Object?>{'id': 'sliced', 'label': 'Sliced'},
-                  ],
-                },
+                <String, Object?>{'id': 'o1', 'name': 'Onion', 'price': r'$1.00', 'unitPrice': 1.0},
+                <String, Object?>{'id': 'o2', 'name': 'Red Onion', 'unitPrice': 1.25},
               ],
             },
-            <String, Object?>{'key': 'salt', 'ingredient': 'salt', 'quantity': 1, 'options': <Object?>[]},
+            <String, Object?>{
+              'key': 'garlic',
+              'ingredient': 'garlic',
+              'quantity': 1,
+              'status': 'choose',
+              'selectedId': null,
+              'remembered': null,
+              'options': <Object?>[
+                <String, Object?>{'id': 'g1', 'name': 'Garlic', 'unitPrice': 0.5},
+              ],
+            },
+            <String, Object?>{
+              'key': 'beef',
+              'ingredient': 'beef',
+              'quantity': 1,
+              'status': 'remembered_unavailable',
+              'selectedId': null,
+              'reason': 'out_of_stock',
+              'remembered': <String, Object?>{'id': 'b0', 'name': 'Beef', 'outOfStock': true},
+              'options': <Object?>[
+                <String, Object?>{'id': 'b1', 'name': 'Ground Beef', 'unitPrice': 5.99, 'estimated': true},
+              ],
+            },
+            <String, Object?>{
+              'key': 'saffron',
+              'ingredient': 'saffron',
+              'quantity': 1,
+              'status': 'unavailable',
+              'selectedId': null,
+              'remembered': null,
+              'options': <Object?>[],
+              'reason': 'no_results',
+            },
           ],
+          'ready': <Object?>[],
+          'needsChoice': <Object?>[],
           'unavailable': <Object?>[],
-        }),
+        };
+
+    Future<Envelope> searchDone(List<Map<String, Object?>> options) => signInstructions(<Map<String, Object?>>[
+          <String, Object?>{
+            'op': 'done',
+            'id': 'i1',
+            'result': <String, Object?>{'key': 'garlic', 'query': 'jar', 'options': options},
+          },
+        ]);
+
+    CartSession session({Map<String, Object?>? cart, MockClient? mock}) {
+      final client = MealioClient(
+        ClientConfig(
+          publishableKey: 'pk',
+          getSessionToken: () async => 't',
+          httpClient: mock ?? MockClient((http.Request req) async => _json(<String, Object?>{})),
+          keys: testKeys,
+        ),
+        FakeHost(),
       );
+      return CartSession(client, PreparedCart.fromJson(cart ?? prepared()));
     }
 
-    test('ready items start picked; choose and skip fill the rest', () {
+    test('parses the 0.2 shape', () {
       final s = session();
-      expect(s.pending().map((CartItem i) => i.key), <String>['ham', 'salt']);
-      s.choose('ham', 'p2', preferenceId: 'sliced');
-      s.skip('salt');
-      expect(s.pending(), isEmpty);
+      expect(s.storeName, 'H-E-B');
+      expect(s.items.map((CartItem i) => i.status), <ItemStatus>[
+        ItemStatus.remembered,
+        ItemStatus.choose,
+        ItemStatus.rememberedUnavailable,
+        ItemStatus.unavailable,
+      ]);
+      expect(s.items[2].remembered!.outOfStock, isTrue);
+      expect(s.items[2].options.single.estimated, isTrue);
+    });
+
+    test('remembered items start selected with their preference', () {
+      final s = session();
+      expect(s.isSelected('onion'), isTrue);
+      expect(s.selectedId('onion'), 'o1');
+      expect(s.selectedPreferenceId('onion'), 'diced');
+      expect(s.isSelected('garlic'), isFalse);
+      expect(s.isSelected('beef'), isFalse);
+      expect(s.selected('onion')!.name, 'Onion');
+    });
+
+    test('deselect leaves an item out with productId null and remember false; every item is in selections', () {
+      final s = session();
+      var notified = 0;
+      s.addListener(() => notified += 1);
+      s.select('garlic', 'g1');
+      s.deselect('onion');
+      expect(notified, 2);
       expect(s.selections().map((Selection x) => x.toJson()).toList(), <Object?>[
-        <String, Object?>{'key': 'milk', 'productId': 'p1', 'quantity': 1, 'remember': true},
-        <String, Object?>{'key': 'ham', 'productId': 'p2', 'quantity': 2, 'remember': true, 'preferenceId': 'sliced'},
-        <String, Object?>{'key': 'salt', 'productId': null, 'remember': false},
+        <String, Object?>{'key': 'onion', 'productId': null, 'remember': false},
+        <String, Object?>{'key': 'garlic', 'productId': 'g1', 'quantity': 1, 'remember': true},
+        <String, Object?>{'key': 'beef', 'productId': null, 'remember': false},
+        <String, Object?>{'key': 'saffron', 'productId': null, 'remember': false},
       ]);
     });
 
-    test('refuses items and products that were not offered', () {
+    test('select keeps a preference; unknown items and products are refused', () {
       final s = session();
+      s.select('onion', 'o2', preferenceId: 'sliced');
+      expect(s.selections().first.toJson(), <String, Object?>{
+        'key': 'onion',
+        'productId': 'o2',
+        'quantity': 2,
+        'remember': true,
+        'preferenceId': 'sliced',
+      });
       expect(
-        () => s.choose('nope', 'p1'),
+        () => s.select('nope', 'o1'),
         throwsA(isA<MealioException>().having((MealioException e) => e.code, 'code', 'unknown_item')),
       );
       expect(
-        () => s.choose('ham', 'p9'),
+        () => s.select('garlic', 'p9'),
         throwsA(isA<MealioException>().having((MealioException e) => e.code, 'code', 'unknown_product')),
       );
+    });
+
+    test('search merges found products into the options without duplicates, and they can be selected', () async {
+      final envs = <Envelope>[
+        await searchDone(<Map<String, Object?>>[
+          <String, Object?>{'id': 'g9', 'name': 'Minced Garlic Jar'},
+          <String, Object?>{'id': 'g1', 'name': 'Garlic'},
+        ]),
+        await searchDone(<Map<String, Object?>>[
+          <String, Object?>{'id': 'g8', 'name': 'Garlic Powder'},
+          <String, Object?>{'id': 'g9', 'name': 'Minced Garlic Jar'},
+        ]),
+      ];
+      var n = 0;
+      final mock = MockClient(
+          (http.Request req) async => _json(<String, Object?>{'job': 'job_test', 'envelope': envs[n++].toJson()}));
+      final s = session(mock: mock);
+      var notified = 0;
+      s.addListener(() => notified += 1);
+      final found = await s.search('garlic', 'jar');
+      expect(found.map((Product p) => p.id), <String>['g9', 'g1']);
+      expect(s.options('garlic').map((Product p) => p.id), <String>['g1', 'g9']);
+      await s.search('garlic', 'powder');
+      expect(s.options('garlic').map((Product p) => p.id), <String>['g1', 'g8', 'g9']);
+      expect(notified, 2);
+      s.select('garlic', 'g9');
+      expect(s.selectedId('garlic'), 'g9');
+      expect(() => s.select('garlic', 'nope'), throwsA(isA<MealioException>()));
+    });
+
+    test('estimate sums unit price times quantity of selected items', () {
+      final s = session();
+      var e = s.estimate();
+      expect(e.count, 1);
+      expect(e.total, 2.0);
+      expect(e.estimated, isFalse);
+      expect(e.unpriced, 0);
+      s.select('garlic', 'g1');
+      e = s.estimate();
+      expect(e.count, 2);
+      expect(e.total, 2.5);
+      expect(e.estimated, isFalse);
+    });
+
+    test('estimate is flagged estimated for sold-by-weight or unpriced items', () {
+      final s = session();
+      s.select('beef', 'b1');
+      var e = s.estimate();
+      expect(e.total, 7.99);
+      expect(e.estimated, isTrue);
+      expect(e.unpriced, 0);
+
+      final cart = prepared();
+      final onion = (cart['items']! as List<Object?>).first! as Map<String, Object?>;
+      (onion['options']! as List<Object?>)[0] = <String, Object?>{'id': 'o1', 'name': 'Onion'};
+      e = session(cart: cart).estimate();
+      expect(e.count, 1);
+      expect(e.total, 0);
+      expect(e.unpriced, 1);
+      expect(e.estimated, isTrue);
+    });
+
+    test('a 0.1 cart without items is rebuilt from the groupings, ready items pre-selected', () {
+      final s = session(cart: <String, Object?>{
+        'cartId': 'c1',
+        'store': 'heb',
+        'ready': <Object?>[
+          <String, Object?>{
+            'key': 'milk',
+            'ingredient': 'milk',
+            'quantity': 1,
+            'chosen': <String, Object?>{'id': 'p1', 'name': 'Milk'},
+          },
+        ],
+        'needsChoice': <Object?>[
+          <String, Object?>{
+            'key': 'ham',
+            'ingredient': 'ham',
+            'quantity': 2,
+            'options': <Object?>[
+              <String, Object?>{'id': 'p2', 'name': 'Ham'},
+            ],
+          },
+        ],
+        'unavailable': <Object?>[
+          <String, Object?>{'key': 'salt', 'ingredient': 'salt', 'quantity': 1, 'reason': 'no_results'},
+        ],
+      });
+      expect(s.items.map((CartItem i) => i.key), <String>['milk', 'ham', 'salt']);
+      expect(s.items.map((CartItem i) => i.status),
+          <ItemStatus>[ItemStatus.remembered, ItemStatus.choose, ItemStatus.unavailable]);
+      expect(s.selectedId('milk'), 'p1');
+      expect(s.options('milk').single.id, 'p1');
+      // ignore: deprecated_member_use
+      s.choose('ham', 'p2');
+      // ignore: deprecated_member_use
+      s.skip('milk');
+      // ignore: deprecated_member_use
+      expect(s.pending().map((CartItem i) => i.key), <String>['milk']);
+      expect(s.selections().map((Selection x) => x.productId), <String?>[null, 'p2', null]);
     });
   });
 }

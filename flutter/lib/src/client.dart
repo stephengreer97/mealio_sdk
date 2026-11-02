@@ -4,7 +4,6 @@
 
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import 'allowlist.dart';
@@ -19,9 +18,39 @@ import 'verify.dart';
 const String sdkCoreVersion = '0.1.0';
 
 /// This package's version, sent as `X-Mealio-SDK: flutter/<version>`.
-const String mealioSdkVersion = '0.1.0';
+const String mealioSdkVersion = '0.2.0';
 
 const String defaultBaseUrl = 'https://mealio.co';
+
+/// What the SDK is doing right now, for a progress screen. Inferred from the
+/// server's instruction ids (open-, session-, login-, search-, add-), never
+/// from store specifics. `Step` in the TypeScript reference; named
+/// `MealioStep` here because Material already exports a `Step`.
+enum MealioStep {
+  connecting('connecting'),
+  checkingSignIn('checking_sign_in'),
+  signingIn('signing_in'),
+  searching('searching'),
+  adding('adding');
+
+  const MealioStep(this.wire);
+
+  /// The reference's string for this step.
+  final String wire;
+}
+
+/// Called before each instruction the SDK runs.
+typedef StepListener = void Function(MealioStep step, Instruction ins);
+
+/// The step an instruction belongs to.
+MealioStep stepOf(Instruction ins) {
+  if (ins is ShowLogin) return MealioStep.signingIn;
+  final id = ins.id;
+  if (id.startsWith('search')) return MealioStep.searching;
+  if (id.startsWith('add')) return MealioStep.adding;
+  if (id.startsWith('session') || id.startsWith('resession')) return MealioStep.checkingSignIn;
+  return MealioStep.connecting;
+}
 
 /// Everything `MealioClient` needs.
 class ClientConfig {
@@ -74,43 +103,67 @@ class MealioClient {
   final Runner _runner;
   final String _base;
   final http.Client _http;
-  bool _helloDone = false;
   String? _token;
 
-  /// The allowlist in force, after any widening from `hello`.
+  /// The allowlist in force, after any widening.
   Allowlist get allowlist => _runner.allowlist;
 
+  /// Stores the SDK supports right now. Public, no session needed.
+  Future<List<StoreInfo>> stores() async {
+    try {
+      final res = await _http.get(Uri.parse('$_base/api/v1/stores'));
+      final Object? j = jsonDecode(utf8.decode(res.bodyBytes));
+      final Object? list = j is Map ? j['stores'] : null;
+      return list is List ? list.map(StoreInfo.fromJson).toList() : <StoreInfo>[];
+    } catch (_) {
+      throw const MealioException(MealioErrorCode.network, 'Could not reach Mealio');
+    }
+  }
+
   /// Start a cart: signs in to the store if needed, searches every ingredient.
-  Future<CartSession> prepareCart({required String store, required Recipe recipe, String? zip}) async {
-    await hello();
-    final input = <String, Object?>{'store': store, 'recipe': recipe.toJson()};
+  /// `store` is optional: without it Mealio uses the user's default store,
+  /// and fails with `store_required` when they have none yet.
+  Future<CartSession> prepareCart({
+    String? store,
+    required Recipe recipe,
+    String? zip,
+    StepListener? onStep,
+  }) async {
+    final input = <String, Object?>{'recipe': recipe.toJson()};
+    if (store != null) input['store'] = store;
     if (zip != null) input['zip'] = zip;
+    input.addAll(await _about());
     final start = _jobStart(await _post('/api/v1/sdk/carts', input));
-    final result = await _drive(start);
+    final result = await _drive(start, onStep);
     return CartSession(this, PreparedCart.fromJson(result));
   }
 
-  /// Fill the store cart with the user's choices.
-  Future<AddResult> addToCart(String cartId, List<Selection> selections) async {
-    await hello();
+  /// Search the store again for one item ("minced garlic jar").
+  Future<SearchResult> search(String cartId, String key, String query, {StepListener? onStep}) async {
     final start = _jobStart(await _post(
-      '/api/v1/sdk/carts/${Uri.encodeComponent(cartId)}/add',
-      <String, Object?>{'selections': selections.map((Selection s) => s.toJson()).toList()},
+      '/api/v1/sdk/carts/${Uri.encodeComponent(cartId)}/search',
+      <String, Object?>{'key': key, 'query': query, ...await _about()},
     ));
-    return AddResult.fromJson(await _drive(start));
+    return SearchResult.fromJson(await _drive(start, onStep));
   }
 
-  /// Make the next call open a new run with `hello` (for example after the
-  /// store-session epoch changed).
-  void resetHello() => _helloDone = false;
+  /// Fill the store cart with the user's choices.
+  Future<AddResult> addToCart(String cartId, List<Selection> selections, {StepListener? onStep}) async {
+    final start = _jobStart(await _post(
+      '/api/v1/sdk/carts/${Uri.encodeComponent(cartId)}/add',
+      <String, Object?>{
+        'selections': selections.map((Selection s) => s.toJson()).toList(),
+        ...await _about(),
+      },
+    ));
+    return AddResult.fromJson(await _drive(start, onStep));
+  }
 
-  /// Open a run: report version, platform, ops and storage epoch. Called by
-  /// `prepareCart` and `addToCart`; public only so tests can drive it.
-  @visibleForTesting
-  Future<void> hello() async {
-    if (_helloDone) return;
+  /// Who is calling, carried on every job-starting call (this used to be a
+  /// separate hello round trip).
+  Future<Map<String, Object?>> _about() async {
     final epoch = _cfg.getEpoch == null ? 0 : await _cfg.getEpoch!();
-    final res = await _post('/api/v1/sdk/hello', <String, Object?>{
+    return <String, Object?>{
       'sdk': <String, Object?>{
         'platform': _cfg.platform,
         'version': _cfg.sdkVersion,
@@ -118,17 +171,18 @@ class MealioClient {
         'ops': supportedOps,
       },
       'epoch': epoch,
-    });
-    final Object? allowlistEnv = res is Map ? res['allowlist'] : null;
-    if (allowlistEnv != null) {
-      try {
-        final p = await openEnvelope(Envelope.fromJson(allowlistEnv), _cfg.keys);
-        if (p.kind == 'allowlist') _runner.allowlist.widen(AllowlistPayload.fromJson(p.raw));
-      } catch (_) {
-        // An allowlist we cannot verify is ignored; the bundled one stands.
-      }
+    };
+  }
+
+  /// Apply a signed allowlist widening, if the server ever sends one. An
+  /// allowlist that does not verify is ignored; the bundled one stands.
+  Future<void> widenAllowlist(Envelope env) async {
+    try {
+      final p = await openEnvelope(env, _cfg.keys);
+      if (p.kind == 'allowlist') _runner.allowlist.widen(AllowlistPayload.fromJson(p.raw));
+    } catch (_) {
+      // Ignored on purpose.
     }
-    _helloDone = true;
   }
 
   _JobStart _jobStart(Object? json) {
@@ -138,13 +192,18 @@ class MealioClient {
     return _JobStart(json['job']! as String, Envelope.fromJson(json['envelope']));
   }
 
-  Future<Object?> _drive(_JobStart start) async {
+  Future<Object?> _drive(_JobStart start, StepListener? onStep) async {
     var env = start.envelope;
     var seq = 0;
     for (var guard = 0; guard < 200; guard += 1) {
       StepOutcome out;
       try {
-        out = await _runner.run(env, start.job, seq);
+        out = await _runner.run(
+          env,
+          start.job,
+          seq,
+          onStep: onStep == null ? null : (Instruction ins) => onStep(stepOf(ins), ins),
+        );
       } on EnvelopeError catch (e) {
         throw MealioException(
           e.why == 'unsupported_op' ? MealioErrorCode.unsupported : MealioErrorCode.badEnvelope,
@@ -190,7 +249,6 @@ class MealioClient {
     }
     if (res.statusCode == 401 && !retried) {
       _token = null;
-      _helloDone = false;
       return _post(path, body, retried: true);
     }
     Object? json;

@@ -141,7 +141,7 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
 
 function headerTitle(phase: Phase, storeName: string): string {
   if (phase === 'done') return 'All set';
-  if (phase === 'loading') return `Getting your ${storeName} cart ready`;
+  if (phase === 'loading') return storeName === 'your store' ? 'Getting your cart ready' : `Getting your ${storeName} cart ready`;
   if (phase === 'error') return 'Something went wrong';
   if (phase === 'stores') return 'Choose your store';
   return `Your ${storeName} list`;
