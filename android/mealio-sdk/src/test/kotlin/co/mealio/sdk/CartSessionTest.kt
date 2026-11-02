@@ -138,11 +138,11 @@ class CartSessionTest {
         assertEquals(Estimate(total = 1.05, count = 1, estimated = false, unpriced = 0), e)
         cs.select("garlic", "g1")
         e = cs.estimate()
-        assertEquals(1.55, e.total, 0.0)
+        assertEquals(1.55, e.total!!, 0.0)
         assertEquals(2, e.count)
         assertFalse(e.estimated)
         cs.select("onion", "o2") // 1.25 x 2
-        assertEquals(3.0, cs.estimate().total, 0.0)
+        assertEquals(3.0, cs.estimate().total!!, 0.0)
         cs.deselect("onion")
         cs.deselect("garlic")
         assertEquals(Estimate(0.0, 0, false, 0), cs.estimate())
@@ -165,7 +165,7 @@ class CartSessionTest {
         assertEquals("onion", sel.key)
         assertEquals("o1", sel.productId)
         assertEquals(3, sel.quantity)
-        assertEquals(4.5, cs.estimate().total, 1e-9)
+        assertEquals(4.5, cs.estimate().total!!, 1e-9)
         cs.select("onion", "o2")
         assertEquals(99, cs.maxQuantity("onion"))
         assertEquals(3, cs.quantity("onion"))
@@ -196,18 +196,20 @@ class CartSessionTest {
                 .put(item("pepper", "remembered", listOf(product("p1", "Pepper", 0.333)), "p1", quantity = 3)))
         val cs = session(json)
         val e = cs.estimate()
-        // 0.9 + 0.999 = 1.899 -> 1.90
-        assertEquals(1.9, e.total, 0.0)
+        // No partial totals: salt has no price, so there is no number.
+        assertNull(e.total)
         assertEquals(3, e.count)
         assertEquals(1, e.unpriced)
         assertTrue(e.estimated)
         cs.deselect("salt")
         val e2 = cs.estimate()
+        // 0.9 + 0.999 = 1.899 -> 1.90
+        assertEquals(1.9, e2.total!!, 0.0)
         assertEquals(0, e2.unpriced)
         assertTrue("sold by weight", e2.estimated)
         cs.deselect("bananas")
         assertFalse(cs.estimate().estimated)
-        assertEquals(1.0, cs.estimate().total, 0.0)
+        assertEquals(1.0, cs.estimate().total!!, 0.0)
     }
 
     @Test
@@ -377,14 +379,14 @@ class CartSessionTest {
         val cs = weightCart()
         cs.setWeight("turkey", 1.25)
         val e = cs.estimate()
-        assertEquals(14.5, e.total, 0.0)
+        assertEquals(14.5, e.total!!, 0.0)
         assertTrue(e.estimated)
         assertEquals(2, e.count)
         // A package-priced weight item counts its price once, whatever the weight.
         cs.select("turkey", "b1")
         cs.setWeight("turkey", 3.0)
         val e2 = cs.estimate()
-        assertEquals(34.0, e2.total, 0.0)
+        assertEquals(34.0, e2.total!!, 0.0)
         assertTrue(e2.estimated)
     }
 
@@ -425,5 +427,85 @@ class CartSessionTest {
         assertEquals("g1", sel.productId)
         assertEquals("thin", sel.preferenceId)
         assertEquals(2, cs.estimate().count)
+    }
+
+    // ── no partial totals ────────────────────────────────────────────────
+    // Mirrors describe('no partial totals') in packages/core/test/core.test.ts.
+
+    private fun priced(onion: Map<String, Any?> = emptyMap(), turkey: Map<String, Any?> = emptyMap()): JSONObject {
+        fun over(o: JSONObject, m: Map<String, Any?>) = o.also { m.forEach { (k, v) -> it.put(k, v ?: JSONObject.NULL) } }
+        val o1 = over(JSONObject().put("id", "o1").put("name", "Onion").put("unitPrice", 1), onion)
+        val t1 = over(JSONObject().put("id", "t1").put("name", "Deli Turkey").put("soldByWeight", true).put("estimated", true)
+            .put("pricePerLb", 12).put("unitPrice", 12), turkey)
+        val c1 = JSONObject().put("id", "c1").put("name", "Chipotle Peppers").put("unitPrice", JSONObject.NULL)
+        return JSONObject().put("cartId", "c1").put("store", "heb")
+            .put("ready", JSONArray()).put("needsChoice", JSONArray()).put("unavailable", JSONArray())
+            .put("items", JSONArray()
+                .put(JSONObject().put("key", "onion").put("ingredient", "onion").put("quantity", 2).put("status", "remembered")
+                    .put("selectedId", "o1").put("remembered", JSONObject.NULL).put("options", JSONArray().put(o1)))
+                .put(JSONObject().put("key", "turkey").put("ingredient", "deli turkey").put("quantity", 1).put("weightLb", 0.5)
+                    .put("status", "remembered").put("selectedId", "t1").put("remembered", JSONObject.NULL).put("options", JSONArray().put(t1)))
+                .put(JSONObject().put("key", "chipotle").put("ingredient", "chipotle in adobo").put("quantity", 1).put("status", "choose")
+                    .put("selectedId", JSONObject.NULL).put("remembered", JSONObject.NULL).put("options", JSONArray().put(c1))))
+    }
+
+    private fun result(added: List<AddedItem>) = AddResult("c1", "heb", added, emptyList(), emptyList(), null, verified = true)
+
+    @Test
+    fun totalsWhenEverySelectedItemHasAPriceAndAWeightItemPricedPerLbCountsAsPriced() {
+        assertEquals(Estimate(total = 8.0, count = 2, estimated = true, unpriced = 0), session(priced()).estimate())
+    }
+
+    @Test
+    fun totalIsNullWhenEvenOneSelectedItemHasNoPrice() {
+        val cs = session(priced())
+        cs.select("chipotle", "c1")
+        assertEquals(Estimate(total = null, count = 3, estimated = true, unpriced = 1), cs.estimate())
+        // A weight item with neither a per-lb nor a package price is unpriced too.
+        val w = session(priced(turkey = mapOf("pricePerLb" to null, "unitPrice" to null))).estimate()
+        assertNull(w.total)
+        assertEquals(1, w.unpriced)
+        // Deselecting the unpriced item brings the number back.
+        cs.deselect("chipotle")
+        assertEquals(8.0, cs.estimate().total!!, 0.0)
+    }
+
+    @Test
+    fun pricesAddedItemsFromTheirOwnFields() {
+        // Unit times quantity, per lb times pounds, a package once.
+        assertEquals(LinePrice(0.74, false), addedPrice(AddedItem("a", "1", "Onion", 2, unitPrice = 0.37)))
+        assertEquals(LinePrice(13.63, true), addedPrice(AddedItem("b", "2", "Salmon", 1, weightLb = 1.25, pricePerLb = 10.9, unitPrice = 10.9, estimated = true)))
+        assertEquals(LinePrice(32.0, true), addedPrice(AddedItem("c", "3", "Brisket", 1, weightLb = 4.0, unitPrice = 32.0, estimated = true)))
+        assertNull(addedPrice(AddedItem("d", "4", "Chipotle", 1)))
+    }
+
+    @Test
+    fun addedTotalReadsTheAddedEntriesFallsBackToTheSessionProductAndIsNullWhenAnyIsUnpriced() {
+        val cs = session(priced())
+        val full = result(listOf(
+            AddedItem("onion", "o1", "Onion", 2, imageUrl = "https://img/o.jpg", ingredient = "2 onions", unitPrice = 1.25),
+            AddedItem("turkey", "t1", "Deli Turkey", 1, weightLb = 0.5, pricePerLb = 12.0, estimated = true),
+        ))
+        assertEquals(Estimate(total = 8.5, count = 2, estimated = true, unpriced = 0), cs.addedTotal(full))
+        // An older server: no prices on the entries, the selected products stand in.
+        val old = result(listOf(AddedItem("onion", "o1", "Onion", 2), AddedItem("turkey", "t1", "Deli Turkey", 1, weightLb = 0.5)))
+        assertEquals(Estimate(total = 8.0, count = 2, estimated = true, unpriced = 0), cs.addedTotal(old))
+        cs.select("chipotle", "c1")
+        assertEquals(
+            Estimate(total = null, count = 3, estimated = true, unpriced = 1),
+            cs.addedTotal(result(full.added + AddedItem("chipotle", "c1", "Chipotle Peppers", 1))),
+        )
+        assertEquals(LinePrice(2.5, false), cs.addedPrice(full.added[0]))
+    }
+
+    @Test
+    fun parsesTheFinishedRunFieldsOnAddedItemsAsOptional() {
+        val r = AddResult.fromJson(JSONObject("""{"cartId":"c1","store":"heb","added":[
+            {"key":"onion","productId":"o1","name":"Onion","quantity":2,"imageUrl":"https://img/o.jpg","ingredient":"2 onions","unitPrice":1.25},
+            {"key":"turkey","productId":"t1","name":"Deli Turkey","quantity":1,"weightLb":0.5,"pricePerLb":12,"estimated":true},
+            {"key":"salt","productId":"s1","name":"Salt","quantity":1}],"skipped":[],"failed":[],"storeCartUrl":null,"verified":true}"""))
+        assertEquals(AddedItem("onion", "o1", "Onion", 2, imageUrl = "https://img/o.jpg", ingredient = "2 onions", unitPrice = 1.25), r.added[0])
+        assertEquals(AddedItem("turkey", "t1", "Deli Turkey", 1, weightLb = 0.5, pricePerLb = 12.0, estimated = true), r.added[1])
+        assertEquals(AddedItem("salt", "s1", "Salt", 1), r.added[2])
     }
 }

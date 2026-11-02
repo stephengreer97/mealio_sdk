@@ -230,7 +230,9 @@ class CartSession {
     fun deselect(key: String)                       // this run only; the usual is kept
     suspend fun search(key: String, query: String, onStep: StepListener? = null): List<Product>
     fun selections(): List<Selection>               // one per item
-    fun estimate(): Estimate                        // total, count, estimated, unpriced
+    fun estimate(): Estimate                        // total (null if any item is unpriced), count, estimated, unpriced
+    fun addedTotal(result: AddResult): Estimate     // same rule, over what the store took
+    fun addedPrice(a: AddedItem): LinePrice?        // one added line's price, or null
     suspend fun addToCart(onStep: StepListener? = null): AddResult
     // deprecated 0.1: ready, needsChoice, unavailable, choose(), skip(), pending(), selectionFor()
 }
@@ -246,7 +248,11 @@ class MealioException(val code: String, message: String, cause: Throwable? = nul
 `CartItem` has `key, ingredient, quantity, status, options, selectedId,
 remembered, rememberedPreferenceId, reason`. `Product` has `id, name, price,
 imageUrl, size, outOfStock, badge, preferences, unitPrice, estimated`.
-`AddResult` has `added, skipped, failed, storeCartUrl, verified`; a failed
+`AddResult` has `added, skipped, failed, storeCartUrl, verified`. Each
+`AddedItem` has `key, productId, name, quantity, weightLb` and, from newer
+servers, `imageUrl, ingredient, unitPrice, pricePerLb, estimated`. No partial
+totals: `Estimate.total` is null when any counted item has no price, so show
+"Prices at checkout" then (PROTOCOL.md, "Totals"). a failed
 item with reason `not_confirmed` was sent but not found when the cart was
 read back.
 

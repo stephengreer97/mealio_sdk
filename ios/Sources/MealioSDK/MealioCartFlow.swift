@@ -109,7 +109,7 @@ public struct MealioCartFlow: View {
 
     private var headerTitle: String {
         switch model.phase {
-        case .done: return "All set"
+        case .done: return storeName == "your store" ? "In your cart" : "In your \(storeName) cart"
         case .loading: return storeName == "your store" ? "Getting your cart ready" : "Getting your \(storeName) cart ready"
         case .error: return "Something went wrong"
         case .stores: return "Choose your store"
@@ -556,14 +556,21 @@ public struct MealioCartList: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.bottom, 6)
             }
+            // No partial totals: one unpriced item and there is no number to show.
             HStack(alignment: .firstTextBaseline) {
-                Text(est.estimated ? "Estimated total" : "Total")
+                Text(est.total != nil && est.estimated ? "Estimated total" : "Total")
                     .font(t.font(14))
                     .foregroundColor(t.muted)
                 Spacer()
-                Text((est.estimated ? "about " : "") + mealioMoney(est.total))
-                    .font(t.font(18, .bold))
-                    .foregroundColor(t.text)
+                if let total = est.total {
+                    Text((est.estimated ? "about " : "") + mealioMoney(total))
+                        .font(t.font(18, .bold))
+                        .foregroundColor(t.text)
+                } else {
+                    Text("Prices at checkout")
+                        .font(t.font(15, .semibold))
+                        .foregroundColor(t.muted)
+                }
             }
             .accessibilityElement(children: .combine)
             MealioCTA(t: t, title: label, busy: busy, enabled: !off, action: onAdd)
@@ -1047,6 +1054,10 @@ struct MealioCTA: View {
 
 // MARK: - Done
 
+/// The finished run. What the store took, row by row (image, product, the
+/// recipe line, amount, price), then what was left out. No total unless every
+/// added item has a price. No open-cart button: the user's next step is the
+/// store's own app or site, not ours.
 @MainActor
 struct MealioDoneView: View {
     @ObservedObject var cart: CartSession
@@ -1054,6 +1065,7 @@ struct MealioDoneView: View {
     let result: AddResult
     let storeName: String
     let onDone: () -> Void
+    @State private var open: Bool
 
     init(t: MealioTheme, cart: CartSession, result: AddResult, storeName: String, onDone: @escaping () -> Void) {
         self._cart = ObservedObject(wrappedValue: cart)
@@ -1061,79 +1073,292 @@ struct MealioDoneView: View {
         self.result = result
         self.storeName = storeName
         self.onDone = onDone
+        // "Left out this time" opens on its own when something failed.
+        self._open = State(initialValue: !result.failed.isEmpty)
     }
+
+    private var n: Int { result.added.count }
 
     private var title: String {
-        let n = result.added.count
-        return n > 0 ? "Added \(n) item\(n == 1 ? "" : "s") to \(storeName)" : "Nothing was added to \(storeName)"
+        n > 0 ? "\(n) item\(n == 1 ? "" : "s") added" : "Nothing was added"
     }
 
-    private var failedText: String {
-        let n = result.failed.count
-        let list = result.failed.map { "\($0.name) (\(mealioReasonText($0.reason)))" }.joined(separator: ", ")
-        return "\(n) item\(n == 1 ? "" : "s") could not be added: \(list)."
+    private var subtitle: String {
+        let sum = cart.addedTotal(result)
+        let money: String = sum.total.map { (sum.estimated ? "about " : "") + mealioMoney($0) } ?? "Prices at checkout"
+        let parts: [String?] = [money, result.verified == true ? "checked in your cart" : nil]
+        return parts.compactMap { $0 }.joined(separator: " \u{00B7} ")
     }
 
     var body: some View {
-        VStack(spacing: 0) {
+        let left = mealioLeftOut(cart: cart, result: result, storeName: storeName)
+        return VStack(spacing: 0) {
             ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    VStack(spacing: 12) {
-                        ZStack {
-                            Circle().fill(t.surface)
-                            Image(systemName: "checkmark")
-                                .font(.system(size: 28, weight: .heavy))
-                                .foregroundColor(t.accent)
+                VStack(alignment: .leading, spacing: 16) {
+                    banner
+                    if n > 0 {
+                        VStack(spacing: 0) {
+                            ForEach(Array(result.added.enumerated()), id: \.element.key) { i, a in
+                                MealioAddedRow(t: t, cart: cart, item: a, first: i == 0)
+                            }
                         }
-                        .frame(width: 64, height: 64)
-                        .accessibilityHidden(true)
-                        Text(title)
-                            .font(t.font(22, .bold))
-                            .foregroundColor(t.text)
-                            .multilineTextAlignment(.center)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .accessibilityAddTraits(.isHeader)
+                        .background(t.background)
+                        .clipShape(RoundedRectangle(cornerRadius: t.radius + 2))
+                        .overlay(RoundedRectangle(cornerRadius: t.radius + 2).strokeBorder(t.border, lineWidth: 1))
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 16)
-
-                    if !result.failed.isEmpty {
-                        MealioWarnBox(t: t, text: failedText)
-                    }
-
-                    ForEach(result.added, id: \.key) { a in
-                        row(name: a.name + (a.weightLb.map { ", \(mealioLbText($0))" } ?? ""),
-                            value: cart.selected(for: a.key).map(mealioPriceText) ?? "", muted: false)
-                    }
-                    ForEach(result.skipped.filter { $0.reason == "deselected" }, id: \.key) { s in
-                        row(name: cart.items.first { $0.key == s.key }?.ingredient ?? s.key, value: "Left out", muted: true)
+                    if !left.isEmpty {
+                        leftOutCard(left)
                     }
                 }
-                .padding(20)
+                .padding(.horizontal, 20)
+                .padding(.top, 8)
+                .padding(.bottom, 24)
             }
-            MealioCTA(t: t, title: "Done", action: onDone)
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
-                .padding(.bottom, 12)
-                .overlay(alignment: .top) { Rectangle().fill(t.border).frame(height: 1) }
+            VStack(spacing: 10) {
+                MealioCTA(t: t, title: "Done", action: onDone)
+                Text("Cart by Mealio")
+                    .font(t.font(12))
+                    .foregroundColor(t.muted)
+                    .frame(maxWidth: .infinity)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 12)
         }
     }
 
-    private func row(name: String, value: String, muted: Bool) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text(name)
-                .font(t.font(14))
-                .foregroundColor(muted ? t.muted : t.text)
-                .lineLimit(2)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Text(value)
-                .font(muted ? t.font(14) : t.font(14, .bold))
-                .foregroundColor(muted ? t.muted : t.text)
+    private var banner: some View {
+        let ok = n > 0
+        return HStack(spacing: 12) {
+            ZStack {
+                Circle().fill(ok ? t.accent : t.warnText)
+                Image(systemName: ok ? "checkmark" : "exclamationmark")
+                    .font(.system(size: 16, weight: .heavy))
+                    .foregroundColor(t.onAccent)
+            }
+            .frame(width: 36, height: 36)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(t.font(15, .bold))
+                    .foregroundColor(ok ? t.text : t.warnText)
+                Text(ok ? subtitle : "Your cart did not change.")
+                    .font(t.font(13))
+                    .foregroundColor(ok ? t.text.opacity(0.85) : t.warnText)
+                    .lineSpacing(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.vertical, 14)
+        .padding(.horizontal, 16)
+        // The accent at 10% over the sheet, as the RN banner.
+        .background(RoundedRectangle(cornerRadius: t.radius + 2).fill(ok ? t.accent.opacity(0.1) : t.warnBackground))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(ok ? "\(title), \(subtitle)" : "\(title). Your cart did not change.")
+    }
+
+    private func leftOutCard(_ left: [MealioLeftOut]) -> some View {
+        let labels = left.map(\.label).joined(separator: ", ")
+        let shape = RoundedRectangle(cornerRadius: t.radius + 2)
+        return VStack(spacing: 0) {
+            Button(action: { withAnimation(.easeInOut(duration: 0.2)) { open.toggle() } }) {
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Left out this time")
+                            .font(t.font(14, .semibold))
+                            .foregroundColor(t.text)
+                        if !open {
+                            Text(mealioSentence(labels))
+                                .font(t.font(12))
+                                .foregroundColor(t.muted)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.leading)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    Image(systemName: open ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(t.muted)
+                        .accessibilityHidden(true)
+                }
+                .padding(.vertical, 10)
+                .padding(.horizontal, 16)
+                .frame(minHeight: 56)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Left out this time: \(labels)")
+            .accessibilityValue(open ? "Expanded" : "Collapsed")
+
+            if open {
+                ForEach(left, id: \.key) { x in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(mealioSentence(x.label))
+                            .font(t.font(14, .medium))
+                            .foregroundColor(t.text)
+                            .lineLimit(2)
+                        Text(x.why)
+                            .font(t.font(12))
+                            .foregroundColor(x.failed ? t.warnText : t.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 10)
+                    .padding(.horizontal, 16)
+                    .overlay(alignment: .top) { Rectangle().fill(t.border).frame(height: 1) }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("\(x.label), \(x.why)")
+                }
+            }
+        }
+        .background(t.background)
+        .clipShape(shape)
+        .overlay(shape.strokeBorder(t.border, lineWidth: 1))
+    }
+}
+
+/// One line the store took: 44pt image (or initials), product, the recipe
+/// line, an amount pill and the price.
+@MainActor
+struct MealioAddedRow: View {
+    @ObservedObject var cart: CartSession
+    let t: MealioTheme
+    let item: AddedItem
+    let first: Bool
+
+    init(t: MealioTheme, cart: CartSession, item: AddedItem, first: Bool) {
+        self._cart = ObservedObject(wrappedValue: cart)
+        self.t = t
+        self.item = item
+        self.first = first
+    }
+
+    var body: some View {
+        let product = cart.selected(for: item.key)
+        let images: [String?] = [item.imageUrl, product?.imageUrl]
+        let image = images.compactMap { $0 }.first { !$0.isEmpty }
+        let lines: [String?] = [item.ingredient, cart.items.first { $0.key == item.key }?.ingredient]
+        let line = lines.compactMap { $0 }.first { !$0.isEmpty } ?? ""
+        let amount = item.weightLb.map(mealioLbText) ?? "\u{00D7}\(item.quantity)"
+        let p = cart.addedPrice(item)
+        let price = p.map { ($0.estimated ? "about " : "") + mealioMoney($0.amount) } ?? ""
+        let spokenAmount = item.weightLb.map { "\(mealioLbNumber($0)) pounds" } ?? "quantity \(item.quantity)"
+        let parts: [String?] = [item.name, line.isEmpty ? nil : "for \(line)", spokenAmount, price.isEmpty ? nil : price]
+        let spoken = parts.compactMap { $0 }.joined(separator: ", ")
+
+        return HStack(spacing: 12) {
+            thumb(image)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.name)
+                    .font(t.font(14, .semibold))
+                    .foregroundColor(t.text)
+                    .lineLimit(1)
+                if !line.isEmpty {
+                    Text(line)
+                        .font(t.font(12))
+                        .foregroundColor(t.muted)
+                        .lineLimit(1)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .trailing, spacing: 4) {
+                Text(amount)
+                    .font(t.font(12, .bold))
+                    .foregroundColor(t.text)
+                    .padding(.vertical, 3)
+                    .padding(.horizontal, 8)
+                    .background(Capsule().fill(t.surface))
+                if !price.isEmpty {
+                    Text(price)
+                        .font(t.font(12))
+                        .foregroundColor(t.muted)
+                }
+            }
         }
         .padding(.vertical, 12)
-        .overlay(alignment: .bottom) { Rectangle().fill(t.border).frame(height: 0.5) }
-        .accessibilityElement(children: .combine)
+        .padding(.horizontal, 14)
+        .frame(minHeight: 68)
+        .overlay(alignment: .top) {
+            if !first { Rectangle().fill(t.border).frame(height: 1) }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(spoken)
     }
+
+    @ViewBuilder
+    private func thumb(_ image: String?) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 10)
+        if let s = image, let url = URL(string: s) {
+            AsyncImage(url: url) { img in
+                img.resizable().scaledToFit()
+            } placeholder: {
+                Color.white
+            }
+            .frame(width: 44, height: 44)
+            .background(Color.white)
+            .clipShape(shape)
+            .accessibilityHidden(true)
+        } else {
+            Text(mealioMonogram(item.name))
+                .font(t.font(13, .bold))
+                .foregroundColor(t.muted)
+                .frame(width: 44, height: 44)
+                .background(shape.fill(t.surface))
+                .accessibilityHidden(true)
+        }
+    }
+}
+
+struct MealioLeftOut {
+    let key: String
+    let label: String
+    let why: String
+    let failed: Bool
+}
+
+/// Everything the store did not take this run: unchecked, skipped, or failed
+/// (with its reason).
+@MainActor
+func mealioLeftOut(cart: CartSession, result: AddResult, storeName: String) -> [MealioLeftOut] {
+    func item(_ key: String) -> CartItem? { cart.items.first { $0.key == key } }
+    func nonEmpty(_ s: String?) -> String? { (s?.isEmpty ?? true) ? nil : s }
+    var out: [MealioLeftOut] = []
+    for f in result.failed {
+        out.append(MealioLeftOut(key: f.key, label: nonEmpty(item(f.key)?.ingredient) ?? f.name,
+                                 why: mealioSentence("\(f.name): \(mealioReasonText(f.reason))"), failed: true))
+    }
+    for x in result.skipped {
+        let it = item(x.key)
+        let why: String
+        if it?.status == .unavailable {
+            why = "Not found at \(storeName)"
+        } else if x.reason == "preference_required" {
+            why = "Needed an option chosen"
+        } else if x.reason == "deselected" {
+            why = "Unchecked this time"
+        } else {
+            why = "Not chosen"
+        }
+        out.append(MealioLeftOut(key: x.key, label: nonEmpty(it?.ingredient) ?? x.key, why: why, failed: false))
+    }
+    return out
+}
+
+/// First letter up: "Corn tortillas, chipotle peppers".
+func mealioSentence(_ x: String) -> String {
+    guard let f = x.first else { return x }
+    return f.uppercased() + x.dropFirst()
+}
+
+/// Two letters for an image-less product tile: "Fresh Yellow Onion" -> "FY".
+func mealioMonogram(_ name: String) -> String {
+    let cleaned = String(name.map { ch -> Character in
+        (ch.isASCII && (ch.isLetter || ch.isNumber)) ? ch : " "
+    })
+    let words = cleaned.split(separator: " ")
+    let a = words.first?.first.map { String($0) } ?? ""
+    let b = words.dropFirst().first?.first.map { String($0) } ?? ""
+    return (a + b).uppercased()
 }
 
 /// A failed add's reason in plain words.
@@ -1147,10 +1372,15 @@ func mealioReasonText(_ r: String) -> String {
 
 /// "0.75 lb", "1 lb": at most two decimals, no trailing zeros.
 func mealioLbText(_ lb: Double) -> String {
+    "\(mealioLbNumber(lb)) lb"
+}
+
+/// "0.75", "1": at most two decimals, no trailing zeros.
+func mealioLbNumber(_ lb: Double) -> String {
     var s = String(format: "%.2f", lb)
     while s.hasSuffix("0") { s.removeLast() }
     if s.hasSuffix(".") { s.removeLast() }
-    return "\(s) lb"
+    return s
 }
 
 /// The price as a row shows it. Sold by the pound: "$9.99/lb est.".

@@ -91,10 +91,12 @@ Close, Done, or swipes the sheet away.
   a search box ("Search H-E-B for something else") and, for products like deli
   meat, preference chips (sliced / shaved). Unchecking an item leaves it out of
   this run only; the usual pick stays saved. The footer shows the total
-  ("about $31.20" when some items are sold by weight) and "Add 5 items to H-E-B".
-- **Done:** "Added 5 items to H-E-B", anything that failed in plain words (out
-  of stock, not confirmed in your cart, the store did not answer), and a Done
-  button that closes the sheet.
+  ("about $31.20" when some items are sold by weight), or "Prices at checkout"
+  when any checked item has no price, and "Add 5 items to H-E-B".
+- **Done:** "In your H-E-B cart", a banner "5 items added" with "about $31.20"
+  (or "Prices at checkout"), one row per added item (image, product, the recipe
+  line, amount, price), a collapsed "Left out this time" that opens on its own
+  when something failed (with the reason in plain words), and a Done button.
 
 ### Theme
 
@@ -223,7 +225,7 @@ session.isWeight(key)                            // soldByWeight: use weight, no
 session.weight(for: key); session.weightRange(for: key)
 session.setWeight(key: key, to: 1.25); session.stepWeight(key: key, by: 1)   // snapped to the store's weights
 session.needsPreference(key); session.pendingPreferences()  // ticked, but no preference chosen yet
-let est = session.estimate()                     // total, count, estimated ("about"), unpriced
+let est = session.estimate()                     // total (nil if any item is unpriced), count, estimated, unpriced
 let result = try await session.addToCart(onStep: { step, _ in })
 ```
 
@@ -242,7 +244,13 @@ sheet) still works and now draws that list.
 
 `AddResult` has `added`, `skipped` (reason `deselected` for unchecked items),
 `failed` (reason `not_confirmed` when the cart read after adding did not find
-the item) and `verified` (true when that read confirmed everything).
+the item) and `verified` (true when that read confirmed everything). Each added
+entry may carry `imageUrl`, `ingredient`, `unitPrice`, `pricePerLb` and
+`estimated` (absent from older servers). `session.addedTotal(result)` and
+`session.addedPrice(entry)` price them, falling back to the selected product.
+
+No partial totals: `estimate()` and `addedTotal(_:)` return `total: nil` when
+any counted item has no price. Show no number then, never a sum of the rest.
 
 ### Upgrading from 0.1
 

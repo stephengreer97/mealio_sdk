@@ -13,6 +13,13 @@
   is optional (`store_required` when the user has no default).
 - Progress: `MealioStep`, `stepOf`, `onStep` on the client, `CartSession` and `Runner.run`.
 - `MealioCartSheet` now reuses `MealioCartList`.
+- Finished-run screen: "In your <Store> cart", a banner with the count and total, one row
+  per added item (image or initials, product, recipe line, amount, price), a collapsed
+  "Left out this time" that opens on its own when an item failed, Done and "Cart by Mealio".
+- `AddedItem` gains `imageUrl`, `ingredient`, `unitPrice`, `pricePerLb` and `estimated`.
+  `addedPrice()`, `CartSession.addedTotal()` and `CartSession.addedPrice()` price the added lines.
+- No partial totals: `CartEstimate.total` is null when any counted item has no price, and the
+  list and done screen show "Prices at checkout".
 
 ## 0.1.0
 

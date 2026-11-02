@@ -381,7 +381,7 @@ final class ClientTests: XCTestCase {
         XCTAssertEqual(session.setQuantity(key: "onion", to: 0), 1)
         session.setQuantity(key: "onion", to: 3)
         XCTAssertEqual(session.selections()[0], Selection(key: "onion", productId: "o1", quantity: 3, remember: true))
-        XCTAssertEqual(session.estimate().total, 4.5, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(session.estimate().total), 4.5, accuracy: 0.001)
         try session.select(key: "onion", productId: "o2")
         XCTAssertEqual(session.maxQuantity(for: "onion"), 99)
         XCTAssertEqual(session.quantity(for: "onion"), 3)
@@ -409,9 +409,9 @@ final class ClientTests: XCTestCase {
         try session.select(key: "garlic", productId: "g1")
         XCTAssertEqual(session.estimate(), CartEstimate(total: 3.0, count: 2, estimated: false, unpriced: 0))
 
-        // A selected product with no unit price makes the total "about".
+        // A selected product with no unit price: no partial totals, so no total.
         try session.select(key: "steak", productId: "s2")
-        XCTAssertEqual(session.estimate(), CartEstimate(total: 3.0, count: 3, estimated: true, unpriced: 1))
+        XCTAssertEqual(session.estimate(), CartEstimate(total: nil, count: 3, estimated: true, unpriced: 1))
 
         session.deselect(key: "onion")
         session.deselect(key: "garlic")
@@ -593,13 +593,13 @@ final class ClientTests: XCTestCase {
         let cs = try weightSession()
         cs.setWeight(key: "turkey", to: 1.25)
         let est = cs.estimate()
-        XCTAssertEqual(est.total, 14.5, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(est.total), 14.5, accuracy: 0.001)
         XCTAssertTrue(est.estimated)
         XCTAssertEqual(est.count, 2)
         // A package-priced weight item counts its price once, whatever the weight.
         try cs.select(key: "turkey", productId: "b1")
         cs.setWeight(key: "turkey", to: 3)
-        XCTAssertEqual(cs.estimate().total, 34, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(cs.estimate().total), 34, accuracy: 0.001)
         XCTAssertTrue(cs.estimate().estimated)
     }
 
@@ -619,6 +619,101 @@ final class ClientTests: XCTestCase {
         """#.utf8))
         XCTAssertEqual(add.added[0].weightLb, 1.25)
         XCTAssertNil(add.added[1].weightLb)
+    }
+
+    // MARK: No partial totals
+    // Same as the TS "cart session > no partial totals" tests.
+
+    /// Onion x2 at $1, deli turkey 0.5 lb at $12/lb (overridable), and an
+    /// unselected chipotle with no price.
+    private static func pricedCartJSON(turkey: String = #""pricePerLb":12,"unitPrice":12"#) -> String {
+        #"""
+        {"cartId":"c1","store":"heb","ready":[],"needsChoice":[],"unavailable":[],
+         "items":[
+          {"key":"onion","ingredient":"onion","quantity":2,"status":"remembered","selectedId":"o1","remembered":null,
+           "options":[{"id":"o1","name":"Onion","unitPrice":1}]},
+          {"key":"turkey","ingredient":"deli turkey","quantity":1,"weightLb":0.5,"status":"remembered","selectedId":"t1","remembered":null,
+           "options":[{"id":"t1","name":"Deli Turkey","soldByWeight":true,"estimated":true,\#(turkey)}]},
+          {"key":"chipotle","ingredient":"chipotle in adobo","quantity":1,"status":"choose","selectedId":null,"remembered":null,
+           "options":[{"id":"c1","name":"Chipotle Peppers","unitPrice":null}]}
+         ]}
+        """#
+    }
+
+    @MainActor
+    private func pricedSession(turkey: String? = nil) throws -> CartSession {
+        let json = turkey.map { ClientTests.pricedCartJSON(turkey: $0) } ?? ClientTests.pricedCartJSON()
+        return try makeSession(makeClient(keys: TestSigner.keys), json: json)
+    }
+
+    private static func result(_ added: [AddedItem]) -> AddResult {
+        AddResult(cartId: "c1", store: "heb", added: added, skipped: [], failed: [], storeCartUrl: nil, verified: true)
+    }
+
+    @MainActor
+    func testTotalsWhenEverySelectedItemHasAPriceAndAWeightItemPricedPerLbCounts() throws {
+        XCTAssertEqual(try pricedSession().estimate(), CartEstimate(total: 8, count: 2, estimated: true, unpriced: 0))
+    }
+
+    @MainActor
+    func testTotalIsNilWhenEvenOneSelectedItemHasNoPrice() throws {
+        let cs = try pricedSession()
+        try cs.select(key: "chipotle", productId: "c1")
+        XCTAssertEqual(cs.estimate(), CartEstimate(total: nil, count: 3, estimated: true, unpriced: 1))
+        // A weight item with neither a per-lb nor a package price is unpriced too.
+        let w = try pricedSession(turkey: #""pricePerLb":null,"unitPrice":null"#)
+        XCTAssertNil(w.estimate().total)
+        XCTAssertEqual(w.estimate().unpriced, 1)
+        // Deselecting the unpriced item brings the number back.
+        cs.deselect(key: "chipotle")
+        XCTAssertEqual(cs.estimate().total, 8)
+    }
+
+    func testPricesAddedItemsFromTheirOwnFields() {
+        XCTAssertEqual(addedPrice(AddedItem(key: "a", productId: "1", name: "Onion", quantity: 2, unitPrice: 0.37)),
+                       AddedPrice(amount: 0.74, estimated: false))
+        XCTAssertEqual(addedPrice(AddedItem(key: "b", productId: "2", name: "Salmon", quantity: 1, weightLb: 1.25,
+                                            unitPrice: 10.9, pricePerLb: 10.9, estimated: true)),
+                       AddedPrice(amount: 13.63, estimated: true))
+        XCTAssertEqual(addedPrice(AddedItem(key: "c", productId: "3", name: "Brisket", quantity: 1, weightLb: 4,
+                                            unitPrice: 32, estimated: true)),
+                       AddedPrice(amount: 32, estimated: true))
+        XCTAssertNil(addedPrice(AddedItem(key: "d", productId: "4", name: "Chipotle", quantity: 1)))
+    }
+
+    @MainActor
+    func testAddedTotalReadsTheEntriesFallsBackToTheSessionAndIsNilWhenAnyIsUnpriced() throws {
+        let cs = try pricedSession()
+        let full = ClientTests.result([
+            AddedItem(key: "onion", productId: "o1", name: "Onion", quantity: 2, imageUrl: "https://img/o.jpg",
+                      ingredient: "2 onions", unitPrice: 1.25),
+            AddedItem(key: "turkey", productId: "t1", name: "Deli Turkey", quantity: 1, weightLb: 0.5,
+                      pricePerLb: 12, estimated: true),
+        ])
+        XCTAssertEqual(cs.addedTotal(full), CartEstimate(total: 8.5, count: 2, estimated: true, unpriced: 0))
+        // An older server: no prices on the entries, the selected products stand in.
+        let old = ClientTests.result([
+            AddedItem(key: "onion", productId: "o1", name: "Onion", quantity: 2),
+            AddedItem(key: "turkey", productId: "t1", name: "Deli Turkey", quantity: 1, weightLb: 0.5),
+        ])
+        XCTAssertEqual(cs.addedTotal(old), CartEstimate(total: 8, count: 2, estimated: true, unpriced: 0))
+        try cs.select(key: "chipotle", productId: "c1")
+        let withChipotle = ClientTests.result(full.added + [AddedItem(key: "chipotle", productId: "c1", name: "Chipotle Peppers", quantity: 1)])
+        XCTAssertEqual(cs.addedTotal(withChipotle), CartEstimate(total: nil, count: 3, estimated: true, unpriced: 1))
+        XCTAssertEqual(cs.addedPrice(full.added[0]), AddedPrice(amount: 2.5, estimated: false))
+    }
+
+    func testAddedEntryFieldsDecodeAndAreOptional() throws {
+        let add = try JSONDecoder().decode(AddResult.self, from: Data(#"""
+        {"cartId":"c","store":"heb","skipped":[],"failed":[],"storeCartUrl":null,"verified":true,
+         "added":[{"key":"t","productId":"t1","name":"Deli Turkey","quantity":1,"weightLb":0.5,
+                   "imageUrl":"https://img/t.jpg","ingredient":"1/2 lb deli turkey","unitPrice":12,"pricePerLb":12,"estimated":true},
+                  {"key":"o","productId":"o1","name":"Onion","quantity":2}]}
+        """#.utf8))
+        XCTAssertEqual(add.added[0], AddedItem(key: "t", productId: "t1", name: "Deli Turkey", quantity: 1, weightLb: 0.5,
+                                               imageUrl: "https://img/t.jpg", ingredient: "1/2 lb deli turkey",
+                                               unitPrice: 12, pricePerLb: 12, estimated: true))
+        XCTAssertEqual(add.added[1], AddedItem(key: "o", productId: "o1", name: "Onion", quantity: 2))
     }
 
     // MARK: Preferences

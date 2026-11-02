@@ -457,8 +457,11 @@ String reasonText(String r) {
   return 'the store refused it';
 }
 
-/// What was added, what failed, what was left out, and a Done button.
-class DoneView extends StatelessWidget {
+/// The finished run. What the store took, row by row (image, product, the
+/// recipe line, amount, price), then what was left out. No total unless every
+/// added item has a price. No open-cart button: the user's next step is the
+/// store's own app or site, not ours.
+class DoneView extends StatefulWidget {
   const DoneView({
     super.key,
     required this.theme,
@@ -479,98 +482,179 @@ class DoneView extends StatelessWidget {
   final Widget? extra;
 
   @override
+  State<DoneView> createState() => _DoneViewState();
+}
+
+class _DoneViewState extends State<DoneView> {
+  // "Left out this time" opens on its own when something failed.
+  late bool _open = widget.result.failed.isNotEmpty;
+
+  @override
   Widget build(BuildContext context) {
-    final t = theme;
-    final r = result;
-    String price(String key) {
-      final p = session.selected(key);
-      return p == null ? '' : priceText(p);
-    }
+    final t = widget.theme;
+    final r = widget.result;
+    final cart = widget.session;
+    final n = r.added.length;
+    final sum = cart.addedTotal(r);
+    final left = _leftOut(cart, r, widget.storeName);
+    final subtitle = <String>[
+      if (sum.total != null) '${sum.estimated ? 'about ' : ''}${mealioMoney(sum.total!)}' else 'Prices at checkout',
+      if (r.verified ?? false) 'checked in your cart',
+    ].join(' · ');
+    final title = n > 0 ? '${plural(n, 'item')} added' : 'Nothing was added';
+    final small = t.style(size: 12, height: 17 / 12, color: t.muted);
+    final cardRadius = BorderRadius.circular(t.radius + 2);
+    final labels = left.map((_LeftOut x) => x.label).join(', ');
 
-    String ingredient(String key) {
-      for (final CartItem i in session.items) {
-        if (i.key == key) return i.ingredient;
-      }
-      return key;
-    }
+    final banner = Semantics(
+      container: true,
+      liveRegion: true,
+      label: n > 0 ? '$title, $subtitle' : '$title. Your cart did not change.',
+      excludeSemantics: true,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
+        decoration: BoxDecoration(
+          color: n > 0 ? t.accent.withAlpha(0x1A) : t.warnBackground,
+          borderRadius: cardRadius,
+        ),
+        child: Row(
+          children: <Widget>[
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(color: n > 0 ? t.accent : t.warnText, shape: BoxShape.circle),
+              alignment: Alignment.center,
+              child: Icon(n > 0 ? Icons.check : Icons.priority_high, size: 20, color: t.onAccent),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(title, style: t.style(size: 15, weight: FontWeight.w700, color: n > 0 ? t.text : t.warnText)),
+                  Opacity(
+                    opacity: 0.85,
+                    child: Text(
+                      n > 0 ? subtitle : 'Your cart did not change.',
+                      style: t.style(size: 13, height: 18 / 13, color: n > 0 ? t.text : t.warnText),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
 
-    Widget row(Widget left, Widget right) => Container(
-          padding: const EdgeInsets.symmetric(vertical: 12),
-          decoration: BoxDecoration(border: Border(bottom: BorderSide(color: t.border, width: 0.5))),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[Expanded(child: left), const SizedBox(width: 12), right],
-          ),
+    BoxDecoration card() => BoxDecoration(
+          color: t.background,
+          borderRadius: cardRadius,
+          border: Border.all(color: t.border),
         );
 
-    final failed = r.failed;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
         Expanded(
           child: SingleChildScrollView(
-            padding: const EdgeInsets.all(20),
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: gapped(<Widget>[
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  child: Column(
-                    children: gapped(<Widget>[
-                      ExcludeSemantics(
-                        child: Container(
-                          width: 64,
-                          height: 64,
-                          decoration: BoxDecoration(color: t.surface, shape: BoxShape.circle),
-                          alignment: Alignment.center,
-                          child: Text('✓', style: t.style(size: 28, weight: FontWeight.w800, color: t.accent)),
-                        ),
-                      ),
-                      Semantics(
-                        liveRegion: true,
-                        child: Text(
-                          r.added.isNotEmpty
-                              ? 'Added ${plural(r.added.length, 'item')} to $storeName'
-                              : 'Nothing was added to $storeName',
-                          textAlign: TextAlign.center,
-                          style: t.style(size: 22, height: 28 / 22, weight: FontWeight.w700),
-                        ),
-                      ),
-                    ], 12),
+                banner,
+                if (n > 0)
+                  Container(
+                    clipBehavior: Clip.antiAlias,
+                    decoration: card(),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: <Widget>[
+                        for (var i = 0; i < n; i += 1)
+                          _AddedRow(key: ValueKey<String>(r.added[i].key), theme: t, session: cart, item: r.added[i], first: i == 0),
+                      ],
+                    ),
                   ),
-                ),
-                if (failed.isNotEmpty)
-                  WarnBox(
-                    theme: t,
-                    margin: const EdgeInsets.symmetric(horizontal: 12),
-                    text: '${plural(failed.length, 'item')} could not be added: '
-                        '${failed.map((FailedItem f) => '${f.name} (${reasonText(f.reason)})').join(', ')}.',
+                if (left.isNotEmpty)
+                  Container(
+                    clipBehavior: Clip.antiAlias,
+                    decoration: card(),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: <Widget>[
+                        Semantics(
+                          button: true,
+                          expanded: _open,
+                          label: 'Left out this time: $labels',
+                          excludeSemantics: true,
+                          child: Material(
+                            type: MaterialType.transparency,
+                            child: InkWell(
+                              onTap: () => setState(() => _open = !_open),
+                              child: ConstrainedBox(
+                                constraints: const BoxConstraints(minHeight: 56),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
+                                  child: Row(
+                                    children: <Widget>[
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: <Widget>[
+                                            Text('Left out this time', style: t.style(size: 14, weight: FontWeight.w600)),
+                                            if (!_open)
+                                              Text(_sentence(labels),
+                                                  maxLines: 2, overflow: TextOverflow.ellipsis, style: small),
+                                          ],
+                                        ),
+                                      ),
+                                      const SizedBox(width: 12),
+                                      Icon(_open ? Icons.expand_less : Icons.expand_more, size: 22, color: t.muted),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                        if (_open)
+                          for (final _LeftOut x in left)
+                            Semantics(
+                              key: ValueKey<String>('left-${x.key}'),
+                              container: true,
+                              label: '${x.label}, ${x.why}',
+                              excludeSemantics: true,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
+                                decoration: BoxDecoration(border: Border(top: BorderSide(color: t.border))),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: <Widget>[
+                                    Text(_sentence(x.label),
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: t.style(size: 14, weight: FontWeight.w500)),
+                                    const SizedBox(height: 2),
+                                    Text(x.why, style: x.failed ? small.copyWith(color: t.warnText) : small),
+                                  ],
+                                ),
+                              ),
+                            ),
+                      ],
+                    ),
                   ),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: <Widget>[
-                    for (final AddedItem a in r.added)
-                      row(
-                        Text('${a.name}${a.weightLb != null ? ', ${lbText(a.weightLb!)}' : ''}',
-                            maxLines: 2, overflow: TextOverflow.ellipsis, style: t.style(size: 14)),
-                        Text(price(a.key), style: t.style(weight: FontWeight.w700)),
-                      ),
-                    for (final SkippedItem x in r.skipped.where((SkippedItem x) => x.reason == 'deselected'))
-                      row(
-                        Text(ingredient(x.key), style: t.style(size: 14, color: t.muted)),
-                        Text('Left out', style: t.style(size: 14, color: t.muted)),
-                      ),
-                  ],
-                ),
-              ], 12),
+              ], 16),
             ),
           ),
         ),
         Footer(
           theme: t,
+          border: false,
+          gap: 10,
           children: <Widget>[
-            if (extra != null) extra!,
-            Cta(theme: t, label: 'Done', onTap: onDone),
+            if (widget.extra != null) widget.extra!,
+            Cta(theme: t, label: 'Done', onTap: widget.onDone),
+            Text('Cart by Mealio', textAlign: TextAlign.center, style: small),
           ],
         ),
       ],
@@ -578,12 +662,168 @@ class DoneView extends StatelessWidget {
   }
 }
 
+/// One line the store took: 44px image (or initials), product, the recipe
+/// line, an amount pill and the price.
+class _AddedRow extends StatelessWidget {
+  const _AddedRow({super.key, required this.theme, required this.session, required this.item, required this.first});
+
+  final MealioTheme theme;
+  final CartSession session;
+  final AddedItem item;
+  final bool first;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = theme;
+    final product = session.selected(item.key);
+    final image = _nonEmpty(item.imageUrl) ?? _nonEmpty(product?.imageUrl);
+    String line = _nonEmpty(item.ingredient) ?? '';
+    if (line.isEmpty) {
+      for (final CartItem i in session.items) {
+        if (i.key == item.key) line = i.ingredient;
+      }
+    }
+    final lb = item.weightLb;
+    final amount = lb != null ? lbText(lb) : '×${item.quantity}';
+    final p = session.addedPrice(item);
+    final price = p == null ? '' : '${p.estimated ? 'about ' : ''}${mealioMoney(p.amount)}';
+    final spoken = <String>[
+      item.name,
+      if (line.isNotEmpty) 'for $line',
+      if (lb != null) '${lbText(lb).replaceFirst(' lb', '')} pounds' else 'quantity ${item.quantity}',
+      if (price.isNotEmpty) price,
+    ].join(', ');
+    final small = t.style(size: 12, height: 17 / 12, color: t.muted);
+    final initials = Container(
+      color: t.surface,
+      alignment: Alignment.center,
+      child: Text(_monogram(item.name), style: t.style(size: 13, weight: FontWeight.w700, color: t.muted)),
+    );
+    return Semantics(
+      container: true,
+      label: spoken,
+      excludeSemantics: true,
+      child: Container(
+        constraints: const BoxConstraints(minHeight: 68),
+        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 14),
+        decoration: first ? null : BoxDecoration(border: Border(top: BorderSide(color: t.border))),
+        child: Row(
+          children: <Widget>[
+            ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: SizedBox(
+                width: 44,
+                height: 44,
+                child: image == null
+                    ? initials
+                    : Container(
+                        color: const Color(0xFFFFFFFF),
+                        child: Image.network(
+                          image,
+                          fit: BoxFit.contain,
+                          excludeFromSemantics: true,
+                          errorBuilder: (BuildContext context, Object error, StackTrace? stack) => initials,
+                        ),
+                      ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(item.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: t.style(size: 14, height: 19 / 14, weight: FontWeight.w600)),
+                  if (line.isNotEmpty) Text(line, maxLines: 1, overflow: TextOverflow.ellipsis, style: small),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: <Widget>[
+                Container(
+                  padding: const EdgeInsets.symmetric(vertical: 3, horizontal: 8),
+                  decoration: BoxDecoration(color: t.surface, borderRadius: BorderRadius.circular(999)),
+                  child: Text(amount, style: t.style(size: 12, weight: FontWeight.w700)),
+                ),
+                if (price.isNotEmpty) ...<Widget>[
+                  const SizedBox(height: 4),
+                  Text(price, style: small),
+                ],
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _LeftOut {
+  const _LeftOut({required this.key, required this.label, required this.why, required this.failed});
+  final String key;
+  final String label;
+  final String why;
+  final bool failed;
+}
+
+/// Everything the store did not take this run: unchecked, skipped, or failed
+/// (with its reason).
+List<_LeftOut> _leftOut(CartSession cart, AddResult result, String storeName) {
+  CartItem? item(String key) {
+    for (final CartItem i in cart.items) {
+      if (i.key == key) return i;
+    }
+    return null;
+  }
+
+  final out = <_LeftOut>[];
+  for (final FailedItem f in result.failed) {
+    out.add(_LeftOut(
+      key: f.key,
+      label: _nonEmpty(item(f.key)?.ingredient) ?? f.name,
+      why: _sentence('${f.name}: ${reasonText(f.reason)}'),
+      failed: true,
+    ));
+  }
+  for (final SkippedItem x in result.skipped) {
+    final it = item(x.key);
+    final why = it?.status == ItemStatus.unavailable
+        ? 'Not found at $storeName'
+        : x.reason == 'preference_required'
+            ? 'Needed an option chosen'
+            : x.reason == 'deselected'
+                ? 'Unchecked this time'
+                : 'Not chosen';
+    out.add(_LeftOut(key: x.key, label: _nonEmpty(it?.ingredient) ?? x.key, why: why, failed: false));
+  }
+  return out;
+}
+
+String? _nonEmpty(String? s) => s == null || s.isEmpty ? null : s;
+
+/// First letter up: "Corn tortillas, chipotle peppers".
+String _sentence(String x) => x.isEmpty ? x : x[0].toUpperCase() + x.substring(1);
+
+/// Two letters for an image-less product tile: "Fresh Yellow Onion" -> "FY".
+String _monogram(String name) {
+  final w = name.replaceAll(RegExp('[^A-Za-z0-9 ]+'), ' ').trim().split(RegExp(r'\s+')).where((String x) => x.isNotEmpty).toList();
+  return ((w.isNotEmpty ? w[0][0] : '') + (w.length > 1 ? w[1][0] : '')).toUpperCase();
+}
+
 /// The bar under a sheet's list.
 class Footer extends StatelessWidget {
-  const Footer({super.key, required this.theme, required this.children});
+  const Footer({super.key, required this.theme, required this.children, this.border = true, this.gap = 8});
 
   final MealioTheme theme;
   final List<Widget> children;
+
+  /// A rule above the bar. The done screen has none.
+  final bool border;
+  final double gap;
 
   @override
   Widget build(BuildContext context) {
@@ -592,12 +832,12 @@ class Footer extends StatelessWidget {
       padding: EdgeInsets.fromLTRB(16, 12, 16, bottom),
       decoration: BoxDecoration(
         color: theme.background,
-        border: Border(top: BorderSide(color: theme.border)),
+        border: border ? Border(top: BorderSide(color: theme.border)) : null,
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: gapped(children, 8),
+        children: gapped(children, gap),
       ),
     );
   }

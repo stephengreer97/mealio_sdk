@@ -131,16 +131,20 @@ class _MealioCartListState extends State<MealioCartList> {
                           style: t.style(size: 12, height: 17 / 12, color: t.warnText),
                         ),
                       ),
+                    // No partial totals: one unpriced item and there is no number to show.
                     Row(
                       crossAxisAlignment: CrossAxisAlignment.baseline,
                       textBaseline: TextBaseline.alphabetic,
                       children: <Widget>[
                         Expanded(
-                          child: Text(est.estimated ? 'Estimated total' : 'Total',
+                          child: Text(est.total != null && est.estimated ? 'Estimated total' : 'Total',
                               style: t.style(size: 14, color: t.muted)),
                         ),
-                        Text('${est.estimated ? 'about ' : ''}${mealioMoney(est.total)}',
-                            style: t.style(size: 18, weight: FontWeight.w700)),
+                        if (est.total != null)
+                          Text('${est.estimated ? 'about ' : ''}${mealioMoney(est.total!)}',
+                              style: t.style(size: 18, weight: FontWeight.w700))
+                        else
+                          Text('Prices at checkout', style: t.style(size: 15, weight: FontWeight.w600, color: t.muted)),
                       ],
                     ),
                     Cta(

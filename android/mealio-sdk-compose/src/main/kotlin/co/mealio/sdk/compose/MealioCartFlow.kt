@@ -6,6 +6,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInVertically
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -63,11 +64,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.heading
@@ -89,6 +95,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.DialogWindowProvider
 import co.mealio.sdk.AddResult
+import co.mealio.sdk.AddedItem
 import co.mealio.sdk.CartItem
 import co.mealio.sdk.CartSession
 import co.mealio.sdk.InlineLogin
@@ -316,7 +323,7 @@ private fun FlowSheet(
 }
 
 private fun headerTitle(phase: Phase, storeName: String): String = when (phase) {
-    Phase.DONE -> "All set"
+    Phase.DONE -> if (storeName == "your store") "In your cart" else "In your $storeName cart"
     Phase.LOADING -> if (storeName == "your store") "Getting your cart ready" else "Getting your $storeName cart ready"
     Phase.ERROR -> "Something went wrong"
     Phase.STORES -> "Choose your store"
@@ -537,9 +544,12 @@ fun MealioCartList(
                     modifier = Modifier.padding(bottom = 6.dp),
                 )
             }
+            // No partial totals: one unpriced item and there is no number to show.
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Bottom) {
-                Text(if (est.estimated) "Estimated total" else "Total", style = t.ts(14, color = t.muted))
-                Text((if (est.estimated) "about " else "") + money(est.total), style = t.ts(18, FontWeight.Bold))
+                val total = est.total
+                Text(if (total != null && est.estimated) "Estimated total" else "Total", style = t.ts(14, color = t.muted))
+                if (total != null) Text((if (est.estimated) "about " else "") + money(total), style = t.ts(18, FontWeight.Bold))
+                else Text("Prices at checkout", style = t.ts(15, FontWeight.SemiBold, t.muted))
             }
             val off = busy || est.count == 0
             Cta(t, enabled = !off, onClick = onAdd, modifier = Modifier.alpha(if (off) 0.5f else 1f)) {
@@ -929,59 +939,242 @@ private fun Thumb(t: MealioTheme, product: Product?, dim: Boolean = false, big: 
     }
 }
 
+/**
+ * The finished run. What the store took, row by row (image, product, the
+ * recipe line, amount, price), then what was left out. No total unless every
+ * added item has a price. No open-cart button: the user's next step is the
+ * store's own app or site, not ours.
+ */
 @Composable
 private fun ColumnScope.Done(t: MealioTheme, cart: CartSession, result: AddResult, storeName: String, onDone: () -> Unit) {
-    fun price(key: String) = cart.selected(key)?.let { priceText(it) } ?: ""
+    val n = result.added.size
+    val sum = remember(result) { cart.addedTotal(result) }
+    val left = remember(result) { leftOut(cart, result, storeName) }
+    var open by remember(result) { mutableStateOf(result.failed.isNotEmpty()) }
+    val total = sum.total
+    val subtitle = listOfNotNull(
+        if (total != null) (if (sum.estimated) "about " else "") + money(total) else "Prices at checkout",
+        if (result.verified == true) "checked in your cart" else null,
+    ).joinToString(" · ")
+    val title = if (n > 0) "$n item${if (n == 1) "" else "s"} added" else "Nothing was added"
+    val card = RoundedCornerShape(t.radius + 2.dp)
+
     Column(
-        Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        Modifier
+            .weight(1f)
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+            .padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        Column(
-            Modifier.fillMaxWidth().padding(vertical = 16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+        val bannerLabel = if (n > 0) "$title, $subtitle" else "$title. Your cart did not change."
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clip(card)
+                .background(if (n > 0) t.accent.copy(alpha = 0.10f) else t.warnBackground)
+                .clearAndSetSemantics {
+                    contentDescription = bannerLabel
+                    liveRegion = LiveRegionMode.Polite
+                }
+                .padding(vertical = 14.dp, horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Box(Modifier.size(64.dp).clip(CircleShape).background(t.surface), contentAlignment = Alignment.Center) {
-                Text("✓", style = t.ts(28, FontWeight.ExtraBold, t.accent))
+            Box(
+                Modifier.size(36.dp).clip(CircleShape).background(if (n > 0) t.accent else t.warnText),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (n > 0) CheckIcon(t.onAccent, Modifier.size(18.dp))
+                else Text("!", style = t.ts(18, FontWeight.ExtraBold, t.onAccent))
             }
-            val n = result.added.size
-            Text(
-                if (n > 0) "Added $n item${if (n == 1) "" else "s"} to $storeName" else "Nothing was added to $storeName",
-                style = t.ts(22, FontWeight.Bold, lineHeight = 28, align = TextAlign.Center),
-                modifier = Modifier.semantics { heading() },
-            )
-        }
-        if (result.failed.isNotEmpty()) {
-            val n = result.failed.size
-            WarnBox(t, "$n item${if (n == 1) "" else "s"} could not be added: " + result.failed.joinToString(", ") { "${it.name} (${reasonText(it.reason)})" } + ".")
-        }
-        val rule = hairline()
-        for (a in result.added) {
-            DoneRow(t, rule) {
-                Text(a.name + (a.weightLb?.let { ", ${lbText(it)}" } ?: ""), style = t.ts(14), maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                Text(price(a.key), style = t.ts(14, FontWeight.Bold))
+            Column(Modifier.weight(1f)) {
+                Text(title, style = t.ts(15, FontWeight.Bold, if (n > 0) t.text else t.warnText))
+                Text(
+                    if (n > 0) subtitle else "Your cart did not change.",
+                    style = t.ts(13, color = if (n > 0) t.text.copy(alpha = 0.85f) else t.warnText, lineHeight = 18),
+                )
             }
         }
-        for (x in result.skipped.filter { it.reason == "deselected" }) {
-            DoneRow(t, rule) {
-                Text(cart.items.firstOrNull { it.key == x.key }?.ingredient ?: "", style = t.ts(14, color = t.muted), modifier = Modifier.weight(1f))
-                Text("Left out", style = t.ts(14, color = t.muted))
+
+        if (n > 0) {
+            Column(Modifier.fillMaxWidth().clip(card).background(t.background).border(1.dp, t.border, card)) {
+                result.added.forEachIndexed { i, a -> key(a.key) { AddedRow(t, cart, a, first = i == 0) } }
+            }
+        }
+
+        if (left.isNotEmpty()) {
+            val names = left.joinToString(", ") { it.label }
+            Column(Modifier.fillMaxWidth().clip(card).background(t.background).border(1.dp, t.border, card)) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 56.dp)
+                        .clickable(role = Role.Button, onClick = { open = !open })
+                        .semantics {
+                            contentDescription = "Left out this time: $names"
+                            stateDescription = if (open) "Expanded" else "Collapsed"
+                        }
+                        .padding(vertical = 10.dp, horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Left out this time", style = t.ts(14, FontWeight.SemiBold))
+                        if (!open) {
+                            Text(sentence(names), style = t.ts(12, color = t.muted, lineHeight = 17), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                    ChevronIcon(t.muted, up = open, modifier = Modifier.size(18.dp))
+                }
+                if (open) {
+                    for (x in left) {
+                        key(x.key) {
+                            TopRule(t)
+                            Column(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clearAndSetSemantics { contentDescription = "${x.label}, ${x.why}" }
+                                    .padding(vertical = 10.dp, horizontal = 16.dp),
+                                verticalArrangement = Arrangement.spacedBy(2.dp),
+                            ) {
+                                Text(sentence(x.label), style = t.ts(14, FontWeight.Medium), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                Text(x.why, style = t.ts(12, color = if (x.failed) t.warnText else t.muted, lineHeight = 17))
+                            }
+                        }
+                    }
+                }
             }
         }
     }
-    TopRule(t)
-    Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 28.dp)) {
+    Column(
+        Modifier.fillMaxWidth().background(t.background).padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 28.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
         Cta(t, onClick = onDone) { Text("Done", style = t.ts(16, FontWeight.Bold, t.onAccent)) }
+        Text(
+            "Cart by Mealio",
+            style = t.ts(12, color = t.muted, lineHeight = 17, align = TextAlign.Center),
+            modifier = Modifier.fillMaxWidth(),
+        )
     }
 }
 
 @Composable
-private fun DoneRow(t: MealioTheme, rule: Dp, content: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit) {
-    Column {
-        Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), content = content)
-        TopRule(t, rule)
+private fun AddedRow(t: MealioTheme, cart: CartSession, item: AddedItem, first: Boolean) {
+    val product = cart.selected(item.key)
+    val image = item.imageUrl?.takeIf { it.isNotEmpty() } ?: product?.imageUrl
+    val line = item.ingredient?.takeIf { it.isNotEmpty() } ?: cart.items.firstOrNull { it.key == item.key }?.ingredient ?: ""
+    val w = item.weightLb
+    val amount = if (w != null) lbText(w) else "×${item.quantity}"
+    val p = cart.addedPrice(item)
+    val price = p?.let { (if (it.estimated) "about " else "") + money(it.amount) } ?: ""
+    val spoken = listOfNotNull(
+        item.name,
+        if (line.isNotEmpty()) "for $line" else null,
+        if (w != null) "${lbNumber(w)} pounds" else "quantity ${item.quantity}",
+        price.takeIf { it.isNotEmpty() },
+    ).joinToString(", ")
+    Column(Modifier.fillMaxWidth()) {
+        if (!first) TopRule(t)
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(min = 68.dp)
+                .clearAndSetSemantics { contentDescription = spoken }
+                .padding(vertical = 12.dp, horizontal = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            val img = rememberProductImage(image)
+            Box(
+                Modifier.size(44.dp).clip(RoundedCornerShape(10.dp)).background(if (img != null) Color.White else t.surface),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (img != null) Image(img, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
+                else Text(monogram(item.name), style = t.ts(13, FontWeight.Bold, t.muted))
+            }
+            Column(Modifier.weight(1f)) {
+                Text(item.name, style = t.ts(14, FontWeight.SemiBold, lineHeight = 19), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (line.isNotEmpty()) {
+                    Text(line, style = t.ts(12, color = t.muted, lineHeight = 17), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    amount,
+                    style = t.ts(12, FontWeight.Bold),
+                    modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(t.surface).padding(vertical = 3.dp, horizontal = 8.dp),
+                )
+                if (price.isNotEmpty()) Text(price, style = t.ts(12, color = t.muted, lineHeight = 17))
+            }
+        }
     }
 }
+
+/** A drawn check mark, so the module needs no icon library. */
+@Composable
+private fun CheckIcon(color: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val s = size.minDimension
+        val path = Path().apply {
+            moveTo(s * 0.18f, s * 0.53f)
+            lineTo(s * 0.41f, s * 0.75f)
+            lineTo(s * 0.84f, s * 0.28f)
+        }
+        drawPath(path, color, style = Stroke(width = s * 0.15f, cap = StrokeCap.Round, join = StrokeJoin.Round))
+    }
+}
+
+/** A drawn chevron: down when collapsed, up when open. */
+@Composable
+private fun ChevronIcon(color: Color, up: Boolean, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val s = size.minDimension
+        val (y1, y2) = if (up) s * 0.62f to s * 0.36f else s * 0.38f to s * 0.64f
+        val path = Path().apply {
+            moveTo(s * 0.22f, y1)
+            lineTo(s * 0.5f, y2)
+            lineTo(s * 0.78f, y1)
+        }
+        drawPath(path, color, style = Stroke(width = s * 0.11f, cap = StrokeCap.Round, join = StrokeJoin.Round))
+    }
+}
+
+private class LeftOut(val key: String, val label: String, val why: String, val failed: Boolean)
+
+/** Everything the store did not take this run: unchecked, skipped, or failed (with its reason). */
+private fun leftOut(cart: CartSession, result: AddResult, storeName: String): List<LeftOut> {
+    fun item(key: String) = cart.items.firstOrNull { it.key == key }
+    val out = ArrayList<LeftOut>()
+    for (f in result.failed) {
+        out += LeftOut(f.key, item(f.key)?.ingredient?.takeIf { it.isNotEmpty() } ?: f.name, sentence("${f.name}: ${reasonText(f.reason)}"), true)
+    }
+    for (x in result.skipped) {
+        val it = item(x.key)
+        val why = when {
+            it?.status == ItemStatus.UNAVAILABLE -> "Not found at $storeName"
+            x.reason == "preference_required" -> "Needed an option chosen"
+            x.reason == "deselected" -> "Unchecked this time"
+            else -> "Not chosen"
+        }
+        out += LeftOut(x.key, it?.ingredient?.takeIf { s -> s.isNotEmpty() } ?: x.key, why, false)
+    }
+    return out
+}
+
+/** First letter up: "Corn tortillas, chipotle peppers". */
+private fun sentence(x: String): String = if (x.isEmpty()) x else x[0].uppercaseChar() + x.substring(1)
+
+/** Two letters for an image-less product tile: "Fresh Yellow Onion" -> "FY". */
+internal fun monogram(name: String): String {
+    val w = name.replace(Regex("[^A-Za-z0-9 ]+"), " ").trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+    return ((w.getOrNull(0)?.take(1) ?: "") + (w.getOrNull(1)?.take(1) ?: "")).uppercase()
+}
+
+/** "0.75", "1": pounds without the unit. */
+private fun lbNumber(lb: Double): String =
+    java.math.BigDecimal(String.format(java.util.Locale.US, "%.2f", lb)).stripTrailingZeros().toPlainString()
 
 /** "0.75 lb", "1 lb". */
 internal fun lbText(lb: Double): String =

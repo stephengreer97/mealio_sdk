@@ -809,7 +809,7 @@ void main() {
       (onion['options']! as List<Object?>)[0] = <String, Object?>{'id': 'o1', 'name': 'Onion'};
       e = session(cart: cart).estimate();
       expect(e.count, 1);
-      expect(e.total, 0);
+      expect(e.total, isNull);
       expect(e.unpriced, 1);
       expect(e.estimated, isTrue);
     });
@@ -969,6 +969,175 @@ void main() {
         e = cs.estimate();
         expect(e.total, 34);
         expect(e.estimated, isTrue);
+      });
+    });
+
+    group('no partial totals', () {
+      Map<String, Object?> priced([List<Map<String, Object?>> over = const <Map<String, Object?>>[]]) =>
+          <String, Object?>{
+            'cartId': 'c1',
+            'store': 'heb',
+            'items': <Object?>[
+              <String, Object?>{
+                'key': 'onion',
+                'ingredient': 'onion',
+                'quantity': 2,
+                'status': 'remembered',
+                'selectedId': 'o1',
+                'remembered': null,
+                'options': <Object?>[
+                  <String, Object?>{'id': 'o1', 'name': 'Onion', 'unitPrice': 1, ...(over.isNotEmpty ? over[0] : const <String, Object?>{})},
+                ],
+              },
+              <String, Object?>{
+                'key': 'turkey',
+                'ingredient': 'deli turkey',
+                'quantity': 1,
+                'weightLb': 0.5,
+                'status': 'remembered',
+                'selectedId': 't1',
+                'remembered': null,
+                'options': <Object?>[
+                  <String, Object?>{
+                    'id': 't1',
+                    'name': 'Deli Turkey',
+                    'soldByWeight': true,
+                    'estimated': true,
+                    'pricePerLb': 12,
+                    'unitPrice': 12,
+                    ...(over.length > 1 ? over[1] : const <String, Object?>{}),
+                  },
+                ],
+              },
+              <String, Object?>{
+                'key': 'chipotle',
+                'ingredient': 'chipotle in adobo',
+                'quantity': 1,
+                'status': 'choose',
+                'selectedId': null,
+                'remembered': null,
+                'options': <Object?>[
+                  <String, Object?>{'id': 'c1', 'name': 'Chipotle Peppers', 'unitPrice': null},
+                ],
+              },
+            ],
+          };
+
+      AddResult result(List<AddedItem> added) => AddResult(
+            cartId: 'c1',
+            store: 'heb',
+            added: added,
+            skipped: const <SkippedItem>[],
+            failed: const <FailedItem>[],
+            storeCartUrl: null,
+            verified: true,
+          );
+
+      test('totals when every selected item has a price; a weight item priced per lb counts as priced', () {
+        expect(session(cart: priced()).estimate(),
+            const CartEstimate(total: 8, count: 2, estimated: true, unpriced: 0));
+      });
+
+      test('total is null when even one selected item has no price', () {
+        final cs = session(cart: priced());
+        cs.select('chipotle', 'c1');
+        expect(cs.estimate(), const CartEstimate(total: null, count: 3, estimated: true, unpriced: 1));
+        // A weight item with neither a per-lb nor a package price is unpriced too.
+        final w = session(cart: priced(<Map<String, Object?>>[
+          <String, Object?>{},
+          <String, Object?>{'pricePerLb': null, 'unitPrice': null},
+        ]));
+        expect(w.estimate().total, isNull);
+        expect(w.estimate().unpriced, 1);
+        // Deselecting the unpriced item brings the number back.
+        cs.deselect('chipotle');
+        expect(cs.estimate().total, 8);
+      });
+
+      test('prices added items from their own fields: unit times quantity, per lb times pounds, a package once', () {
+        expect(addedPrice(const AddedItem(key: 'a', productId: '1', name: 'Onion', quantity: 2, unitPrice: 0.37)),
+            const AddedPrice(amount: 0.74, estimated: false));
+        expect(
+            addedPrice(const AddedItem(
+                key: 'b',
+                productId: '2',
+                name: 'Salmon',
+                quantity: 1,
+                weightLb: 1.25,
+                pricePerLb: 10.9,
+                unitPrice: 10.9,
+                estimated: true)),
+            const AddedPrice(amount: 13.63, estimated: true));
+        expect(
+            addedPrice(const AddedItem(
+                key: 'c', productId: '3', name: 'Brisket', quantity: 1, weightLb: 4, unitPrice: 32, estimated: true)),
+            const AddedPrice(amount: 32, estimated: true));
+        expect(addedPrice(const AddedItem(key: 'd', productId: '4', name: 'Chipotle', quantity: 1)), isNull);
+      });
+
+      test('addedTotal reads the added entries, falls back to the session product, and is null when any is unpriced',
+          () {
+        final cs = session(cart: priced());
+        final full = result(const <AddedItem>[
+          AddedItem(
+              key: 'onion',
+              productId: 'o1',
+              name: 'Onion',
+              quantity: 2,
+              imageUrl: 'https://img/o.jpg',
+              ingredient: '2 onions',
+              unitPrice: 1.25),
+          AddedItem(key: 'turkey', productId: 't1', name: 'Deli Turkey', quantity: 1, weightLb: 0.5, pricePerLb: 12, estimated: true),
+        ]);
+        expect(cs.addedTotal(full), const CartEstimate(total: 8.5, count: 2, estimated: true, unpriced: 0));
+        // An older server: no prices on the entries, the selected products stand in.
+        final old = result(const <AddedItem>[
+          AddedItem(key: 'onion', productId: 'o1', name: 'Onion', quantity: 2),
+          AddedItem(key: 'turkey', productId: 't1', name: 'Deli Turkey', quantity: 1, weightLb: 0.5),
+        ]);
+        expect(cs.addedTotal(old), const CartEstimate(total: 8, count: 2, estimated: true, unpriced: 0));
+        cs.select('chipotle', 'c1');
+        expect(
+          cs.addedTotal(result(<AddedItem>[
+            ...full.added,
+            const AddedItem(key: 'chipotle', productId: 'c1', name: 'Chipotle Peppers', quantity: 1),
+          ])),
+          const CartEstimate(total: null, count: 3, estimated: true, unpriced: 1),
+        );
+        expect(cs.addedPrice(full.added[0]), const AddedPrice(amount: 2.5, estimated: false));
+      });
+
+      test('AddedItem reads and writes the finished-run fields, and older entries without them', () {
+        final a = AddedItem.fromJson(<String, Object?>{
+          'key': 'onion',
+          'productId': 'o1',
+          'name': 'Onion',
+          'quantity': 2,
+          'imageUrl': 'https://img/o.jpg',
+          'ingredient': '2 onions',
+          'unitPrice': 1.25,
+          'pricePerLb': null,
+          'estimated': false,
+        });
+        expect(a.imageUrl, 'https://img/o.jpg');
+        expect(a.ingredient, '2 onions');
+        expect(a.unitPrice, 1.25);
+        expect(a.pricePerLb, isNull);
+        expect(a.estimated, isFalse);
+        expect(a.toJson(), <String, Object?>{
+          'key': 'onion',
+          'productId': 'o1',
+          'name': 'Onion',
+          'quantity': 2,
+          'imageUrl': 'https://img/o.jpg',
+          'ingredient': '2 onions',
+          'unitPrice': 1.25,
+          'estimated': false,
+        });
+        final old = AddedItem.fromJson(<String, Object?>{'key': 'k', 'productId': 'p', 'name': 'N', 'quantity': 1});
+        expect(old.imageUrl, isNull);
+        expect(old.estimated, isNull);
+        expect(old.toJson(), <String, Object?>{'key': 'k', 'productId': 'p', 'name': 'N', 'quantity': 1});
       });
     });
 

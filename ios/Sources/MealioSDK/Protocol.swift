@@ -703,6 +703,10 @@ public struct SearchResult: Codable, Equatable {
 }
 
 public struct AddResult: Codable, Equatable {
+    /// One line the store took. Everything after `weightLb` is for the
+    /// finished-run screen and comes from the product the user chose (the
+    /// server does not search again). Each is optional: present only when
+    /// known, and absent from servers older than the finished-run screen.
     public struct Added: Codable, Equatable {
         public let key: String
         public let productId: String
@@ -710,6 +714,49 @@ public struct AddResult: Codable, Equatable {
         public let quantity: Int
         /// Set on an item added by weight: the pounds asked for.
         public let weightLb: Double?
+        /// The product's image, from the search that offered it.
+        public let imageUrl: String?
+        /// The recipe line it was added for, as the partner wrote it.
+        public let ingredient: String?
+        /// One unit's price. On a weight item priced as a package, the package price.
+        public let unitPrice: Double?
+        /// Price per lb for a weight item priced by the pound.
+        public let pricePerLb: Double?
+        /// The price is the store's estimate (weighed or "Avg." items).
+        public let estimated: Bool?
+
+        public init(key: String, productId: String, name: String, quantity: Int, weightLb: Double? = nil,
+                    imageUrl: String? = nil, ingredient: String? = nil, unitPrice: Double? = nil,
+                    pricePerLb: Double? = nil, estimated: Bool? = nil) {
+            self.key = key
+            self.productId = productId
+            self.name = name
+            self.quantity = quantity
+            self.weightLb = weightLb
+            self.imageUrl = imageUrl
+            self.ingredient = ingredient
+            self.unitPrice = unitPrice
+            self.pricePerLb = pricePerLb
+            self.estimated = estimated
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case key, productId, name, quantity, weightLb, imageUrl, ingredient, unitPrice, pricePerLb, estimated
+        }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            key = try c.decode(String.self, forKey: .key)
+            productId = try c.decode(String.self, forKey: .productId)
+            name = try c.decode(String.self, forKey: .name)
+            quantity = try c.decode(Int.self, forKey: .quantity)
+            weightLb = try c.decodeIfPresent(Double.self, forKey: .weightLb)
+            imageUrl = try c.decodeIfPresent(String.self, forKey: .imageUrl)
+            ingredient = try c.decodeIfPresent(String.self, forKey: .ingredient)
+            unitPrice = try c.decodeIfPresent(Double.self, forKey: .unitPrice)
+            pricePerLb = try c.decodeIfPresent(Double.self, forKey: .pricePerLb)
+            estimated = try c.decodeIfPresent(Bool.self, forKey: .estimated)
+        }
     }
     public struct Skipped: Codable, Equatable { public let key: String; public let reason: String }
     public struct Failed: Codable, Equatable { public let key: String; public let productId: String; public let name: String; public let reason: String }
@@ -725,6 +772,9 @@ public struct AddResult: Codable, Equatable {
     /// "not_confirmed".
     public let verified: Bool?
 }
+
+/// One line the store took. Same as `AddedItem` in core.
+public typealias AddedItem = AddResult.Added
 
 /// One store the SDK supports, from `GET /api/v1/stores`.
 public struct StoreInfo: Codable, Equatable, Identifiable {

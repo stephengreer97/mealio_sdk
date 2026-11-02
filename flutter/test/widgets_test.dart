@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:mealio_sdk/mealio_sdk.dart';
+import 'package:mealio_sdk/src/widgets/flow_parts.dart' show DoneView;
 
 import 'support.dart';
 
@@ -300,6 +301,33 @@ void main() {
       expect(adds, 1);
     });
 
+    testWidgets('the footer says "Prices at checkout" when a selected item has no price', (WidgetTester tester) async {
+      _phone(tester);
+      final cart = _cart();
+      final garlic = (cart['items']! as List<Object?>)[1]! as Map<String, Object?>;
+      garlic['options'] = <Object?>[
+        <String, Object?>{'id': 'g1', 'name': 'Garlic Bulb'},
+      ];
+      final s = _session(cart: cart);
+      await tester.pumpWidget(MaterialApp(home: Scaffold(body: MealioCartList(session: s, onAdd: () {}))));
+      expect(find.text('Total'), findsOneWidget);
+      expect(find.text(r'$1.25'), findsWidgets);
+      expect(find.text('Prices at checkout'), findsNothing);
+
+      s.select('garlic', 'g1');
+      await tester.pump();
+      // No partial total: no number at all, not "about $1.25".
+      expect(find.text('Prices at checkout'), findsOneWidget);
+      expect(find.text('Total'), findsOneWidget);
+      expect(find.text('Estimated total'), findsNothing);
+      expect(find.text(r'about $1.25'), findsNothing);
+      expect(find.text('Add 2 items to H-E-B'), findsOneWidget);
+
+      s.deselect('garlic');
+      await tester.pump();
+      expect(find.text('Prices at checkout'), findsNothing);
+    });
+
     testWidgets('a sold-by-weight pick makes the total an estimate', (WidgetTester tester) async {
       _phone(tester);
       final s = _session();
@@ -310,6 +338,141 @@ void main() {
       expect(find.text('Estimated total'), findsOneWidget);
       expect(find.text(r'about $7.24'), findsOneWidget);
       expect(find.textContaining('Your usual, Lean Beef'), findsNothing);
+    });
+  });
+
+  group('done screen', () {
+    Future<void> pumpDone(WidgetTester tester, AddResult result, {CartSession? session}) async {
+      _phone(tester);
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: DoneView(
+            theme: MealioTheme.standard,
+            session: session ?? _session(),
+            result: result,
+            storeName: 'H-E-B',
+            onDone: () {},
+          ),
+        ),
+      ));
+    }
+
+    AddResult result({
+      List<AddedItem> added = const <AddedItem>[],
+      List<SkippedItem> skipped = const <SkippedItem>[],
+      List<FailedItem> failed = const <FailedItem>[],
+      bool? verified,
+    }) =>
+        AddResult(
+          cartId: 'c1',
+          store: 'heb',
+          added: added,
+          skipped: skipped,
+          failed: failed,
+          storeCartUrl: 'https://www.heb.com/cart',
+          verified: verified,
+        );
+
+    testWidgets('rows with image or initials, the recipe line, amount and price; left out starts collapsed',
+        (WidgetTester tester) async {
+      await pumpDone(
+        tester,
+        result(
+          added: const <AddedItem>[
+            AddedItem(
+              key: 'onion',
+              productId: 'o1',
+              name: 'Yellow Onion',
+              quantity: 2,
+              imageUrl: 'https://img.example/onion.jpg',
+              ingredient: '2 yellow onions',
+              unitPrice: 1.25,
+            ),
+            AddedItem(key: 'garlic', productId: 'g1', name: 'Fresh Garlic Bulb', quantity: 1, unitPrice: 0.5),
+          ],
+          skipped: const <SkippedItem>[
+            SkippedItem(key: 'beef', reason: 'deselected'),
+            SkippedItem(key: 'saffron', reason: 'unavailable'),
+          ],
+          verified: true,
+        ),
+      );
+      expect(find.text('2 items added'), findsOneWidget);
+      expect(find.text(r'$3.00 · checked in your cart'), findsOneWidget);
+      expect(find.bySemanticsLabel(r'2 items added, $3.00 · checked in your cart'), findsOneWidget);
+      expect(find.byIcon(Icons.check), findsOneWidget);
+      // An image for the onion, initials for the garlic.
+      expect(find.byType(Image), findsOneWidget);
+      expect(find.text('FG'), findsOneWidget);
+      // The partner's recipe line, else the item's ingredient.
+      expect(find.text('2 yellow onions'), findsOneWidget);
+      expect(find.text('garlic'), findsOneWidget);
+      expect(find.text('×2'), findsOneWidget);
+      expect(find.text('×1'), findsOneWidget);
+      expect(find.text(r'$2.50'), findsOneWidget);
+      expect(find.text(r'$0.50'), findsOneWidget);
+      expect(find.bySemanticsLabel(r'Yellow Onion, for 2 yellow onions, quantity 2, $2.50'), findsOneWidget);
+
+      // Nothing failed: collapsed, with a one-line summary.
+      expect(find.text('Left out this time'), findsOneWidget);
+      expect(find.text('Beef, saffron'), findsOneWidget);
+      expect(find.byIcon(Icons.expand_more), findsOneWidget);
+      expect(find.text('Unchecked this time'), findsNothing);
+
+      await tester.tap(find.text('Left out this time'));
+      await tester.pump();
+      expect(find.text('Beef, saffron'), findsNothing);
+      expect(find.byIcon(Icons.expand_less), findsOneWidget);
+      expect(find.text('Unchecked this time'), findsOneWidget);
+      expect(find.text('Not found at H-E-B'), findsOneWidget);
+
+      expect(find.text('Done'), findsOneWidget);
+      expect(find.text('Cart by Mealio'), findsOneWidget);
+      expect(find.textContaining('Open store cart'), findsNothing);
+    });
+
+    testWidgets('says "Prices at checkout" when any added item has no price, and still prices the rest',
+        (WidgetTester tester) async {
+      await pumpDone(
+        tester,
+        result(added: const <AddedItem>[
+          AddedItem(key: 'onion', productId: 'o1', name: 'Yellow Onion', quantity: 1, unitPrice: 1.25),
+          AddedItem(key: 'saffron', productId: 's1', name: 'Saffron', quantity: 1),
+        ]),
+      );
+      expect(find.text('2 items added'), findsOneWidget);
+      expect(find.text('Prices at checkout'), findsOneWidget);
+      expect(find.text(r'$1.25'), findsOneWidget);
+      expect(find.textContaining('checked in your cart'), findsNothing);
+      expect(find.text('Left out this time'), findsNothing);
+    });
+
+    testWidgets('a weight item shows pounds and an estimated price', (WidgetTester tester) async {
+      await pumpDone(
+        tester,
+        result(added: const <AddedItem>[
+          AddedItem(key: 'beef', productId: 'b1', name: 'Ground Beef', quantity: 1, weightLb: 1.5, pricePerLb: 5.99, estimated: true),
+        ]),
+      );
+      expect(find.text('1 item added'), findsOneWidget);
+      expect(find.text('1.5 lb'), findsOneWidget);
+      expect(find.text(r'about $8.99'), findsNWidgets(2));
+    });
+
+    testWidgets('nothing added: the warning banner, and left out opens when an item failed', (WidgetTester tester) async {
+      await pumpDone(
+        tester,
+        result(failed: const <FailedItem>[
+          FailedItem(key: 'onion', productId: 'o1', name: 'Yellow Onion', reason: 'out_of_stock'),
+        ]),
+      );
+      expect(find.text('Nothing was added'), findsOneWidget);
+      expect(find.text('Your cart did not change.'), findsOneWidget);
+      expect(find.byIcon(Icons.priority_high), findsOneWidget);
+      expect(find.byIcon(Icons.expand_less), findsOneWidget);
+      expect(find.text('Onion'), findsOneWidget);
+      expect(find.text('Yellow Onion: out of stock'), findsOneWidget);
+      expect(find.text('Cart by Mealio'), findsOneWidget);
     });
   });
 
@@ -397,18 +560,28 @@ void main() {
 
       await tester.tap(find.text('Add 1 item to Kroger'));
       await tester.pumpAndSettle();
-      expect(find.text('All set'), findsOneWidget);
-      expect(find.text('Added 1 item to Kroger'), findsOneWidget);
-      expect(find.text('Yellow Onion, 1.25 lb'), findsOneWidget);
-      expect(find.textContaining('Ground Beef (not confirmed in your cart)'), findsOneWidget);
-      expect(find.text('Left out'), findsOneWidget);
+      expect(find.text('Weeknight Tacos'), findsOneWidget);
+      expect(find.text('In your Kroger cart'), findsOneWidget);
+      expect(find.text('1 item added'), findsOneWidget);
+      // Not verified: no "checked in your cart".
+      expect(find.text(r'about $1.25'), findsNWidgets(2));
+      expect(find.text('Yellow Onion'), findsOneWidget);
+      expect(find.text('onion'), findsOneWidget);
+      expect(find.text('1.25 lb'), findsOneWidget);
+      // Something failed, so "Left out this time" is open, the failure keeps its reason.
+      expect(find.text('Left out this time'), findsOneWidget);
+      expect(find.text('Beef'), findsOneWidget);
+      expect(find.text('Ground Beef: not confirmed in your cart'), findsOneWidget);
+      expect(find.text('Garlic'), findsOneWidget);
+      expect(find.text('Unchecked this time'), findsOneWidget);
+      expect(find.text('Cart by Mealio'), findsOneWidget);
       expect(find.textContaining('Check out on'), findsNothing);
       expect(find.textContaining('Open store cart'), findsNothing);
       expect(added!.verified, isFalse);
 
       await tester.tap(find.text('Done'));
       await tester.pumpAndSettle();
-      expect(find.text('All set'), findsNothing);
+      expect(find.text('In your Kroger cart'), findsNothing);
       expect(closed!.added.single.key, 'onion');
     });
 

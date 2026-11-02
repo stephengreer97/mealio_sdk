@@ -18,20 +18,49 @@ private fun nearestIndex(opts: List<Double>, v: Double): Int {
     return best
 }
 
-/** The selected items' total, for "Estimated total about $12.40". */
+/** A total, for "Estimated total about $12.40". */
 data class Estimate(
     /**
-     * Unit price times quantity over the selected items that have a unit price,
-     * and price per lb times the weight for a sold-by-weight item, to the cent.
+     * Unit price times quantity over the counted items, and price per lb times
+     * the weight for a sold-by-weight item, to the cent. Null when any counted
+     * item has no price (`unpriced` > 0): no partial totals, show no number
+     * then ("Prices at checkout").
      */
-    val total: Double,
-    /** Selected items. */
+    val total: Double?,
+    /** Counted items. */
     val count: Int,
-    /** True when any selected item is sold by weight or has no price: show it as "about". */
+    /** True when any counted item is sold by weight or has no price: show it as "about". */
     val estimated: Boolean,
-    /** Selected items with no unit price (left out of `total`). */
+    /** Counted items with no price. Above 0 means `total` is null. */
     val unpriced: Int,
 )
+
+/** One added line's price. */
+data class LinePrice(val amount: Double, val estimated: Boolean)
+
+/** Math.round(n * 100) / 100 in the reference (half rounds up). */
+private fun cents(n: Double): Double = Math.floor(n * 100 + 0.5).roundToLong() / 100.0
+
+/**
+ * What one added line cost, or null when its price is unknown. By weight:
+ * price per lb times the pounds, else the package price once. Otherwise unit
+ * price times quantity. `fallback` is the chosen Product, for servers whose
+ * added entries carry no prices. Port of addedPrice in packages/core/src/client.ts.
+ */
+@JvmOverloads
+fun addedPrice(a: AddedItem, fallback: Product? = null): LinePrice? {
+    val perLb = a.pricePerLb ?: fallback?.pricePerLb
+    val unit = a.unitPrice ?: fallback?.unitPrice
+    val est = a.estimated ?: (fallback?.estimated ?: false)
+    val w = a.weightLb
+    if (w != null) {
+        if (perLb != null) return LinePrice(cents(perLb * w), true)
+        if (unit != null) return LinePrice(cents(unit), true)
+        return null
+    }
+    if (unit == null) return null
+    return LinePrice(cents(unit * maxOf(1, a.quantity)), est)
+}
 
 /**
  * A prepared cart. Port of CartSession in packages/core/src/client.ts.
@@ -259,6 +288,10 @@ class CartSession internal constructor(
      * sold-by-weight item price per lb times the weight (one package price when
      * the store prices it as a package). Items waiting on a preference are left
      * out. `estimated` is true when any item is sold by weight or has no price.
+     *
+     * `total` is null when even one selected item has no price (`unpriced` > 0):
+     * a total that leaves an item out is wrong, so show no number at all
+     * ("Prices at checkout"). A weight item priced per lb counts as priced.
      */
     @Synchronized
     fun estimate(): Estimate {
@@ -282,10 +315,32 @@ class CartSession internal constructor(
             if (u != null) total += u * minOf(quantity(it.key), maxQuantity(it.key)) else unpriced += 1
             if (p.estimated) estimated = true
         }
-        // Math.round(total * 100) / 100 in the reference (half rounds up).
-        val cents = Math.floor(total * 100 + 0.5).roundToLong()
-        return Estimate(cents / 100.0, count, estimated || unpriced > 0, unpriced)
+        return Estimate(if (unpriced > 0) null else cents(total), count, estimated || unpriced > 0, unpriced)
     }
+
+    /**
+     * The total of what the store took, for the finished-run screen. Same rule
+     * as estimate(): `total` is null when any added item has no price. Prices
+     * come from the added entries, else (an older server) from the product
+     * selected in this session.
+     */
+    @Synchronized
+    fun addedTotal(result: AddResult): Estimate {
+        var total = 0.0
+        var unpriced = 0
+        var estimated = false
+        for (a in result.added) {
+            val p = addedPrice(a, selected(a.key))
+            if (p == null) { unpriced += 1; continue }
+            total += p.amount
+            if (p.estimated) estimated = true
+        }
+        return Estimate(if (unpriced > 0) null else cents(total), result.added.size, estimated || unpriced > 0, unpriced)
+    }
+
+    /** One added line's price (see [addedPrice]), with this session's product as the fallback. */
+    @Synchronized
+    fun addedPrice(a: AddedItem): LinePrice? = co.mealio.sdk.addedPrice(a, selected(a.key))
 
     /** Fill the store cart with the current selections. */
     @JvmOverloads

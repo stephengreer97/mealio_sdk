@@ -11,7 +11,8 @@ import 'client.dart';
 import 'errors.dart';
 import 'protocol.dart';
 
-/// The estimated total of the selected items.
+/// A total: of the selected items ([CartSession.estimate]) or of what the
+/// store took ([CartSession.addedTotal]).
 @immutable
 class CartEstimate {
   const CartEstimate({required this.total, required this.count, required this.estimated, required this.unpriced});
@@ -19,20 +20,77 @@ class CartEstimate {
   /// Unit price times quantity, summed, rounded to cents. A sold-by-weight
   /// item counts price per lb times its weight (its package price once when
   /// the store prices it as a package).
-  final double total;
+  ///
+  /// Null when any counted item has no price ([unpriced] > 0): no partial
+  /// totals, so show no number then ("Prices at checkout").
+  final double? total;
 
-  /// Selected items.
+  /// Counted items.
   final int count;
 
-  /// True when any selected item is sold by weight or has no price: show the
+  /// True when any counted item is sold by weight or has no price: show the
   /// total as "about".
   final bool estimated;
 
-  /// Selected items without a unit price.
+  /// Counted items without a price.
   final int unpriced;
 
   @override
+  bool operator ==(Object other) =>
+      other is CartEstimate &&
+      other.total == total &&
+      other.count == count &&
+      other.estimated == estimated &&
+      other.unpriced == unpriced;
+
+  @override
+  int get hashCode => Object.hash(total, count, estimated, unpriced);
+
+  @override
   String toString() => 'CartEstimate(total: $total, count: $count, estimated: $estimated, unpriced: $unpriced)';
+}
+
+/// One added line's price ([addedPrice]).
+@immutable
+class AddedPrice {
+  const AddedPrice({required this.amount, required this.estimated});
+
+  /// Rounded to cents.
+  final double amount;
+
+  /// The store's estimate (weighed or "Avg." items): show it as "about".
+  final bool estimated;
+
+  @override
+  bool operator ==(Object other) => other is AddedPrice && other.amount == amount && other.estimated == estimated;
+
+  @override
+  int get hashCode => Object.hash(amount, estimated);
+
+  @override
+  String toString() => 'AddedPrice(amount: $amount, estimated: $estimated)';
+}
+
+double _cents(double n) => (n * 100).round() / 100;
+
+/// What one added line cost, or null when its price is unknown. By weight:
+/// price per lb times the pounds, else the package price once. Otherwise
+/// unit price times quantity. `fallback` is the chosen [Product], for
+/// servers whose added entries carry no prices.
+AddedPrice? addedPrice(AddedItem a, [Product? fallback]) => _addedPrice(a, fallback);
+
+AddedPrice? _addedPrice(AddedItem a, Product? fallback) {
+  final perLb = a.pricePerLb ?? fallback?.pricePerLb;
+  final unit = a.unitPrice ?? fallback?.unitPrice;
+  final est = a.estimated ?? fallback?.estimated ?? false;
+  final lb = a.weightLb;
+  if (lb != null) {
+    if (perLb != null) return AddedPrice(amount: _cents(perLb * lb), estimated: true);
+    if (unit != null) return AddedPrice(amount: _cents(unit), estimated: true);
+    return null;
+  }
+  if (unit == null) return null;
+  return AddedPrice(amount: _cents(unit * (a.quantity < 1 ? 1 : a.quantity)), estimated: est);
 }
 
 /// The weight step (lb) for a sold-by-weight item whose store lists no
@@ -307,6 +365,10 @@ class CartSession extends ChangeNotifier {
   /// price when the store prices it as a package). An item waiting on a
   /// preference is left out. `estimated` is true when any item is sold by
   /// weight or has no price, so show it as "about".
+  ///
+  /// `total` is null when even one selected item has no price (`unpriced` >
+  /// 0): a total that leaves an item out is wrong, so show no number at all
+  /// ("Prices at checkout"). A weight item priced per lb counts as priced.
   CartEstimate estimate() {
     var total = 0.0;
     var count = 0;
@@ -337,12 +399,41 @@ class CartSession extends ChangeNotifier {
       if (p.estimated) estimated = true;
     }
     return CartEstimate(
-      total: (total * 100).round() / 100,
+      total: unpriced > 0 ? null : _cents(total),
       count: count,
       estimated: estimated || unpriced > 0,
       unpriced: unpriced,
     );
   }
+
+  /// The total of what the store took, for the finished-run screen. Same
+  /// rule as [estimate]: `total` is null when any added item has no price.
+  /// Prices come from the added entries, else (an older server) from the
+  /// product selected in this session.
+  CartEstimate addedTotal(AddResult result) {
+    var total = 0.0;
+    var unpriced = 0;
+    var estimated = false;
+    for (final AddedItem a in result.added) {
+      final p = _addedPrice(a, selected(a.key));
+      if (p == null) {
+        unpriced += 1;
+        continue;
+      }
+      total += p.amount;
+      if (p.estimated) estimated = true;
+    }
+    return CartEstimate(
+      total: unpriced > 0 ? null : _cents(total),
+      count: result.added.length,
+      estimated: estimated || unpriced > 0,
+      unpriced: unpriced,
+    );
+  }
+
+  /// One added line's price (see [addedPrice]), with this session's product
+  /// as the fallback.
+  AddedPrice? addedPrice(AddedItem a) => _addedPrice(a, selected(a.key));
 
   /// Fill the store cart with the current selections.
   Future<AddResult> addToCart({StepListener? onStep}) => _client.addToCart(cart.cartId, selections(), onStep: onStep);

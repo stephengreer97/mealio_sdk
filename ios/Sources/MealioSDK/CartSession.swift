@@ -22,25 +22,64 @@ private func nearestIndex(_ opts: [Double], _ v: Double) -> Int {
     return best
 }
 
-/// The estimated total of the selected items. Mirrors `estimate()` in client.ts.
+/// A total: of the selected items (`estimate()`) or of what the store took
+/// (`addedTotal(_:)`). Mirrors `Estimate` in client.ts.
 public struct CartEstimate: Equatable {
-    /// Unit price times quantity over the selected items (price per lb times
-    /// the weight for a sold-by-weight item), rounded to cents.
-    public let total: Double
-    /// Selected items.
+    /// Unit price times quantity over the counted items (price per lb times
+    /// the weight for a sold-by-weight item), rounded to cents. Nil when any
+    /// counted item has no price (`unpriced` > 0): no partial totals, so show
+    /// no number then ("Prices at checkout").
+    public let total: Double?
+    /// Counted items.
     public let count: Int
-    /// True when any selected item is sold by weight or has no price: show
+    /// True when any counted item is sold by weight or has no price: show
     /// the total as "about".
     public let estimated: Bool
-    /// Selected items with no unit price.
+    /// Counted items with no price.
     public let unpriced: Int
 
-    public init(total: Double, count: Int, estimated: Bool, unpriced: Int) {
+    public init(total: Double?, count: Int, estimated: Bool, unpriced: Int) {
         self.total = total
         self.count = count
         self.estimated = estimated
         self.unpriced = unpriced
     }
+}
+
+/// What one added line cost. Mirrors the return of `addedPrice` in client.ts.
+public struct AddedPrice: Equatable {
+    /// Rounded to cents.
+    public let amount: Double
+    /// Show it as "about": a weight item, or a store estimate.
+    public let estimated: Bool
+
+    public init(amount: Double, estimated: Bool) {
+        self.amount = amount
+        self.estimated = estimated
+    }
+}
+
+/// What one added line cost, or nil when its price is unknown. By weight:
+/// price per lb times the pounds, else the package price once. Otherwise unit
+/// price times quantity. `fallback` is the chosen Product, for servers whose
+/// added entries carry no prices. Mirrors `addedPrice` in client.ts.
+public func addedPrice(_ a: AddedItem, fallback: Product? = nil) -> AddedPrice? {
+    priceOfAdded(a, fallback)
+}
+
+// The body of addedPrice, under a name CartSession.addedPrice does not shadow.
+private func priceOfAdded(_ a: AddedItem, _ fallback: Product?) -> AddedPrice? {
+    let perLb = a.pricePerLb ?? fallback?.pricePerLb
+    let unit = a.unitPrice ?? fallback?.unitPrice
+    let est = a.estimated ?? fallback?.estimated ?? false
+    func round(_ n: Double) -> Double { (n * 100).rounded() / 100 }
+    if let lb = a.weightLb {
+        if let perLb = perLb { return AddedPrice(amount: round(perLb * lb), estimated: true) }
+        if let unit = unit { return AddedPrice(amount: round(unit), estimated: true) }
+        return nil
+    }
+    guard let unit = unit else { return nil }
+    return AddedPrice(amount: round(unit * Double(max(1, a.quantity))), estimated: est)
 }
 
 @MainActor
@@ -256,6 +295,10 @@ public final class CartSession: ObservableObject {
     /// for a sold-by-weight item price per lb times the weight (one package
     /// price when the store prices it as a package). Items waiting on a
     /// preference are left out.
+    ///
+    /// `total` is nil when even one selected item has no price (`unpriced` >
+    /// 0): a total that leaves an item out is wrong, so show no number at all
+    /// ("Prices at checkout"). A weight item priced per lb counts as priced.
     public func estimate() -> CartEstimate {
         var total = 0.0
         var count = 0
@@ -282,8 +325,34 @@ public final class CartSession: ObservableObject {
             }
             if p.estimated { estimated = true }
         }
-        return CartEstimate(total: (total * 100).rounded() / 100, count: count,
+        return CartEstimate(total: unpriced > 0 ? nil : (total * 100).rounded() / 100, count: count,
                             estimated: estimated || unpriced > 0, unpriced: unpriced)
+    }
+
+    /// The total of what the store took, for the finished-run screen. Same
+    /// rule as `estimate()`: `total` is nil when any added item has no price.
+    /// Prices come from the added entries, else (an older server) from the
+    /// product selected in this session.
+    public func addedTotal(_ result: AddResult) -> CartEstimate {
+        var total = 0.0
+        var unpriced = 0
+        var estimated = false
+        for a in result.added {
+            guard let p = priceOfAdded(a, selected(for: a.key)) else {
+                unpriced += 1
+                continue
+            }
+            total += p.amount
+            if p.estimated { estimated = true }
+        }
+        return CartEstimate(total: unpriced > 0 ? nil : (total * 100).rounded() / 100, count: result.added.count,
+                            estimated: estimated || unpriced > 0, unpriced: unpriced)
+    }
+
+    /// One added line's price (see `addedPrice(_:fallback:)`), with this
+    /// session's product as the fallback.
+    public func addedPrice(_ a: AddedItem) -> AddedPrice? {
+        priceOfAdded(a, selected(for: a.key))
     }
 
     /// Fill the store cart with the current selections.

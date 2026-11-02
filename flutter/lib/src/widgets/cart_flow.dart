@@ -256,7 +256,7 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
   String _title(String storeName) {
     switch (_phase) {
       case _Phase.done:
-        return 'All set';
+        return storeName == 'your store' ? 'In your cart' : 'In your $storeName cart';
       case _Phase.loading:
         return storeName == 'your store' ? 'Getting your cart ready' : 'Getting your $storeName cart ready';
       case _Phase.error:

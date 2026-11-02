@@ -819,8 +819,23 @@ class SearchResult {
       };
 }
 
+/// One line the store took. Everything after [weightLb] is for the
+/// finished-run screen and comes from the product the user chose (the server
+/// does not search again). Each is optional: present only when known, and
+/// absent from servers older than the finished-run screen.
 class AddedItem {
-  const AddedItem({required this.key, required this.productId, required this.name, required this.quantity, this.weightLb});
+  const AddedItem({
+    required this.key,
+    required this.productId,
+    required this.name,
+    required this.quantity,
+    this.weightLb,
+    this.imageUrl,
+    this.ingredient,
+    this.unitPrice,
+    this.pricePerLb,
+    this.estimated,
+  });
   factory AddedItem.fromJson(Object? json) {
     final m = _mapOrNull(json) ?? const <String, Object?>{};
     return AddedItem(
@@ -829,6 +844,11 @@ class AddedItem {
       name: _str(m['name']),
       quantity: _int(m['quantity'], 1),
       weightLb: _doubleOrNull(m['weightLb']),
+      imageUrl: _strOrNull(m['imageUrl']),
+      ingredient: _strOrNull(m['ingredient']),
+      unitPrice: _doubleOrNull(m['unitPrice']),
+      pricePerLb: _doubleOrNull(m['pricePerLb']),
+      estimated: m['estimated'] is bool ? m['estimated']! as bool : null,
     );
   }
   final String key;
@@ -838,9 +858,31 @@ class AddedItem {
 
   /// Set on an item added by weight: the pounds asked for.
   final double? weightLb;
+
+  /// The product's image, from the search that offered it.
+  final String? imageUrl;
+
+  /// The recipe line it was added for, as the partner wrote it.
+  final String? ingredient;
+
+  /// One unit's price. On a weight item priced as a package, the package
+  /// price.
+  final double? unitPrice;
+
+  /// Price per lb for a weight item priced by the pound.
+  final double? pricePerLb;
+
+  /// The price is the store's estimate (weighed or "Avg." items).
+  final bool? estimated;
+
   Map<String, Object?> toJson() {
     final out = <String, Object?>{'key': key, 'productId': productId, 'name': name, 'quantity': quantity};
     _put(out, 'weightLb', weightLb);
+    _put(out, 'imageUrl', imageUrl);
+    _put(out, 'ingredient', ingredient);
+    _put(out, 'unitPrice', unitPrice);
+    _put(out, 'pricePerLb', pricePerLb);
+    _put(out, 'estimated', estimated);
     return out;
   }
 }

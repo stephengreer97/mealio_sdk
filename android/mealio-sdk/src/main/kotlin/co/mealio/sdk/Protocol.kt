@@ -472,6 +472,12 @@ data class SearchResult(val key: String, val query: String, val options: List<Pr
     }
 }
 
+/**
+ * One line the store took. Everything after weightLb is for the finished-run
+ * screen and comes from the product the user chose (the server does not
+ * search again). Each is optional: present only when known, and absent from
+ * servers older than the finished-run screen.
+ */
 data class AddedItem(
     val key: String,
     val productId: String,
@@ -479,6 +485,16 @@ data class AddedItem(
     val quantity: Int,
     /** Set on an item added by weight: the pounds asked for. */
     val weightLb: Double? = null,
+    /** The product's image, from the search that offered it. */
+    val imageUrl: String? = null,
+    /** The recipe line it was added for, as the partner wrote it. */
+    val ingredient: String? = null,
+    /** One unit's price. On a weight item priced as a package, the package price. */
+    val unitPrice: Double? = null,
+    /** Price per lb for a weight item priced by the pound. */
+    val pricePerLb: Double? = null,
+    /** The price is the store's estimate (weighed or "Avg." items). Null when the server did not say. */
+    val estimated: Boolean? = null,
 )
 data class SkippedItem(val key: String, val reason: String)
 data class FailedItem(val key: String, val productId: String, val name: String, val reason: String)
@@ -506,6 +522,11 @@ data class AddResult(
                 AddedItem(
                     it.str("key") ?: "", it.str("productId") ?: "", it.str("name") ?: "", it.num("quantity")?.toInt() ?: 1,
                     it.num("weightLb")?.takeIf { w -> w.isFinite() },
+                    imageUrl = it.str("imageUrl"),
+                    ingredient = it.str("ingredient"),
+                    unitPrice = it.num("unitPrice")?.takeIf { w -> w.isFinite() },
+                    pricePerLb = it.num("pricePerLb")?.takeIf { w -> w.isFinite() },
+                    estimated = it.bool("estimated"),
                 )
             } ?: emptyList(),
             skipped = o.arr("skipped")?.objects()?.map { SkippedItem(it.str("key") ?: "", it.str("reason") ?: "") }

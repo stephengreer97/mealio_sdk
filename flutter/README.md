@@ -137,7 +137,9 @@ session.select(item.key, product.id, preferenceId: 'sliced');
 session.deselect(item.key);          // leave out of THIS run; the usual pick is kept
 await session.search(item.key, 'minced garlic jar');
 session.estimate();                  // total, count, estimated, unpriced
+                                     // total is null when any item is unpriced
 final AddResult result = await session.addToCart();
+session.addedTotal(result);          // the same, for what the store took
 
 final stores = await MealioCart.instance.stores(); // id, name, via
 ```
