@@ -1,0 +1,10 @@
+node_modules/
+dist/
+build/
+.gradle/
+.dart_tool/
+.build/
+*.iml
+.idea/
+.DS_Store
+coverage/

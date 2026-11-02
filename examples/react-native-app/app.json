@@ -1,0 +1,1 @@
+{ "expo": { "name": "Mealio Cart Example", "slug": "mealio-cart-example", "android": { "package": "co.mealio.cartexample" }, "ios": { "bundleIdentifier": "co.mealio.cartexample" } } }

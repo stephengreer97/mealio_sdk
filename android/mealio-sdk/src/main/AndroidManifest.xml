@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application>
+        <!--
+          The store login sheet. Not exported: only the SDK starts it.
+          configChanges keeps the activity (and its WebView, mid sign-in) alive
+          through rotation, resize and dark-mode switches.
+        -->
+        <activity
+            android:name="co.mealio.sdk.MealioLoginActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Material.Light.NoActionBar"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density|fontScale|locale|layoutDirection" />
+    </application>
+</manifest>

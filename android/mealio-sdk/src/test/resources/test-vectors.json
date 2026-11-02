@@ -1,0 +1,228 @@
+{
+  "note": "Signed with a deterministic TEST key. Never trust this key in production.",
+  "kid": "ktest",
+  "publicKey": "6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=",
+  "cases": [
+    {
+      "name": "valid_two_instructions",
+      "envelope": {
+        "payload": "{\"v\":1,\"kind\":\"instructions\",\"job\":\"job_test\",\"seq\":1,\"exp\":4102444800,\"store\":\"heb\",\"instructions\":[{\"op\":\"page_open\",\"id\":\"i1\",\"url\":\"https://www.heb.com/robots.txt\",\"timeoutMs\":15000},{\"op\":\"page_script\",\"id\":\"i2\",\"script\":\"window.ReactNativeWebView.postMessage(JSON.stringify({type:\\\"HEB_SESSION\\\",loggedIn:true}));true;\",\"until\":[{\"type\":\"HEB_SESSION\"}],\"timeoutMs\":5000}]}",
+        "sig": "YBDQyiRFHRvx3Xs51oF1YKCFOCr/tim4vw2FCk6Z29+r2rJwgeQD5l1Pdug0gfNnzmrAhqnicpEB5T14yLzfAw==",
+        "kid": "ktest"
+      },
+      "job": "job_test",
+      "lastSeq": 0,
+      "expect": "ok"
+    },
+    {
+      "name": "valid_unicode_done",
+      "envelope": {
+        "payload": "{\"v\":1,\"kind\":\"instructions\",\"job\":\"job_test\",\"seq\":2,\"exp\":4102444800,\"store\":\"heb\",\"instructions\":[{\"op\":\"done\",\"id\":\"i3\",\"result\":{\"hello\":\"café ✓\"}}]}",
+        "sig": "6y1VrJNIBwfH23GiaK0VX1+Eb4l/OMV1q3wVobG+A1hevW5269lgu2znghHRj13LAJNO2M6G3Z7gnJTkCXNACQ==",
+        "kid": "ktest"
+      },
+      "job": "job_test",
+      "lastSeq": 1,
+      "expect": "ok"
+    },
+    {
+      "name": "tampered_payload",
+      "envelope": {
+        "payload": "{\"v\":1,\"kind\":\"instructions\",\"job\":\"job_test\",\"seq\":1,\"exp\":4102444800,\"store\":\"heb\",\"instructions\":[{\"op\":\"page_open\",\"id\":\"i1\",\"url\":\"https://www.heb.com/robots.txT\",\"timeoutMs\":15000},{\"op\":\"page_script\",\"id\":\"i2\",\"script\":\"window.ReactNativeWebView.postMessage(JSON.stringify({type:\\\"HEB_SESSION\\\",loggedIn:true}));true;\",\"until\":[{\"type\":\"HEB_SESSION\"}],\"timeoutMs\":5000}]}",
+        "sig": "YBDQyiRFHRvx3Xs51oF1YKCFOCr/tim4vw2FCk6Z29+r2rJwgeQD5l1Pdug0gfNnzmrAhqnicpEB5T14yLzfAw==",
+        "kid": "ktest"
+      },
+      "job": "job_test",
+      "lastSeq": 0,
+      "expect": "signature"
+    },
+    {
+      "name": "unknown_kid",
+      "envelope": {
+        "payload": "{\"v\":1,\"kind\":\"instructions\",\"job\":\"job_test\",\"seq\":1,\"exp\":4102444800,\"store\":\"heb\",\"instructions\":[{\"op\":\"page_open\",\"id\":\"i1\",\"url\":\"https://www.heb.com/robots.txt\",\"timeoutMs\":15000},{\"op\":\"page_script\",\"id\":\"i2\",\"script\":\"window.ReactNativeWebView.postMessage(JSON.stringify({type:\\\"HEB_SESSION\\\",loggedIn:true}));true;\",\"until\":[{\"type\":\"HEB_SESSION\"}],\"timeoutMs\":5000}]}",
+        "sig": "YBDQyiRFHRvx3Xs51oF1YKCFOCr/tim4vw2FCk6Z29+r2rJwgeQD5l1Pdug0gfNnzmrAhqnicpEB5T14yLzfAw==",
+        "kid": "nope"
+      },
+      "job": "job_test",
+      "lastSeq": 0,
+      "expect": "unknown_kid"
+    },
+    {
+      "name": "expired",
+      "envelope": {
+        "payload": "{\"v\":1,\"kind\":\"instructions\",\"job\":\"job_test\",\"seq\":1,\"exp\":1000,\"store\":\"heb\",\"instructions\":[{\"op\":\"done\",\"id\":\"i1\",\"result\":null}]}",
+        "sig": "OMhEV3L4bQ6TePfcoi1RhiUfjIFi39+tCBzVTb7r/FrWHyqrxgZQldJUHlstNynC+uQoIldxGQzF9XQMOUTaAA==",
+        "kid": "ktest"
+      },
+      "job": "job_test",
+      "lastSeq": 0,
+      "expect": "expired"
+    },
+    {
+      "name": "wrong_job",
+      "envelope": {
+        "payload": "{\"v\":1,\"kind\":\"instructions\",\"job\":\"job_test\",\"seq\":1,\"exp\":4102444800,\"store\":\"heb\",\"instructions\":[{\"op\":\"page_open\",\"id\":\"i1\",\"url\":\"https://www.heb.com/robots.txt\",\"timeoutMs\":15000},{\"op\":\"page_script\",\"id\":\"i2\",\"script\":\"window.ReactNativeWebView.postMessage(JSON.stringify({type:\\\"HEB_SESSION\\\",loggedIn:true}));true;\",\"until\":[{\"type\":\"HEB_SESSION\"}],\"timeoutMs\":5000}]}",
+        "sig": "YBDQyiRFHRvx3Xs51oF1YKCFOCr/tim4vw2FCk6Z29+r2rJwgeQD5l1Pdug0gfNnzmrAhqnicpEB5T14yLzfAw==",
+        "kid": "ktest"
+      },
+      "job": "job_other",
+      "lastSeq": 0,
+      "expect": "job"
+    },
+    {
+      "name": "wrong_seq",
+      "envelope": {
+        "payload": "{\"v\":1,\"kind\":\"instructions\",\"job\":\"job_test\",\"seq\":1,\"exp\":4102444800,\"store\":\"heb\",\"instructions\":[{\"op\":\"page_open\",\"id\":\"i1\",\"url\":\"https://www.heb.com/robots.txt\",\"timeoutMs\":15000},{\"op\":\"page_script\",\"id\":\"i2\",\"script\":\"window.ReactNativeWebView.postMessage(JSON.stringify({type:\\\"HEB_SESSION\\\",loggedIn:true}));true;\",\"until\":[{\"type\":\"HEB_SESSION\"}],\"timeoutMs\":5000}]}",
+        "sig": "YBDQyiRFHRvx3Xs51oF1YKCFOCr/tim4vw2FCk6Z29+r2rJwgeQD5l1Pdug0gfNnzmrAhqnicpEB5T14yLzfAw==",
+        "kid": "ktest"
+      },
+      "job": "job_test",
+      "lastSeq": 4,
+      "expect": "seq"
+    },
+    {
+      "name": "blocked_url_runs_but_refuses",
+      "envelope": {
+        "payload": "{\"v\":1,\"kind\":\"instructions\",\"job\":\"job_test\",\"seq\":1,\"exp\":4102444800,\"store\":\"heb\",\"instructions\":[{\"op\":\"page_open\",\"id\":\"i1\",\"url\":\"https://www.heb.com/checkout/review\",\"timeoutMs\":1000}]}",
+        "sig": "+sysc/YEjYLzuUbVbzmPuEm5naMYi3Tp2ciHCIH3TyruSjVAHoqX/sTTApoWo8vz+dMyaVO6+4blCPntTa+cDA==",
+        "kid": "ktest"
+      },
+      "job": "job_test",
+      "lastSeq": 0,
+      "expect": "ok",
+      "firstResultError": "blocked"
+    }
+  ],
+  "allowlist": [
+    {
+      "store": "heb",
+      "url": "https://www.heb.com/robots.txt",
+      "use": "page",
+      "ok": true
+    },
+    {
+      "store": "heb",
+      "url": "http://www.heb.com/robots.txt",
+      "use": "page",
+      "ok": false
+    },
+    {
+      "store": "heb",
+      "url": "https://heb.com.evil.io/",
+      "use": "page",
+      "ok": false
+    },
+    {
+      "store": "heb",
+      "url": "https://www.heb.com/checkout",
+      "use": "page",
+      "ok": false
+    },
+    {
+      "store": "heb",
+      "url": "https://www.heb.com/cart?step=PAYMENT",
+      "use": "fetch",
+      "ok": false
+    },
+    {
+      "store": "heb",
+      "url": "https://accounts.google.com/o/oauth2",
+      "use": "login",
+      "ok": true
+    },
+    {
+      "store": "heb",
+      "url": "https://accounts.google.com/o/oauth2",
+      "use": "page",
+      "ok": false
+    },
+    {
+      "store": "safeway",
+      "url": "https://www.safeway.com/abs/pub/xapi/search",
+      "use": "fetch",
+      "ok": true
+    },
+    {
+      "store": "kroger",
+      "url": "https://api.kroger.com/v1/connect/oauth2/authorize",
+      "use": "login",
+      "ok": true
+    },
+    {
+      "store": "kroger",
+      "url": "https://api.kroger.com/v1/cart",
+      "use": "fetch",
+      "ok": false
+    },
+    {
+      "store": "nostore",
+      "url": "https://www.heb.com/",
+      "use": "page",
+      "ok": false
+    }
+  ],
+  "matchers": [
+    {
+      "msg": {
+        "type": "ALB_SESSION",
+        "loggedIn": true,
+        "early": true
+      },
+      "m": {
+        "type": "ALB_SESSION",
+        "ne": {
+          "early": true
+        }
+      },
+      "ok": false
+    },
+    {
+      "msg": {
+        "type": "ALB_SESSION",
+        "loggedIn": true
+      },
+      "m": {
+        "type": "ALB_SESSION",
+        "ne": {
+          "early": true
+        }
+      },
+      "ok": true
+    },
+    {
+      "msg": {
+        "type": "HEB_SESSION",
+        "loggedIn": true
+      },
+      "m": {
+        "type": "HEB_SESSION",
+        "eq": {
+          "loggedIn": true
+        }
+      },
+      "ok": true
+    },
+    {
+      "msg": {
+        "type": "HEB_SESSION",
+        "loggedIn": false
+      },
+      "m": {
+        "type": "HEB_SESSION",
+        "eq": {
+          "loggedIn": true
+        }
+      },
+      "ok": false
+    },
+    {
+      "msg": {
+        "type": "X"
+      },
+      "m": {
+        "type": "Y"
+      },
+      "ok": false
+    }
+  ]
+}

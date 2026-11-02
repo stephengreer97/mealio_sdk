@@ -1,0 +1,163 @@
+import { describe, it, expect } from 'vitest';
+import vm from 'node:vm';
+import vectors from '../../../protocol/test-vectors.json';
+import {
+  Allowlist, GUARD_SCRIPT, Runner, matches, openEnvelope, checkInstructions, EnvelopeError, MealioClient,
+  type Host, type Envelope, type Matcher,
+} from '../src';
+
+const KEYS = { [vectors.kid]: vectors.publicKey };
+
+function fakeHost(over: Partial<Host> = {}): Host & { calls: string[] } {
+  const calls: string[] = [];
+  return {
+    calls,
+    async openPage(store, url) { calls.push(`open ${url}`); return { ok: true, finalUrl: url }; },
+    async runScript(store, guard, script, until) {
+      calls.push('script');
+      return { messages: [{ type: until[0]?.type ?? 'X', loggedIn: true }], timedOut: false };
+    },
+    async showLogin() { calls.push('login'); return { outcome: 'signed_in', messages: [] }; },
+    async fetch() { calls.push('fetch'); return { ok: true, status: 200, body: '{}' }; },
+    ...over,
+  };
+}
+
+describe('test vectors', () => {
+  for (const c of vectors.cases) {
+    it(c.name, async () => {
+      const runner = new Runner(fakeHost(), new Allowlist(), KEYS);
+      if (c.expect === 'ok') {
+        const out = await runner.run(c.envelope as Envelope, c.job, c.lastSeq);
+        if ((c as any).firstResultError) expect((out.results[0] as any).error).toBe((c as any).firstResultError);
+        else expect(out.results.every((r) => r.ok) || out.terminal).toBeTruthy();
+      } else {
+        await expect(runner.run(c.envelope as Envelope, c.job, c.lastSeq)).rejects.toMatchObject({ why: c.expect });
+      }
+    });
+  }
+
+  it('allowlist cases', () => {
+    const a = new Allowlist();
+    for (const c of vectors.allowlist) {
+      expect(a.check(c.store, c.url, c.use as any).ok, `${c.store} ${c.url} ${c.use}`).toBe(c.ok);
+    }
+  });
+
+  it('matcher cases', () => {
+    for (const c of vectors.matchers) expect(matches(c.msg as any, c.m as Matcher)).toBe(c.ok);
+  });
+
+  it('done carries unicode result intact', async () => {
+    const c = vectors.cases.find((x) => x.name === 'valid_unicode_done')!;
+    const out = await new Runner(fakeHost(), new Allowlist(), KEYS).run(c.envelope as Envelope, 'job_test', 1);
+    expect(out.terminal).toEqual({ kind: 'done', result: { hello: 'café ✓' } });
+  });
+
+  it('refuses the production key for test envelopes', () => {
+    const c = vectors.cases[0];
+    expect(() => openEnvelope(c.envelope as Envelope)).toThrow(EnvelopeError);
+  });
+});
+
+describe('runner', () => {
+  it('skips the rest of an envelope after a failure', async () => {
+    const c = vectors.cases.find((x) => x.name === 'blocked_url_runs_but_refuses')!;
+    const host = fakeHost();
+    const out = await new Runner(host, new Allowlist(), KEYS).run(c.envelope as Envelope, 'job_test', 0);
+    expect(out.results).toHaveLength(1);
+    expect(host.calls).toEqual([]);
+  });
+});
+
+describe('allowlist widening', () => {
+  it('adds only hosts on a registrable domain the store already has', () => {
+    const a = new Allowlist();
+    a.widen({ v: 1, kind: 'allowlist', exp: 0, stores: { heb: { hosts: ['api.heb.com', 'heb-cdn.net'] }, nope: { hosts: ['x.com'] } } });
+    expect(a.hostsFor('heb')!.hosts).toContain('api.heb.com');
+    expect(a.hostsFor('heb')!.hosts).not.toContain('heb-cdn.net');
+    expect(a.check('heb', 'https://www.heb.com/checkout', 'page').ok).toBe(false);
+  });
+});
+
+describe('guard script', () => {
+  function sandbox() {
+    const posted: string[] = [];
+    const fetched: string[] = [];
+    const win: any = {
+      location: { href: 'https://www.heb.com/robots.txt' },
+      fetch: (u: string) => { fetched.push(String(u)); return Promise.resolve('ok'); },
+      ReactNativeWebView: { postMessage: (s: string) => posted.push(s) },
+      URL, Date, JSON, Promise, Error, RegExp, String,
+    };
+    win.window = win;
+    vm.createContext(win);
+    vm.runInContext(GUARD_SCRIPT, win);
+    return { win, posted, fetched };
+  }
+
+  it('lets a normal request through', async () => {
+    const { win, fetched } = sandbox();
+    await vm.runInContext(`fetch('/graphql', { method: 'POST', body: '{"operationName":"productSearchPageV2"}' })`, win);
+    expect(fetched).toEqual(['/graphql']);
+  });
+
+  it('blocks checkout paths and checkout operations', async () => {
+    const { win, posted, fetched } = sandbox();
+    await expect(vm.runInContext(`fetch('/checkout/review')`, win)).rejects.toThrow(/blocked_path/);
+    await expect(vm.runInContext(`fetch('/graphql', { body: '{"operationName":"PlaceOrder"}' })`, win)).rejects.toThrow(/blocked_operation/);
+    expect(fetched).toEqual([]);
+    expect(posted.length).toBe(2);
+  });
+
+  it('is idempotent', () => {
+    const { win } = sandbox();
+    const f = win.fetch;
+    vm.runInContext(GUARD_SCRIPT, win);
+    expect(win.fetch).toBe(f);
+  });
+});
+
+describe('client', () => {
+  it('drives a job to done through step calls', async () => {
+    const c1 = vectors.cases[0].envelope;
+    const c2 = vectors.cases[1].envelope;
+    const seen: string[] = [];
+    const fetchImpl = (async (url: string, init: any) => {
+      seen.push(url.replace('https://mealio.test', ''));
+      const body = (o: unknown) => ({ ok: true, status: 200, json: async () => o });
+      if (url.endsWith('/hello')) return body({ ok: true });
+      if (url.endsWith('/carts')) return body({ job: 'job_test', envelope: c1 });
+      if (url.endsWith('/step')) {
+        const b = JSON.parse(init.body);
+        expect(b.seq).toBe(1);
+        expect(b.results).toHaveLength(2);
+        return body({ envelope: c2 });
+      }
+      throw new Error('unexpected ' + url);
+    }) as any;
+    const client = new MealioClient({
+      publishableKey: 'pk_test', getSessionToken: async () => 'tok', platform: 'web-test', sdkVersion: '0',
+      baseUrl: 'https://mealio.test', fetchImpl, keys: KEYS,
+    }, fakeHost());
+    // done result is not a PreparedCart here, the point is the loop.
+    const session = await client.prepareCart({ store: 'heb', recipe: { id: 'r1', ingredients: [] } }).catch((e) => e);
+    expect(seen).toEqual(['/api/v1/sdk/hello', '/api/v1/sdk/carts', '/api/v1/sdk/jobs/job_test/step']);
+    expect(session).toBeDefined();
+  });
+
+  it('retries once with a fresh token on 401', async () => {
+    let tokens = 0;
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls += 1;
+      if (calls === 1) return { ok: false, status: 401, json: async () => ({}) };
+      return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    }) as any;
+    const client = new MealioClient({
+      publishableKey: 'pk', getSessionToken: async () => `t${++tokens}`, platform: 'web-test', sdkVersion: '0', fetchImpl, keys: KEYS,
+    }, fakeHost());
+    await (client as any).hello();
+    expect(tokens).toBe(2);
+  });
+});
