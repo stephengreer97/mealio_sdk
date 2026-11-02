@@ -136,6 +136,10 @@ export interface Product {
    * (H-E-B: "sliced or shaved?"). Pass the chosen id as Selection.preferenceId.
    */
   preferences?: Array<{ id: string; label: string }>;
+  /** One unit's price as a number, for an estimated total. */
+  unitPrice?: number | null;
+  /** Sold by weight: the price is the store's estimate. */
+  estimated?: boolean;
 }
 
 export type ItemStatus = 'remembered' | 'choose' | 'remembered_unavailable' | 'unavailable';
@@ -166,6 +170,8 @@ export interface CartItem {
 export interface PreparedCart {
   cartId: string;
   store: string;
+  /** Display name, e.g. "H-E-B". */
+  storeName?: string;
   /** Every recipe line, in recipe order. Show them all. */
   items: CartItem[];
   /** @deprecated 0.1 groupings derived from items. */

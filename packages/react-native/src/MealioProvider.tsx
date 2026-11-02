@@ -1,19 +1,22 @@
 // The React Native host. Place <MealioProvider> once near the root of the app.
 // It renders:
 //   - a hidden 1x1 WebView: the store session the relay works in
-//   - a login sheet (Modal + visible WebView) when a store asks the user to sign in
-// Both WebViews share the platform's cookie store, so a login in the sheet is
-// the session the hidden WebView uses.
+//   - the store sign-in WebView when a store asks the user to sign in. Inside
+//     an open MealioCartFlow sheet it renders in that sheet (one sheet for the
+//     whole flow); otherwise in a sheet of its own.
+// Both WebViews share the platform's cookie store, so a sign-in is the session
+// the hidden WebView uses.
 
 import React, { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react';
 import { Modal, Platform, Pressable, SafeAreaView, StyleSheet, Text, View } from 'react-native';
 import { WebView, type WebViewMessageEvent, type WebViewNavigation } from 'react-native-webview';
 import {
   MealioClient, matchesAny, parseMessage,
-  type CartSession, type Host, type JsonMessage, type Matcher, type Recipe,
+  type CartSession, type Host, type JsonMessage, type Matcher, type Recipe, type StepListener,
 } from '@mealio/sdk-core';
+import { resolveTheme, type MealioTheme } from './theme';
 
-export const SDK_VERSION = '0.1.0';
+export const SDK_VERSION = '0.2.0';
 
 export interface EpochStorage {
   get(): Promise<number>;
@@ -27,21 +30,45 @@ export interface MealioProviderProps {
   baseUrl?: string;
   /** Persist the store sign-out epoch. Without it, sign-out still clears cookies but the rails' small caches survive a restart. */
   epochStorage?: EpochStorage;
-  /** Accent color for the login sheet header. */
+  /** Your brand: accent color, radius, font. */
+  theme?: Partial<MealioTheme>;
+  /** @deprecated use theme.accent */
   accentColor?: string;
   children: React.ReactNode;
 }
 
 export interface MealioApi {
-  prepareCart(input: { store: string; recipe: Recipe; zip?: string | null }): Promise<CartSession>;
+  prepareCart(input: { store: string; recipe: Recipe; zip?: string | null }, opts?: { onStep?: StepListener }): Promise<CartSession>;
   signOutOfAllStores(): Promise<void>;
+  theme: MealioTheme;
 }
 
-const Ctx = createContext<MealioApi | null>(null);
+export interface LoginView {
+  title: string;
+  /** The sign-in WebView, ready to place in a sheet. */
+  webview: React.ReactElement;
+  cancel: () => void;
+}
+
+interface Internal {
+  login: LoginView | null;
+  /** A cart flow sheet is open and will show the sign-in itself. */
+  hostLogin: (on: boolean) => void;
+}
+
+const ApiCtx = createContext<MealioApi | null>(null);
+const InternalCtx = createContext<Internal | null>(null);
 
 export function useMealio(): MealioApi {
-  const v = useContext(Ctx);
+  const v = useContext(ApiCtx);
   if (!v) throw new Error('useMealio must be used inside <MealioProvider>');
+  return v;
+}
+
+/** For MealioCartFlow: the sign-in view to show inside its sheet. */
+export function useMealioInternal(): Internal {
+  const v = useContext(InternalCtx);
+  if (!v) throw new Error('Mealio components must be used inside <MealioProvider>');
   return v;
 }
 
@@ -65,6 +92,7 @@ function memoryEpoch(): EpochStorage {
 }
 
 export function MealioProvider(props: MealioProviderProps) {
+  const theme = useMemo(() => resolveTheme({ ...(props.accentColor ? { accent: props.accentColor } : {}), ...(props.theme || {}) }), [props.theme, props.accentColor]);
   const hidden = useRef<WebView>(null);
   const loginView = useRef<WebView>(null);
   const [hiddenUri, setHiddenUri] = useState<{ uri: string; n: number }>({ uri: 'about:blank', n: 0 });
@@ -73,11 +101,12 @@ export function MealioProvider(props: MealioProviderProps) {
   const [login, setLogin] = useState<LoginState | null>(null);
   const loginRef = useRef<LoginState | null>(null);
   const checkTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [hosts, setHosts] = useState(0);
   const epochStore = useMemo(() => props.epochStorage || memoryEpoch(), [props.epochStorage]);
 
   // ── hidden WebView ───────────────────────────────────────────────────
 
-  const onHiddenLoadEnd = useCallback((e: { nativeEvent: { url: string; loading?: boolean } }) => {
+  const onHiddenLoadEnd = useCallback((e: { nativeEvent: { url: string } }) => {
     const w = pageWaiter.current;
     if (!w || e.nativeEvent.url === 'about:blank') return;
     pageWaiter.current = null;
@@ -99,7 +128,7 @@ export function MealioProvider(props: MealioProviderProps) {
     if (matchesAny(msg, w.until)) { scriptWaiter.current = null; w.resolve(false); }
   }, []);
 
-  // ── login sheet ──────────────────────────────────────────────────────
+  // ── sign-in ──────────────────────────────────────────────────────────
 
   const endLogin = useCallback((outcome: 'signed_in' | 'cancelled' | 'timeout') => {
     const l = loginRef.current;
@@ -117,8 +146,6 @@ export function MealioProvider(props: MealioProviderProps) {
     loginView.current?.injectJavaScript(l.check.script);
   }, []);
 
-  const onLoginLoadEnd = useCallback(() => { injectCheck(); }, [injectCheck]);
-
   const onLoginMessage = useCallback((e: WebViewMessageEvent) => {
     const l = loginRef.current;
     const msg = parseMessage(e.nativeEvent.data);
@@ -135,12 +162,27 @@ export function MealioProvider(props: MealioProviderProps) {
   const onLoginShouldStart = useCallback((req: { url: string; isTopFrame?: boolean; mainDocumentURL?: string }) => {
     const l = loginRef.current;
     if (!l) return true;
-    // Android reports isTopFrame; iOS reports mainDocumentURL === url for a top-frame load.
     const top = req.isTopFrame ?? (Platform.OS === 'ios' ? (!req.mainDocumentURL || req.mainDocumentURL === req.url) : true);
     if (!top || req.url.startsWith('about:') || req.url.startsWith('blob:') || req.url.startsWith('data:')) return true;
     if (l.doneWhenUrl && l.doneWhenUrl.test(req.url)) { setTimeout(() => endLogin('signed_in'), 0); return true; }
     return l.allowNavigation(req.url);
   }, [endLogin]);
+
+  const loginWebView = login ? (
+    <WebView
+      ref={loginView}
+      source={{ uri: login.url }}
+      onLoadEnd={injectCheck}
+      onMessage={onLoginMessage}
+      onNavigationStateChange={onLoginNav}
+      onShouldStartLoadWithRequest={onLoginShouldStart}
+      javaScriptEnabled
+      domStorageEnabled
+      sharedCookiesEnabled
+      thirdPartyCookiesEnabled
+      style={styles.flex}
+    />
+  ) : null;
 
   // ── the Host the relay drives ───────────────────────────────────────
 
@@ -177,9 +219,6 @@ export function MealioProvider(props: MealioProviderProps) {
       });
     },
     async fetch(_store, req, timeoutMs, maxBytes) {
-      // Runs from the native side with credentials. On Android React Native's
-      // fetch shares the WebView cookie jar; on iOS it does not, which is why
-      // the server sends page_script, not fetch, for every store today.
       const ctl = new AbortController();
       const t = setTimeout(() => ctl.abort(), timeoutMs);
       try {
@@ -188,7 +227,7 @@ export function MealioProvider(props: MealioProviderProps) {
         const headers: Record<string, string> = {};
         res.headers.forEach((v: string, k: string) => { headers[k] = v; });
         return { ok: true, status: res.status, headers, body: text.slice(0, maxBytes), truncated: text.length > maxBytes };
-      } catch (e) {
+      } catch {
         return { ok: false, error: ctl.signal.aborted ? 'timeout' : 'no_response' };
       } finally {
         clearTimeout(t);
@@ -206,7 +245,8 @@ export function MealioProvider(props: MealioProviderProps) {
   }, host), [props.publishableKey, props.getSessionToken, props.baseUrl, host, epochStore]);
 
   const api: MealioApi = useMemo(() => ({
-    prepareCart: (input) => client.prepareCart(input),
+    theme,
+    prepareCart: (input, opts) => client.prepareCart(input, opts),
     async signOutOfAllStores() {
       await epochStore.set((await epochStore.get()) + 1);
       try {
@@ -219,68 +259,59 @@ export function MealioProvider(props: MealioProviderProps) {
         hidden.current?.clearCache?.(true);
       }
     },
-  }), [client, epochStore]);
+  }), [client, epochStore, theme]);
+
+  const internal: Internal = useMemo(() => ({
+    login: login && loginWebView ? { title: login.title, webview: loginWebView, cancel: () => endLogin('cancelled') } : null,
+    hostLogin: (on) => setHosts((n) => Math.max(0, n + (on ? 1 : -1))),
+  }), [login, loginWebView, endLogin]);
 
   return (
-    <Ctx.Provider value={api}>
-      {props.children}
-      <View pointerEvents="none" style={styles.hidden}>
-        <WebView
-          ref={hidden}
-          // A new key per navigation remounts the WebView, so re-opening the
-          // same URL really reloads it. Cookies and storage are shared, so
-          // nothing a store needs is lost.
-          key={`mealio-hidden-${hiddenUri.n}`}
-          source={{ uri: hiddenUri.uri }}
-          originWhitelist={['https://*', 'about:*']}
-          onLoadEnd={onHiddenLoadEnd}
-          onError={onHiddenError}
-          onMessage={onHiddenMessage}
-          javaScriptEnabled
-          domStorageEnabled
-          sharedCookiesEnabled
-          thirdPartyCookiesEnabled
-          setSupportMultipleWindows={false}
-          style={styles.hiddenView}
-        />
-      </View>
-      <Modal visible={!!login} animationType="slide" onRequestClose={() => endLogin('cancelled')} presentationStyle="pageSheet">
-        <SafeAreaView style={styles.sheet}>
-          <View style={[styles.bar, { borderBottomColor: props.accentColor || '#e5e5e5' }]}>
-            <Text style={styles.title} numberOfLines={1}>{login?.title}</Text>
-            <Pressable accessibilityRole="button" onPress={() => endLogin('cancelled')} hitSlop={12}>
-              <Text style={[styles.close, { color: props.accentColor || '#0a7' }]}>Close</Text>
-            </Pressable>
-          </View>
-          {login && (
-            <WebView
-              ref={loginView}
-              source={{ uri: login.url }}
-              onLoadEnd={onLoginLoadEnd}
-              onMessage={onLoginMessage}
-              onNavigationStateChange={onLoginNav}
-              onShouldStartLoadWithRequest={onLoginShouldStart}
-              javaScriptEnabled
-              domStorageEnabled
-              sharedCookiesEnabled
-              thirdPartyCookiesEnabled
-              style={styles.sheetView}
-            />
-          )}
-        </SafeAreaView>
-      </Modal>
-    </Ctx.Provider>
+    <ApiCtx.Provider value={api}>
+      <InternalCtx.Provider value={internal}>
+        {props.children}
+        <View pointerEvents="none" style={styles.hidden}>
+          <WebView
+            ref={hidden}
+            // A new key per navigation remounts the WebView, so re-opening the
+            // same URL really reloads it. Cookies and storage are shared.
+            key={`mealio-hidden-${hiddenUri.n}`}
+            source={{ uri: hiddenUri.uri }}
+            originWhitelist={['https://*', 'about:*']}
+            onLoadEnd={onHiddenLoadEnd}
+            onError={onHiddenError}
+            onMessage={onHiddenMessage}
+            javaScriptEnabled
+            domStorageEnabled
+            sharedCookiesEnabled
+            thirdPartyCookiesEnabled
+            setSupportMultipleWindows={false}
+            style={styles.hiddenView}
+          />
+        </View>
+        <Modal visible={!!login && hosts === 0} animationType="slide" onRequestClose={() => endLogin('cancelled')} presentationStyle="pageSheet">
+          <SafeAreaView style={[styles.flex, { backgroundColor: theme.background }]}>
+            <View style={[styles.bar, { borderBottomColor: theme.border }]}>
+              <Text style={[styles.title, { color: theme.text, fontFamily: theme.fontFamily }]} numberOfLines={1}>{login?.title}</Text>
+              <Pressable accessibilityRole="button" onPress={() => endLogin('cancelled')} hitSlop={12}>
+                <Text style={[styles.close, { color: theme.accent, fontFamily: theme.fontFamily }]}>Close</Text>
+              </Pressable>
+            </View>
+            {hosts === 0 ? loginWebView : null}
+          </SafeAreaView>
+        </Modal>
+      </InternalCtx.Provider>
+    </ApiCtx.Provider>
   );
 }
 
 const styles = StyleSheet.create({
+  flex: { flex: 1 },
   // A WebView with no size or a hidden parent can be throttled or never load,
   // so the session WebView is 1x1 and transparent rather than unmounted.
   hidden: { position: 'absolute', width: 1, height: 1, opacity: 0, left: 0, top: 0, overflow: 'hidden' },
   hiddenView: { width: 1, height: 1, backgroundColor: 'transparent' },
-  sheet: { flex: 1, backgroundColor: '#fff' },
-  bar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 2 },
-  title: { fontSize: 16, fontWeight: '600', flex: 1, marginRight: 12, color: '#111' },
+  bar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth },
+  title: { fontSize: 16, fontWeight: '600', flex: 1, marginRight: 12 },
   close: { fontSize: 16, fontWeight: '600' },
-  sheetView: { flex: 1 },
 });

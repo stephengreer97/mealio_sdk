@@ -6,7 +6,7 @@ import { Allowlist } from './allowlist';
 import { openEnvelope, EnvelopeError } from './verify';
 import { SUPPORTED_OPS } from './protocol';
 import type {
-  AddResult, AllowlistPayload, CartItem, Envelope, PreparedCart, Product, Recipe, SearchResult, Selection, StepRequest,
+  AddResult, AllowlistPayload, CartItem, Envelope, Instruction, PreparedCart, Product, Recipe, SearchResult, Selection, StepRequest,
 } from './protocol';
 
 export const SDK_CORE_VERSION = '0.1.0';
@@ -15,6 +15,23 @@ export const DEFAULT_BASE_URL = 'https://mealio.co';
 export type MealioErrorCode =
   | 'bad_envelope' | 'blocked' | 'store_unavailable' | 'login_cancelled' | 'session_expired'
   | 'network' | 'unsupported' | 'server' | string;
+
+/**
+ * What the SDK is doing right now, for a progress screen. Inferred from the
+ * server's instruction ids (open-, session-, login-, search-, add-), never
+ * from store specifics.
+ */
+export type Step = 'connecting' | 'checking_sign_in' | 'signing_in' | 'searching' | 'adding';
+export type StepListener = (step: Step, ins: Instruction) => void;
+
+export function stepOf(ins: Instruction): Step {
+  if (ins.op === 'show_login') return 'signing_in';
+  const id = ins.id || '';
+  if (id.startsWith('search')) return 'searching';
+  if (id.startsWith('add')) return 'adding';
+  if (id.startsWith('session') || id.startsWith('resession')) return 'checking_sign_in';
+  return 'connecting';
+}
 
 export class MealioError extends Error {
   constructor(public code: MealioErrorCode, message: string) { super(message); this.name = 'MealioError'; }
@@ -50,22 +67,22 @@ export class MealioClient {
   }
 
   /** Start a cart: signs in to the store if needed, searches every ingredient. */
-  async prepareCart(input: { store: string; recipe: Recipe; zip?: string | null }): Promise<CartSession> {
+  async prepareCart(input: { store: string; recipe: Recipe; zip?: string | null }, opts: { onStep?: StepListener } = {}): Promise<CartSession> {
     const start = await this.post<JobStart>('/api/v1/sdk/carts', { ...input, ...(await this.about()) });
-    const result = await this.drive(start) as unknown as PreparedCart;
+    const result = await this.drive(start, opts.onStep) as unknown as PreparedCart;
     return new CartSession(this, result);
   }
 
   /** Search the store again for one item ("minced garlic jar"). */
-  async search(cartId: string, key: string, query: string): Promise<SearchResult> {
+  async search(cartId: string, key: string, query: string, opts: { onStep?: StepListener } = {}): Promise<SearchResult> {
     const start = await this.post<JobStart>(`/api/v1/sdk/carts/${encodeURIComponent(cartId)}/search`, { key, query, ...(await this.about()) });
-    return await this.drive(start) as unknown as SearchResult;
+    return await this.drive(start, opts.onStep) as unknown as SearchResult;
   }
 
   /** Fill the store cart with the user's choices. */
-  async addToCart(cartId: string, selections: Selection[]): Promise<AddResult> {
+  async addToCart(cartId: string, selections: Selection[], opts: { onStep?: StepListener } = {}): Promise<AddResult> {
     const start = await this.post<JobStart>(`/api/v1/sdk/carts/${encodeURIComponent(cartId)}/add`, { selections, ...(await this.about()) });
-    return await this.drive(start) as unknown as AddResult;
+    return await this.drive(start, opts.onStep) as unknown as AddResult;
   }
 
   /** Who is calling, carried on every job-starting call (this used to be a separate hello round trip). */
@@ -82,13 +99,13 @@ export class MealioClient {
     } catch { /* an allowlist we cannot verify is ignored, the bundled one stands */ }
   }
 
-  private async drive(start: JobStart): Promise<unknown> {
+  private async drive(start: JobStart, onStep?: StepListener): Promise<unknown> {
     let env = start.envelope;
     let seq = 0;
     for (let guard = 0; guard < 200; guard += 1) {
       let out;
       try {
-        out = await this.runner.run(env, start.job, seq);
+        out = await this.runner.run(env, start.job, seq, onStep ? (ins) => onStep(stepOf(ins), ins) : undefined);
       } catch (e) {
         if (e instanceof EnvelopeError) throw new MealioError(e.why === 'unsupported_op' ? 'unsupported' : 'bad_envelope', e.message);
         throw e;
@@ -202,8 +219,31 @@ export class CartSession {
     });
   }
 
-  async addToCart(): Promise<AddResult> {
-    return this.client.addToCart(this.cart.cartId, this.selections());
+  async addToCart(opts: { onStep?: StepListener } = {}): Promise<AddResult> {
+    return this.client.addToCart(this.cart.cartId, this.selections(), opts);
+  }
+
+  /** The selected product for an item, from its options. */
+  selected(key: string): Product | null {
+    const id = this.selectedId(key);
+    return id ? this.options(key).find((p) => p.id === id) || null : null;
+  }
+
+  /**
+   * Estimated total of the selected items: unit price times quantity. `estimated`
+   * is true when any item is sold by weight or has no price, so show it as "about".
+   */
+  estimate(): { total: number; count: number; estimated: boolean; unpriced: number } {
+    let total = 0, count = 0, unpriced = 0, estimated = false;
+    for (const it of this.items) {
+      const p = this.selected(it.key);
+      if (!p) continue;
+      count += 1;
+      if (typeof p.unitPrice === 'number') total += p.unitPrice * (it.quantity || 1);
+      else unpriced += 1;
+      if (p.estimated) estimated = true;
+    }
+    return { total: Math.round(total * 100) / 100, count, estimated: estimated || unpriced > 0, unpriced };
   }
 
   /** @deprecated use select() */

@@ -56,7 +56,7 @@ export class Runner {
   constructor(private host: Host, public allowlist: Allowlist = new Allowlist(), private keys?: Record<string, string>) {}
 
   /** Verify and run one envelope. Throws EnvelopeError when it must be refused. */
-  async run(env: Envelope, job: string | null, lastSeq: number): Promise<StepOutcome> {
+  async run(env: Envelope, job: string | null, lastSeq: number, onStep?: (ins: Instruction) => void): Promise<StepOutcome> {
     const payload = checkInstructions(openEnvelope(env, this.keys), job, lastSeq);
     const results: InstructionResult[] = [];
     let terminal: Terminal | null = null;
@@ -66,6 +66,7 @@ export class Runner {
       if (ins.op === 'done') { terminal = { kind: 'done', result: ins.result }; break; }
       if (ins.op === 'fail') { terminal = { kind: 'fail', code: ins.code, message: ins.message }; break; }
       if (failed) { results.push(skipped(ins)); continue; }
+      try { onStep?.(ins); } catch { /* a progress callback never breaks a run */ }
       const r = await this.one(payload.store, ins);
       results.push(r);
       if (!r.ok) failed = true;

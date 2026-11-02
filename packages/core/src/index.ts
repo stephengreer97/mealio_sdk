@@ -6,5 +6,5 @@ export * from './keys';
 export { openEnvelope, checkInstructions, EnvelopeError, base64ToBytes } from './verify';
 export { Runner, FETCH_PER_MINUTE } from './runner';
 export type { Host, Terminal, StepOutcome } from './runner';
-export { MealioClient, CartSession, MealioError, SDK_CORE_VERSION, DEFAULT_BASE_URL } from './client';
-export type { ClientConfig, MealioErrorCode } from './client';
+export { MealioClient, CartSession, MealioError, SDK_CORE_VERSION, DEFAULT_BASE_URL, stepOf } from './client';
+export type { ClientConfig, MealioErrorCode, Step, StepListener } from './client';
