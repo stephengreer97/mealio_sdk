@@ -359,6 +359,45 @@ final class ClientTests: XCTestCase {
         }
     }
 
+    // Same as the TS "keeps a quantity per item, clamped to 1 and the store
+    // cap, in selections and the total" test.
+    @MainActor
+    func testKeepsAQuantityPerItemClampedToOneAndTheStoreCap() throws {
+        let json = #"""
+        {"cartId":"c1","store":"heb",
+         "items":[
+          {"key":"onion","ingredient":"onion","quantity":2,"status":"remembered","selectedId":"o1",
+           "remembered":{"id":"o1","name":"Onion","unitPrice":1.5,"maxQuantity":3},
+           "options":[{"id":"o1","name":"Onion","unitPrice":1.5,"maxQuantity":3},{"id":"o2","name":"Red Onion"}]},
+          {"key":"garlic","ingredient":"garlic","quantity":1,"status":"choose","selectedId":null,"remembered":null,
+           "options":[{"id":"g1","name":"Garlic"}]},
+          {"key":"saffron","ingredient":"saffron","quantity":1,"status":"unavailable","selectedId":null,"remembered":null,"options":[],"reason":"no_results"}
+         ],
+         "ready":[],"needsChoice":[],"unavailable":[]}
+        """#
+        let session = try makeSession(makeClient(keys: TestSigner.keys), json: json)
+        XCTAssertEqual(session.quantity(for: "onion"), 2)
+        XCTAssertEqual(session.setQuantity(key: "onion", to: 9), 3)
+        XCTAssertEqual(session.setQuantity(key: "onion", to: 0), 1)
+        session.setQuantity(key: "onion", to: 3)
+        XCTAssertEqual(session.selections()[0], Selection(key: "onion", productId: "o1", quantity: 3, remember: true))
+        XCTAssertEqual(session.estimate().total, 4.5, accuracy: 0.001)
+        try session.select(key: "onion", productId: "o2")
+        XCTAssertEqual(session.maxQuantity(for: "onion"), 99)
+        XCTAssertEqual(session.quantity(for: "onion"), 3)
+    }
+
+    func testQuantityFieldsDecodeAndAreOptional() throws {
+        let p = try JSONDecoder().decode(Product.self, from: Data(#"{"id":"f1","name":"Salmon","maxQuantity":4,"soldByWeight":true,"weightOptions":[0.5,1,1.5]}"#.utf8))
+        XCTAssertEqual(p.maxQuantity, 4)
+        XCTAssertEqual(p.soldByWeight, true)
+        XCTAssertEqual(p.weightOptions, [0.5, 1, 1.5])
+        let old = try JSONDecoder().decode(Product.self, from: Data(#"{"id":"o1","name":"Onion","maxQuantity":null}"#.utf8))
+        XCTAssertNil(old.maxQuantity)
+        XCTAssertNil(old.soldByWeight)
+        XCTAssertNil(old.weightOptions)
+    }
+
     @MainActor
     func testEstimateTotalsSelectedItemsAndFlagsEstimates() throws {
         let session = try makeSession(makeClient(keys: TestSigner.keys), json: ClientTests.newCartJSON)

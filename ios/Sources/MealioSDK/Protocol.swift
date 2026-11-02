@@ -508,10 +508,17 @@ public struct Product: Codable, Equatable, Identifiable {
     /// Sold by weight: the price is the store's estimate. False when the
     /// server did not say.
     public let estimated: Bool
+    /// The store's per-order cap, when it states one.
+    public let maxQuantity: Int?
+    /// Sold by weight (deli, fish counter).
+    public let soldByWeight: Bool?
+    /// Weights offered for a sold-by-weight item, in lb.
+    public let weightOptions: [Double]?
 
     public init(id: String, name: String, price: String? = nil, imageUrl: String? = nil, size: String? = nil,
                 outOfStock: Bool? = nil, badge: String? = nil, preferences: [ProductPreference]? = nil,
-                unitPrice: Double? = nil, estimated: Bool = false) {
+                unitPrice: Double? = nil, estimated: Bool = false, maxQuantity: Int? = nil,
+                soldByWeight: Bool? = nil, weightOptions: [Double]? = nil) {
         self.id = id
         self.name = name
         self.price = price
@@ -522,10 +529,14 @@ public struct Product: Codable, Equatable, Identifiable {
         self.preferences = preferences
         self.unitPrice = unitPrice
         self.estimated = estimated
+        self.maxQuantity = maxQuantity
+        self.soldByWeight = soldByWeight
+        self.weightOptions = weightOptions
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, price, imageUrl, size, outOfStock, badge, preferences, unitPrice, estimated
+        case maxQuantity, soldByWeight, weightOptions
     }
 
     public init(from decoder: Decoder) throws {
@@ -540,6 +551,9 @@ public struct Product: Codable, Equatable, Identifiable {
         preferences = try c.decodeIfPresent([ProductPreference].self, forKey: .preferences)
         unitPrice = try c.decodeIfPresent(Double.self, forKey: .unitPrice)
         estimated = try c.decodeIfPresent(Bool.self, forKey: .estimated) ?? false
+        maxQuantity = try c.decodeIfPresent(Int.self, forKey: .maxQuantity)
+        soldByWeight = try c.decodeIfPresent(Bool.self, forKey: .soldByWeight)
+        weightOptions = try c.decodeIfPresent([Double].self, forKey: .weightOptions)
     }
 }
 

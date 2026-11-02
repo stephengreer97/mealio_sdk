@@ -149,6 +149,45 @@ class CartSessionTest {
     }
 
     @Test
+    fun keepsAQuantityPerItemClampedToOneAndTheStoreCapInSelectionsAndTheTotal() {
+        val p2 = prepared()
+        val onionItem = p2.getJSONArray("items").getJSONObject(0)
+        val capped = product("o1", "Onion", unitPrice = 1.5).put("maxQuantity", 3)
+        onionItem.getJSONArray("options").put(0, capped)
+        onionItem.put("remembered", capped)
+        onionItem.put("quantity", 2)
+        val cs = session(p2)
+        assertEquals(2, cs.quantity("onion"))
+        assertEquals(3, cs.setQuantity("onion", 9))
+        assertEquals(1, cs.setQuantity("onion", 0))
+        cs.setQuantity("onion", 3)
+        val sel = cs.selections()[0]
+        assertEquals("onion", sel.key)
+        assertEquals("o1", sel.productId)
+        assertEquals(3, sel.quantity)
+        assertEquals(4.5, cs.estimate().total, 1e-9)
+        cs.select("onion", "o2")
+        assertEquals(99, cs.maxQuantity("onion"))
+        assertEquals(3, cs.quantity("onion"))
+        val p3 = prepared()
+        p3.getJSONArray("items").getJSONObject(0).put("quantity", 0)
+        assertEquals(1, session(p3).quantity("onion"))
+    }
+
+    @Test
+    fun productParsesQuantityFieldsAndOldPayloadsStillParse() {
+        val p = Product.fromJson(JSONObject().put("id", "f1").put("name", "Salmon").put("maxQuantity", 5)
+            .put("soldByWeight", true).put("weightOptions", JSONArray().put(0.5).put(1).put(1.5)))
+        assertEquals(5, p.maxQuantity)
+        assertEquals(true, p.soldByWeight)
+        assertEquals(listOf(0.5, 1.0, 1.5), p.weightOptions)
+        val old = Product.fromJson(JSONObject().put("id", "x").put("name", "X"))
+        assertNull(old.maxQuantity)
+        assertNull(old.soldByWeight)
+        assertNull(old.weightOptions)
+    }
+
+    @Test
     fun estimateIsFlaggedForWeightAndUnpricedItems() {
         val json = JSONObject().put("cartId", "c1").put("store", "heb")
             .put("items", JSONArray()

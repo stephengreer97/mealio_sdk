@@ -40,7 +40,7 @@ class _Pick {
 }
 
 /// A prepared cart. A [ChangeNotifier]: it notifies after [select],
-/// [deselect] and [search], so widgets can rebuild with a
+/// [deselect], [setQuantity] and [search], so widgets can rebuild with a
 /// `ListenableBuilder`.
 class CartSession extends ChangeNotifier {
   CartSession(this._client, this.cart) {
@@ -58,6 +58,7 @@ class CartSession extends ChangeNotifier {
   // Insertion-ordered, like the reference's Map.
   final Map<String, _Pick> _picks = <String, _Pick>{};
   final Map<String, List<Product>> _extra = <String, List<Product>>{};
+  final Map<String, int> _qty = <String, int>{};
 
   String get cartId => cart.cartId;
   String get store => cart.store;
@@ -89,6 +90,31 @@ class CartSession extends ChangeNotifier {
   }
 
   String? selectedId(String key) => _picks[key]?.productId;
+
+  /// Packages to add for an item: the recipe's quantity (at least 1) until
+  /// the user changes it.
+  int quantity(String key) {
+    final stored = _qty[key];
+    if (stored != null) return stored;
+    final q = _find(key)?.quantity ?? 1;
+    return q < 1 ? 1 : q;
+  }
+
+  /// The most the user can add: the selected product's store cap, else 99.
+  int maxQuantity(String key) {
+    final cap = selected(key)?.maxQuantity;
+    return cap != null && cap > 0 ? (cap < 99 ? cap : 99) : 99;
+  }
+
+  /// Set the quantity, clamped to 1 and the store's cap. Returns what was
+  /// set.
+  int setQuantity(String key, int n) {
+    final v = n.clamp(1, maxQuantity(key));
+    _qty[key] = v;
+    notifyListeners();
+    return v;
+  }
+
   bool isSelected(String key) => _picks.containsKey(key);
   int selectedCount() => _picks.length;
 
@@ -144,7 +170,7 @@ class CartSession extends ChangeNotifier {
           : Selection(
               key: it.key,
               productId: p.productId,
-              quantity: it.quantity,
+              quantity: _clampedQuantity(it.key),
               remember: true,
               preferenceId: p.preferenceId,
             );
@@ -163,7 +189,7 @@ class CartSession extends ChangeNotifier {
       count += 1;
       final unit = p.unitPrice;
       if (unit != null) {
-        total += unit * (it.quantity == 0 ? 1 : it.quantity);
+        total += unit * _clampedQuantity(it.key);
       } else {
         unpriced += 1;
       }
@@ -199,6 +225,12 @@ class CartSession extends ChangeNotifier {
       if (s.key == key) return s.productId == null ? null : s;
     }
     return null;
+  }
+
+  int _clampedQuantity(String key) {
+    final q = quantity(key);
+    final max = maxQuantity(key);
+    return q < max ? q : max;
   }
 
   static List<Product> _baseOptions(CartItem it) {

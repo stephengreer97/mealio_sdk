@@ -207,6 +207,9 @@ describe('cart session', () => {
     cs.select('onion', 'o2');
     expect(cs.maxQuantity('onion')).toBe(99);
     expect(cs.quantity('onion')).toBe(3);
+    const p3 = JSON.parse(JSON.stringify(prepared));
+    p3.items[0].quantity = 0;
+    expect(new CartSession({} as any, p3).quantity('onion')).toBe(1);
   });
 
   it('adds searched products to an item and lets the user pick one', async () => {

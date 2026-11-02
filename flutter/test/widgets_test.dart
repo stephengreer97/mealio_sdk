@@ -96,6 +96,71 @@ const Recipe _recipe = Recipe(
 
 void main() {
   group('MealioCartList', () {
+    testWidgets('a quantity stepper on checked rows changes the total, bounded by the store cap',
+        (WidgetTester tester) async {
+      _phone(tester);
+      final cart = _cart();
+      final onion = (cart['items']! as List<Object?>).first! as Map<String, Object?>;
+      (onion['options']! as List<Object?>)[0] = <String, Object?>{
+        'id': 'o1',
+        'name': 'Yellow Onion',
+        'price': r'$1.25',
+        'unitPrice': 1.25,
+        'maxQuantity': 2,
+      };
+      final s = _session(cart: cart);
+      await tester.pumpWidget(MaterialApp(home: Scaffold(body: MealioCartList(session: s, onAdd: () {}))));
+
+      expect(find.text('Quantity'), findsOneWidget);
+      expect(find.bySemanticsLabel('Quantity 1'), findsOneWidget);
+      final fewer = find.bySemanticsLabel('Fewer onion');
+      final more = find.bySemanticsLabel('More onion');
+      expect(tester.getSize(fewer).width, greaterThanOrEqualTo(44));
+      expect(tester.getSize(more).width, greaterThanOrEqualTo(44));
+      expect(tester.getSemantics(fewer),
+          isSemantics(label: 'Fewer onion', isButton: true, isEnabled: false, hasTapAction: false));
+      expect(tester.getSemantics(more),
+          isSemantics(label: 'More onion', isButton: true, isEnabled: true, hasTapAction: true));
+
+      await tester.tap(more);
+      await tester.pump();
+      expect(s.quantity('onion'), 2);
+      expect(find.bySemanticsLabel('Quantity 2'), findsOneWidget);
+      expect(find.text(r'$2.50'), findsOneWidget);
+      expect(find.text('Add 1 item to H-E-B'), findsOneWidget);
+      // At the cap: More is disabled and a tap does nothing.
+      expect(tester.getSemantics(more),
+          isSemantics(label: 'More onion', isButton: true, isEnabled: false, hasTapAction: false));
+      await tester.tap(more);
+      await tester.pump();
+      expect(s.quantity('onion'), 2);
+
+      await tester.tap(fewer);
+      await tester.pump();
+      expect(s.quantity('onion'), 1);
+      expect(find.text(r'$1.25'), findsWidgets);
+
+      // Unchecked rows show no stepper.
+      await tester.tap(find.bySemanticsLabel('Leave out onion'));
+      await tester.pump();
+      expect(find.text('Quantity'), findsNothing);
+    });
+
+    testWidgets('a sold-by-weight pick is labelled so', (WidgetTester tester) async {
+      _phone(tester);
+      final cart = _cart();
+      final onion = (cart['items']! as List<Object?>).first! as Map<String, Object?>;
+      (onion['options']! as List<Object?>)[0] = <String, Object?>{
+        'id': 'o1',
+        'name': 'Yellow Onion',
+        'unitPrice': 1.25,
+        'soldByWeight': true,
+      };
+      await tester.pumpWidget(MaterialApp(home: Scaffold(body: MealioCartList(session: _session(cart: cart)))));
+      expect(find.text('Sold by weight'), findsOneWidget);
+      expect(find.text('Quantity'), findsNothing);
+    });
+
     testWidgets('shows the count and CTA, and unchecking changes them', (WidgetTester tester) async {
       _phone(tester);
       final s = _session();
@@ -111,6 +176,8 @@ void main() {
       expect(find.textContaining('You check out'), findsNothing);
       await tester.scrollUntilVisible(find.text('Not found at H-E-B'), 200, scrollable: find.byType(Scrollable).first);
       expect(find.text('Not found at H-E-B'), findsOneWidget);
+      await tester.scrollUntilVisible(find.textContaining('Your usual picks stay saved for next time'), 200,
+          scrollable: find.byType(Scrollable).first);
       expect(find.textContaining('Your usual picks stay saved for next time'), findsOneWidget);
       await tester.drag(find.byType(Scrollable).first, const Offset(0, 2000));
       await tester.pumpAndSettle();

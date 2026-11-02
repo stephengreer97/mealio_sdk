@@ -42,6 +42,8 @@ public final class CartSession: ObservableObject {
     @Published private var picks: [String: Pick] = [:]
     /// Options found with `search`, by item key, newest first.
     @Published private var extra: [String: [Product]] = [:]
+    /// Quantities the user changed, by item key.
+    @Published private var qty: [String: Int] = [:]
 
     init(client: MealioClient, cart: PreparedCart) {
         self.client = client
@@ -82,6 +84,25 @@ public final class CartSession: ObservableObject {
     public func selectedId(for key: String) -> String? { picks[key]?.productId }
     /// The preference picked with the selected product, if any.
     public func preferenceId(for key: String) -> String? { picks[key]?.preferenceId }
+    /// Packages to add for an item: the recipe's quantity until the user changes it.
+    public func quantity(for key: String) -> Int {
+        qty[key] ?? max(1, find(key)?.quantity ?? 1)
+    }
+
+    /// The most the user can add: the selected product's store cap, else 99.
+    public func maxQuantity(for key: String) -> Int {
+        if let cap = selected(for: key)?.maxQuantity, cap > 0 { return min(99, cap) }
+        return 99
+    }
+
+    /// Set the quantity, clamped to 1 and the store's cap. Returns what was set.
+    @discardableResult
+    public func setQuantity(key: String, to n: Int) -> Int {
+        let v = max(1, min(maxQuantity(for: key), n))
+        qty[key] = v
+        return v
+    }
+
     public func isSelected(_ key: String) -> Bool { picks[key] != nil }
     public var selectedCount: Int { picks.count }
 
@@ -124,7 +145,7 @@ public final class CartSession: ObservableObject {
     public func selections() -> [Selection] {
         items.map { (it: CartItem) -> Selection in
             if let p = picks[it.key] {
-                return Selection(key: it.key, productId: p.productId, quantity: it.quantity, remember: true, preferenceId: p.preferenceId)
+                return Selection(key: it.key, productId: p.productId, quantity: min(quantity(for: it.key), maxQuantity(for: it.key)), remember: true, preferenceId: p.preferenceId)
             }
             return Selection(key: it.key, productId: nil, remember: false)
         }
@@ -145,7 +166,7 @@ public final class CartSession: ObservableObject {
             guard let p = selected(for: it.key) else { continue }
             count += 1
             if let unit = p.unitPrice {
-                total += unit * Double(it.quantity > 0 ? it.quantity : 1)
+                total += unit * Double(min(quantity(for: it.key), maxQuantity(for: it.key)))
             } else {
                 unpriced += 1
             }

@@ -309,6 +309,12 @@ data class Product(
     val unitPrice: Double? = null,
     /** Sold by weight: the price is the store's estimate. */
     val estimated: Boolean = false,
+    /** The store's per-order cap, when it states one. */
+    val maxQuantity: Int? = null,
+    /** Sold by weight (deli, fish counter). */
+    val soldByWeight: Boolean? = null,
+    /** Weights offered for a sold-by-weight item, in lb. */
+    val weightOptions: List<Double>? = null,
 ) {
     companion object {
         fun fromJson(o: JSONObject): Product = Product(
@@ -323,6 +329,11 @@ data class Product(
                 ?: emptyList(),
             unitPrice = o.num("unitPrice")?.takeIf { it.isFinite() },
             estimated = o.bool("estimated") ?: false,
+            maxQuantity = o.num("maxQuantity")?.takeIf { it.isFinite() }?.toInt(),
+            soldByWeight = o.bool("soldByWeight"),
+            weightOptions = o.arr("weightOptions")?.let { a ->
+                (0 until a.length()).mapNotNull { i -> (a.opt(i) as? Number)?.toDouble()?.takeIf { it.isFinite() } }
+            },
         )
     }
 }

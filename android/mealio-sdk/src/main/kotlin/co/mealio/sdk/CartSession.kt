@@ -30,6 +30,7 @@ class CartSession internal constructor(
 
     private val picks = LinkedHashMap<String, Pick>()
     private val extra = HashMap<String, List<Product>>()
+    private val qty = HashMap<String, Int>()
 
     init {
         for (it in items) {
@@ -62,6 +63,25 @@ class CartSession internal constructor(
 
     @Synchronized
     fun selectedId(key: String): String? = picks[key]?.productId
+
+    /** Packages to add for an item: the recipe's quantity (at least 1) until the user changes it. */
+    @Synchronized
+    fun quantity(key: String): Int = qty[key] ?: maxOf(1, find(key)?.quantity ?: 1)
+
+    /** The most the user can add: the selected product's store cap, else 99. */
+    @Synchronized
+    fun maxQuantity(key: String): Int {
+        val cap = selected(key)?.maxQuantity
+        return if (cap != null && cap > 0) minOf(99, cap) else 99
+    }
+
+    /** Set the quantity, clamped to 1 and the store's cap. Returns what was set. */
+    @Synchronized
+    fun setQuantity(key: String, n: Int): Int {
+        val v = maxOf(1, minOf(maxQuantity(key), n))
+        qty[key] = v
+        return v
+    }
 
     @Synchronized
     fun isSelected(key: String): Boolean = key in picks
@@ -119,7 +139,7 @@ class CartSession internal constructor(
     @Synchronized
     fun selections(): List<Selection> = items.map { it ->
         val p = picks[it.key]
-        if (p != null) Selection(it.key, p.productId, quantity = it.quantity, remember = true, preferenceId = p.preferenceId)
+        if (p != null) Selection(it.key, p.productId, quantity = minOf(quantity(it.key), maxQuantity(it.key)), remember = true, preferenceId = p.preferenceId)
         else Selection(it.key, null, remember = false)
     }
 
@@ -137,7 +157,7 @@ class CartSession internal constructor(
             val p = selected(it.key) ?: continue
             count += 1
             val u = p.unitPrice
-            if (u != null) total += u * (if (it.quantity == 0) 1 else it.quantity) else unpriced += 1
+            if (u != null) total += u * minOf(quantity(it.key), maxQuantity(it.key)) else unpriced += 1
             if (p.estimated) estimated = true
         }
         // Math.round(total * 100) / 100 in the reference (half rounds up).

@@ -209,7 +209,7 @@ export class CartSession {
 
   /** Packages to add for an item: the recipe's quantity until the user changes it. */
   quantity(key: string): number {
-    return this.qty.get(key) ?? this.find(key)?.quantity ?? 1;
+    return this.qty.get(key) ?? Math.max(1, Math.floor(this.find(key)?.quantity || 1));
   }
 
   /** The most the user can add: the selected product's store cap, else 99. */

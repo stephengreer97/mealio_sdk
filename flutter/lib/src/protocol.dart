@@ -518,6 +518,9 @@ class Product {
     this.preferences = const <ProductPreference>[],
     this.unitPrice,
     this.estimated = false,
+    this.maxQuantity,
+    this.soldByWeight,
+    this.weightOptions,
   });
 
   factory Product.fromJson(Object? json) {
@@ -533,6 +536,11 @@ class Product {
       preferences: _list(m['preferences']).map(ProductPreference.fromJson).toList(),
       unitPrice: m['unitPrice'] is num ? (m['unitPrice']! as num).toDouble() : null,
       estimated: _bool(m['estimated']),
+      maxQuantity: _intOrNull(m['maxQuantity']),
+      soldByWeight: m['soldByWeight'] is bool ? m['soldByWeight']! as bool : null,
+      weightOptions: m['weightOptions'] is List
+          ? _list(m['weightOptions']).whereType<num>().map((num n) => n.toDouble()).toList()
+          : null,
     );
   }
 
@@ -559,6 +567,15 @@ class Product {
   /// Sold by weight: the price is the store's estimate.
   final bool estimated;
 
+  /// The store's per-order cap, when it states one.
+  final int? maxQuantity;
+
+  /// Sold by weight (deli, fish counter).
+  final bool? soldByWeight;
+
+  /// Weights offered for a sold-by-weight item, in lb.
+  final List<double>? weightOptions;
+
   Map<String, Object?> toJson() {
     final out = <String, Object?>{'id': id, 'name': name};
     _put(out, 'price', price);
@@ -569,6 +586,9 @@ class Product {
     if (preferences.isNotEmpty) out['preferences'] = preferences.map((ProductPreference p) => p.toJson()).toList();
     _put(out, 'unitPrice', unitPrice);
     if (estimated) out['estimated'] = true;
+    _put(out, 'maxQuantity', maxQuantity);
+    _put(out, 'soldByWeight', soldByWeight);
+    _put(out, 'weightOptions', weightOptions);
     return out;
   }
 }

@@ -696,6 +696,10 @@ struct MealioItemRow: View {
             .padding(.vertical, 10)
             .padding(.trailing, 6)
 
+            if on, let picked = picked {
+                quantityRow(picked: picked)
+            }
+
             if item.status == .rememberedUnavailable && !on {
                 MealioWarnBox(t: t, text: rememberedUnavailableText)
                     .padding(.horizontal, 12)
@@ -709,6 +713,51 @@ struct MealioItemRow: View {
         .background(t.background)
         .clipShape(cardShape)
         .overlay(cardShape.strokeBorder(isOpen ? t.muted : t.border, lineWidth: 1))
+    }
+
+    private func quantityRow(picked: Product) -> some View {
+        let n = cart.quantity(for: item.key)
+        let atMin = n <= 1
+        let atMax = n >= cart.maxQuantity(for: item.key)
+        return HStack {
+            Text(picked.soldByWeight == true ? "Sold by weight" : "Quantity")
+                .font(t.font(12))
+                .foregroundColor(t.muted)
+            Spacer(minLength: 8)
+            HStack(spacing: 4) {
+                stepButton("\u{2212}", label: "Fewer \(item.ingredient)", off: atMin) {
+                    _ = cart.setQuantity(key: item.key, to: n - 1)
+                }
+                Text("\(n)")
+                    .font(t.font(16, .bold))
+                    .foregroundColor(t.text)
+                    .frame(minWidth: 28)
+                    .multilineTextAlignment(.center)
+                    .accessibilityLabel("Quantity \(n)")
+                stepButton("+", label: "More \(item.ingredient)", off: atMax) {
+                    _ = cart.setQuantity(key: item.key, to: n + 1)
+                }
+            }
+        }
+        .padding(.leading, 58)
+        .padding(.trailing, 12)
+        .padding(.bottom, 10)
+    }
+
+    private func stepButton(_ glyph: String, label: String, off: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(glyph)
+                .font(t.font(20, .semibold))
+                .foregroundColor(t.text)
+                .frame(width: 44, height: 36)
+                .background(RoundedRectangle(cornerRadius: 10).fill(t.surface))
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+                .opacity(off ? 0.4 : 1)
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled || off)
+        .accessibilityLabel(label)
     }
 
     private var rememberedUnavailableText: String {

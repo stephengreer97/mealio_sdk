@@ -741,6 +741,61 @@ void main() {
       expect(e.estimated, isFalse);
     });
 
+    test('keeps a quantity per item, clamped to 1 and the store cap, in selections and the total', () {
+      final cart = prepared();
+      final onion = (cart['items']! as List<Object?>).first! as Map<String, Object?>;
+      final capped = <String, Object?>{'id': 'o1', 'name': 'Onion', 'unitPrice': 1.5, 'maxQuantity': 3};
+      (onion['options']! as List<Object?>)[0] = capped;
+      onion['remembered'] = capped;
+      onion['quantity'] = 2;
+      final s = session(cart: cart);
+      expect(s.quantity('onion'), 2);
+      expect(s.setQuantity('onion', 9), 3);
+      expect(s.setQuantity('onion', 0), 1);
+      s.setQuantity('onion', 3);
+      expect(s.selections().first.toJson(), <String, Object?>{
+        'key': 'onion',
+        'productId': 'o1',
+        'quantity': 3,
+        'remember': true,
+        'preferenceId': 'diced',
+      });
+      expect(s.estimate().total, closeTo(4.5, 1e-9));
+      s.select('onion', 'o2');
+      expect(s.maxQuantity('onion'), 99);
+      expect(s.quantity('onion'), 3);
+    });
+
+    test('a missing or 0 recipe quantity starts at 1, in selections and the total', () {
+      final cart = prepared();
+      final onion = (cart['items']! as List<Object?>).first! as Map<String, Object?>;
+      onion['quantity'] = 0;
+      final s = session(cart: cart);
+      expect(s.items.first.quantity, 0);
+      expect(s.quantity('onion'), 1);
+      expect(s.selections().first.quantity, 1);
+      expect(s.estimate().total, 1.0);
+      onion.remove('quantity');
+      expect(session(cart: cart).quantity('onion'), 1);
+    });
+
+    test('parses the optional quantity fields, and old payloads without them', () {
+      final p = Product.fromJson(<String, Object?>{
+        'id': 'f1',
+        'name': 'Salmon',
+        'maxQuantity': 4,
+        'soldByWeight': true,
+        'weightOptions': <Object?>[0.5, 1, 1.5],
+      });
+      expect(p.maxQuantity, 4);
+      expect(p.soldByWeight, isTrue);
+      expect(p.weightOptions, <double>[0.5, 1.0, 1.5]);
+      final old = Product.fromJson(<String, Object?>{'id': 'o1', 'name': 'Onion'});
+      expect(old.maxQuantity, isNull);
+      expect(old.soldByWeight, isNull);
+      expect(old.weightOptions, isNull);
+    });
+
     test('estimate is flagged estimated for sold-by-weight or unpriced items', () {
       final s = session();
       s.select('beef', 'b1');

@@ -397,6 +397,8 @@ class _ItemRowState extends State<_ItemRow> {
 
     final children = <Widget>[row];
 
+    if (on && picked != null) children.add(_quantityRow(t, picked));
+
     if (item.status == ItemStatus.rememberedUnavailable && !on) {
       final r = item.remembered;
       children.add(WarnBox(
@@ -414,6 +416,63 @@ class _ItemRowState extends State<_ItemRow> {
       decoration: cardDecoration,
       clipBehavior: Clip.antiAlias,
       child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: children),
+    );
+  }
+
+  Widget _quantityRow(MealioTheme t, Product picked) {
+    final key = _item.key;
+    final q = _s.quantity(key);
+    final max = _s.maxQuantity(key);
+    return Padding(
+      padding: const EdgeInsets.only(left: 58, right: 12, bottom: 10),
+      child: Row(
+        children: <Widget>[
+          Expanded(
+            child: Text(picked.soldByWeight == true ? 'Sold by weight' : 'Quantity',
+                style: t.style(size: 12, height: 17 / 12, color: t.muted)),
+          ),
+          _stepButton(t, '−', 'Fewer ${_item.ingredient}', q > 1, () => _s.setQuantity(key, q - 1)),
+          const SizedBox(width: 4),
+          Semantics(
+            container: true,
+            label: 'Quantity $q',
+            excludeSemantics: true,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minWidth: 28),
+              child: Text('$q', textAlign: TextAlign.center, style: t.style(size: 16, weight: FontWeight.w700)),
+            ),
+          ),
+          const SizedBox(width: 4),
+          _stepButton(t, '+', 'More ${_item.ingredient}', q < max, () => _s.setQuantity(key, q + 1)),
+        ],
+      ),
+    );
+  }
+
+  Widget _stepButton(MealioTheme t, String glyph, String label, bool inBounds, VoidCallback onTap) {
+    final enabled = inBounds && !widget.disabled;
+    return Semantics(
+      button: true,
+      enabled: enabled,
+      label: label,
+      onTap: enabled ? onTap : null,
+      excludeSemantics: true,
+      child: Opacity(
+        opacity: inBounds ? 1 : 0.4,
+        child: Material(
+          color: t.surface,
+          borderRadius: BorderRadius.circular(10),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: enabled ? onTap : null,
+            child: SizedBox(
+              width: 44,
+              height: 36,
+              child: Center(child: Text(glyph, style: t.style(size: 20, weight: FontWeight.w600))),
+            ),
+          ),
+        ),
+      ),
     );
   }
 

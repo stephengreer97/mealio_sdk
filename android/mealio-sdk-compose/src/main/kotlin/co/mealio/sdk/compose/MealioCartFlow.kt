@@ -567,6 +567,24 @@ private fun Cta(
     ) { content() }
 }
 
+@Composable
+private fun StepButton(t: MealioTheme, symbol: String, label: String, enabled: Boolean, dim: Boolean, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(10.dp)
+    Box(
+        Modifier
+            .widthIn(min = 44.dp)
+            .height(36.dp)
+            .alpha(if (dim) 0.4f else 1f)
+            .clip(shape)
+            .background(t.surface)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = label },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(symbol, style = t.ts(20, FontWeight.SemiBold))
+    }
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ItemRow(
@@ -723,6 +741,34 @@ private fun ItemRow(
                     if (open) "Done" else if (on || item.status == ItemStatus.REMEMBERED) "Change" else "Choose",
                     style = t.ts(14, FontWeight.SemiBold, t.accent),
                 )
+            }
+        }
+
+        if (on && picked != null) {
+            val q = cart.quantity(item.key)
+            val max = cart.maxQuantity(item.key)
+            Row(
+                Modifier.fillMaxWidth().padding(start = 58.dp, end = 12.dp, bottom = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(if (picked.soldByWeight == true) "Sold by weight" else "Quantity", style = t.ts(12, color = t.muted, lineHeight = 17))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    StepButton(t, "−", "Fewer ${item.ingredient}", enabled = !disabled && q > 1, dim = q <= 1) {
+                        cart.setQuantity(item.key, cart.quantity(item.key) - 1)
+                        onChange()
+                    }
+                    Text(
+                        "$q",
+                        style = t.ts(16, FontWeight.Bold),
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.widthIn(min = 28.dp).semantics { contentDescription = "Quantity $q" },
+                    )
+                    StepButton(t, "+", "More ${item.ingredient}", enabled = !disabled && q < max, dim = q >= max) {
+                        cart.setQuantity(item.key, cart.quantity(item.key) + 1)
+                        onChange()
+                    }
+                }
             }
         }
 
