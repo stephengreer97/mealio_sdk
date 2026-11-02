@@ -177,6 +177,7 @@ export class MealioClient {
 export class CartSession {
   private picks = new Map<string, { productId: string; preferenceId: string | null }>();
   private extra = new Map<string, Product[]>();
+  private qty = new Map<string, number>();
 
   constructor(private client: MealioClient, public readonly cart: PreparedCart) {
     for (const it of this.items) {
@@ -205,6 +206,24 @@ export class CartSession {
   }
 
   selectedId(key: string): string | null { return this.picks.get(key)?.productId ?? null; }
+
+  /** Packages to add for an item: the recipe's quantity until the user changes it. */
+  quantity(key: string): number {
+    return this.qty.get(key) ?? this.find(key)?.quantity ?? 1;
+  }
+
+  /** The most the user can add: the selected product's store cap, else 99. */
+  maxQuantity(key: string): number {
+    const cap = this.selected(key)?.maxQuantity;
+    return typeof cap === 'number' && cap > 0 ? Math.min(99, cap) : 99;
+  }
+
+  /** Set the quantity, clamped to 1 and the store's cap. Returns what was set. */
+  setQuantity(key: string, n: number): number {
+    const v = Math.max(1, Math.min(this.maxQuantity(key), Math.floor(Number.isFinite(n) ? n : 1)));
+    this.qty.set(key, v);
+    return v;
+  }
   isSelected(key: string): boolean { return this.picks.has(key); }
   selectedCount(): number { return this.picks.size; }
 
@@ -230,7 +249,7 @@ export class CartSession {
     return this.items.map((it) => {
       const p = this.picks.get(it.key);
       return p
-        ? { key: it.key, productId: p.productId, quantity: it.quantity, remember: true, preferenceId: p.preferenceId }
+        ? { key: it.key, productId: p.productId, quantity: Math.min(this.quantity(it.key), this.maxQuantity(it.key)), remember: true, preferenceId: p.preferenceId }
         : { key: it.key, productId: null, remember: false };
     });
   }
@@ -255,7 +274,7 @@ export class CartSession {
       const p = this.selected(it.key);
       if (!p) continue;
       count += 1;
-      if (typeof p.unitPrice === 'number') total += p.unitPrice * (it.quantity || 1);
+      if (typeof p.unitPrice === 'number') total += p.unitPrice * Math.min(this.quantity(it.key), this.maxQuantity(it.key));
       else unpriced += 1;
       if (p.estimated) estimated = true;
     }

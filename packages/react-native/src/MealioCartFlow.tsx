@@ -326,6 +326,23 @@ function ItemRow({ t, cart, item, storeName, open, onToggleOpen, onChange, disab
         </Pressable>
       </View>
 
+      {on && picked ? (
+        <View style={s.qtyRow}>
+          <Text style={s.small}>{picked.soldByWeight ? 'Sold by weight' : 'Quantity'}</Text>
+          <View style={s.stepper}>
+            <Pressable onPress={() => { cart.setQuantity(item.key, cart.quantity(item.key) - 1); onChange(); }} disabled={disabled || cart.quantity(item.key) <= 1}
+              accessibilityRole="button" accessibilityLabel={`Fewer ${item.ingredient}`} style={[s.stepBtn, cart.quantity(item.key) <= 1 && s.stepOff]}>
+              <Text style={s.qtyText}>−</Text>
+            </Pressable>
+            <Text style={s.stepValue} accessibilityLabel={`Quantity ${cart.quantity(item.key)}`}>{cart.quantity(item.key)}</Text>
+            <Pressable onPress={() => { cart.setQuantity(item.key, cart.quantity(item.key) + 1); onChange(); }} disabled={disabled || cart.quantity(item.key) >= cart.maxQuantity(item.key)}
+              accessibilityRole="button" accessibilityLabel={`More ${item.ingredient}`} style={[s.stepBtn, cart.quantity(item.key) >= cart.maxQuantity(item.key) && s.stepOff]}>
+              <Text style={s.qtyText}>+</Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : null}
+
       {item.status === 'remembered_unavailable' && !on ? (
         <View style={s.warn}>
           <Text style={s.warnText}>Your usual{item.remembered ? `, ${item.remembered.name},` : ''} is {item.reason === 'not_found' ? 'not available' : 'out of stock'} today. Pick another for this run. It stays your usual.</Text>
@@ -520,6 +537,12 @@ function make(t: MealioTheme) {
     changeBtn: { minHeight: 44, paddingHorizontal: 10, justifyContent: 'center' },
     change: { ...f, fontSize: 14, fontWeight: '600', color: t.accent },
     warn: { marginHorizontal: 12, marginBottom: 12, padding: 12, borderRadius: 10, backgroundColor: t.warnBackground },
+    qtyRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingLeft: 58, paddingRight: 12, paddingBottom: 10 },
+    stepper: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+    stepBtn: { width: 44, height: 36, borderRadius: 10, backgroundColor: t.surface, alignItems: 'center', justifyContent: 'center' },
+    stepOff: { opacity: 0.4 },
+    qtyText: { ...f, fontSize: 20, fontWeight: '600', color: t.text },
+    stepValue: { ...f, minWidth: 28, textAlign: 'center', fontSize: 16, fontWeight: '700', color: t.text },
     warnText: { ...f, fontSize: 13, lineHeight: 18, color: t.warnText },
     expand: { borderTopWidth: 1, borderTopColor: t.border, paddingVertical: 12, gap: 12 },
     optRow: { paddingHorizontal: 12, gap: 10 },

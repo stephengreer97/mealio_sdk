@@ -192,6 +192,23 @@ describe('cart session', () => {
     ]);
   });
 
+  it('keeps a quantity per item, clamped to 1 and the store cap, in selections and the total', () => {
+    const p2 = JSON.parse(JSON.stringify(prepared));
+    p2.items[0].options[0] = { id: 'o1', name: 'Onion', unitPrice: 1.5, maxQuantity: 3 };
+    p2.items[0].remembered = p2.items[0].options[0];
+    p2.items[0].quantity = 2;
+    const cs = new CartSession({} as any, p2);
+    expect(cs.quantity('onion')).toBe(2);
+    expect(cs.setQuantity('onion', 9)).toBe(3);
+    expect(cs.setQuantity('onion', 0)).toBe(1);
+    cs.setQuantity('onion', 3);
+    expect(cs.selections()[0]).toMatchObject({ key: 'onion', productId: 'o1', quantity: 3 });
+    expect(cs.estimate().total).toBeCloseTo(4.5);
+    cs.select('onion', 'o2');
+    expect(cs.maxQuantity('onion')).toBe(99);
+    expect(cs.quantity('onion')).toBe(3);
+  });
+
   it('adds searched products to an item and lets the user pick one', async () => {
     const client = { search: async () => ({ key: 'garlic', query: 'jar', options: [{ id: 'g9', name: 'Minced Garlic Jar' }] }) } as any;
     const cs = new CartSession(client, prepared);

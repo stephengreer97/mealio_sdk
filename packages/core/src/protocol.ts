@@ -140,6 +140,12 @@ export interface Product {
   unitPrice?: number | null;
   /** Sold by weight: the price is the store's estimate. */
   estimated?: boolean;
+  /** The store's per-order cap, when it states one. */
+  maxQuantity?: number | null;
+  /** Sold by weight (deli, fish counter). */
+  soldByWeight?: boolean;
+  /** Weights offered for a sold-by-weight item, in lb. */
+  weightOptions?: number[];
 }
 
 export type ItemStatus = 'remembered' | 'choose' | 'remembered_unavailable' | 'unavailable';
