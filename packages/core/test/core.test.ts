@@ -212,6 +212,89 @@ describe('cart session', () => {
     expect(new CartSession({} as any, p3).quantity('onion')).toBe(1);
   });
 
+  describe('sold by weight', () => {
+    const turkey = { id: 't1', name: 'Deli Turkey', soldByWeight: true, estimated: true, pricePerLb: 10, unitPrice: 10, weightOptions: [0.25, 0.5, 0.75, 1, 1.25] };
+    const salmon = { id: 's1', name: 'Salmon', soldByWeight: true, estimated: true, pricePerLb: 12, unitPrice: 12 };
+    const brisket = { id: 'b1', name: 'Brisket, Avg. 4 lbs', soldByWeight: true, estimated: true, pricePerLb: null, unitPrice: 32 };
+    const cart = (over: Record<string, unknown> = {}) => ({
+      cartId: 'c1', store: 'heb', ready: [], needsChoice: [], unavailable: [],
+      items: [
+        { key: 'turkey', ingredient: 'deli turkey', quantity: 1, status: 'remembered', selectedId: 't1', remembered: turkey, options: [turkey, salmon, brisket], ...over },
+        { key: 'onion', ingredient: 'onion', quantity: 2, status: 'remembered', selectedId: 'o1', remembered: null, options: [{ id: 'o1', name: 'Onion', unitPrice: 1 }] },
+      ],
+    }) as any;
+
+    it('starts at the recipe weight, else the first option, else 0.25', () => {
+      expect(new CartSession({} as any, cart({ weightLb: 0.75 })).weight('turkey')).toBe(0.75);
+      // A recipe weight the store does not sell becomes the nearest one it does.
+      expect(new CartSession({} as any, cart({ weightLb: 0.6 })).weight('turkey')).toBe(0.5);
+      expect(new CartSession({} as any, cart()).weight('turkey')).toBe(0.25);
+      const cs = new CartSession({} as any, cart());
+      cs.select('turkey', 's1');
+      expect(cs.weight('turkey')).toBe(0.25);
+      expect(cs.weight('onion')).toBe(0);
+      expect(cs.isWeight('turkey')).toBe(true);
+      expect(cs.isWeight('onion')).toBe(false);
+    });
+
+    it('setWeight snaps to the options and clamps to their range', () => {
+      const cs = new CartSession({} as any, cart());
+      expect(cs.setWeight('turkey', 0.8)).toBe(0.75);
+      expect(cs.setWeight('turkey', 9)).toBe(1.25);
+      expect(cs.setWeight('turkey', 0)).toBe(0.25);
+      expect(cs.weightRange('turkey')).toEqual({ min: 0.25, max: 1.25 });
+      expect(cs.weight('turkey')).toBe(0.25);
+    });
+
+    it('with no options, 0.25 lb steps from 0.25 to 20', () => {
+      const cs = new CartSession({} as any, cart());
+      cs.select('turkey', 's1');
+      expect(cs.setWeight('turkey', 1.1)).toBe(1);
+      expect(cs.setWeight('turkey', 1.13)).toBe(1.25);
+      expect(cs.setWeight('turkey', 0.01)).toBe(0.25);
+      expect(cs.setWeight('turkey', 99)).toBe(20);
+      expect(cs.weightRange('turkey')).toEqual({ min: 0.25, max: 20 });
+      cs.setWeight('turkey', 1);
+      expect(cs.stepWeight('turkey', 1)).toBe(1.25);
+      expect(cs.stepWeight('turkey', -1)).toBe(1);
+    });
+
+    it('stepWeight walks the options and stops at the ends', () => {
+      const cs = new CartSession({} as any, cart());
+      expect(cs.stepWeight('turkey', -1)).toBe(0.25);
+      expect(cs.stepWeight('turkey', 1)).toBe(0.5);
+      cs.setWeight('turkey', 1.25);
+      expect(cs.stepWeight('turkey', 1)).toBe(1.25);
+      expect(cs.stepWeight('turkey', -1)).toBe(1);
+    });
+
+    it('switching product re-snaps the weight to the new product', () => {
+      const cs = new CartSession({} as any, cart());
+      cs.select('turkey', 's1');
+      cs.setWeight('turkey', 3);
+      cs.select('turkey', 't1');
+      expect(cs.weight('turkey')).toBe(1.25);
+    });
+
+    it('selections send weightLb for weight items only', () => {
+      const cs = new CartSession({} as any, cart({ weightLb: 1 }));
+      expect(cs.selections()).toEqual([
+        { key: 'turkey', productId: 't1', quantity: 1, weightLb: 1, remember: true, preferenceId: null },
+        { key: 'onion', productId: 'o1', quantity: 2, remember: true, preferenceId: null },
+      ]);
+    });
+
+    it('estimate is price per lb times the weight, and marked estimated', () => {
+      const cs = new CartSession({} as any, cart());
+      cs.setWeight('turkey', 1.25);
+      expect(cs.estimate()).toMatchObject({ total: 14.5, estimated: true, count: 2 });
+      // A package-priced weight item counts its price once, whatever the weight.
+      cs.select('turkey', 'b1');
+      cs.setWeight('turkey', 3);
+      expect(cs.estimate()).toMatchObject({ total: 34, estimated: true });
+    });
+  });
+
   it('adds searched products to an item and lets the user pick one', async () => {
     const client = { search: async () => ({ key: 'garlic', query: 'jar', options: [{ id: 'g9', name: 'Minced Garlic Jar' }] }) } as any;
     const cs = new CartSession(client, prepared);

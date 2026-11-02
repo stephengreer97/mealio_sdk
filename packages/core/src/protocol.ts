@@ -144,8 +144,13 @@ export interface Product {
   maxQuantity?: number | null;
   /** Sold by weight (deli, fish counter). */
   soldByWeight?: boolean;
-  /** Weights offered for a sold-by-weight item, in lb. */
+  /** Weights offered for a sold-by-weight item, in lb, ascending. Absent when the store lists none. */
   weightOptions?: number[];
+  /**
+   * Price per lb for a sold-by-weight item priced by the pound. Null for a
+   * weight item priced as a package. Absent on count items.
+   */
+  pricePerLb?: number | null;
 }
 
 export type ItemStatus = 'remembered' | 'choose' | 'remembered_unavailable' | 'unavailable';
@@ -154,6 +159,8 @@ export interface CartItem {
   key: string;
   ingredient: string;
   quantity: number;
+  /** The recipe's own weight for this line, in lb, when it gave one in a weight unit. */
+  weightLb?: number;
   /**
    * remembered              the user's remembered product, in stock, pre-selected
    * choose                  nothing remembered yet: the user picks
@@ -195,7 +202,8 @@ export interface SearchResult {
 export interface AddResult {
   cartId: string;
   store: string;
-  added: Array<{ key: string; productId: string; name: string; quantity: number }>;
+  /** weightLb is set on an item added by weight: the pounds asked for. */
+  added: Array<{ key: string; productId: string; name: string; quantity: number; weightLb?: number }>;
   skipped: Array<{ key: string; reason: string }>;
   failed: Array<{ key: string; productId: string; name: string; reason: string }>;
   storeCartUrl: string | null;
@@ -222,6 +230,12 @@ export interface Selection {
   remember?: boolean;
   /** Required when the chosen Product has `preferences`. */
   preferenceId?: string | null;
+  /**
+   * Pounds, for a Product with soldByWeight. Above 0 and at most 20. The
+   * store writes it by weight where it can (H-E-B, Albertsons family);
+   * elsewhere the item fails as weight_not_supported. Ignored for count items.
+   */
+  weightLb?: number;
 }
 
 export interface RecipeIngredient {

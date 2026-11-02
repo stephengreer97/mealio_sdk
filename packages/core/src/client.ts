@@ -174,10 +174,22 @@ export class MealioClient {
  * or deselect an item to leave it out of THIS run (its remembered choice is
  * kept for next time).
  */
+/** The weight step (lb) for a sold-by-weight item whose store lists no weights. */
+export const WEIGHT_STEP = 0.25;
+/** The most a selection may ask for, in lb. The server refuses more. */
+export const MAX_WEIGHT_LB = 20;
+
+function nearestIndex(opts: number[], v: number): number {
+  let best = 0;
+  opts.forEach((o, i) => { if (Math.abs(o - v) < Math.abs(opts[best] - v) - 1e-9) best = i; });
+  return best;
+}
+
 export class CartSession {
   private picks = new Map<string, { productId: string; preferenceId: string | null }>();
   private extra = new Map<string, Product[]>();
   private qty = new Map<string, number>();
+  private lb = new Map<string, number>();
 
   constructor(private client: MealioClient, public readonly cart: PreparedCart) {
     for (const it of this.items) {
@@ -224,6 +236,68 @@ export class CartSession {
     this.qty.set(key, v);
     return v;
   }
+
+  /** True when the selected product is sold by weight: use weight(), not quantity(). */
+  isWeight(key: string): boolean { return !!this.selected(key)?.soldByWeight; }
+
+  /**
+   * The lightest and heaviest weight (lb) the user can pick for the selected
+   * product: its first and last weightOption, else 0.25 to 20.
+   */
+  weightRange(key: string): { min: number; max: number } {
+    const opts = this.weightOptions(key);
+    if (!opts.length) return { min: WEIGHT_STEP, max: MAX_WEIGHT_LB };
+    return { min: opts[0], max: Math.min(MAX_WEIGHT_LB, opts[opts.length - 1]) };
+  }
+
+  /**
+   * Pounds to add for a sold-by-weight item: the user's, else the recipe's own
+   * weight, else the store's first weight option, else 0.25. Always a weight
+   * the selected product can be bought in (see setWeight). 0 for count items.
+   */
+  weight(key: string): number {
+    if (!this.isWeight(key)) return 0;
+    const set = this.lb.get(key);
+    if (set != null) return this.snapWeight(key, set);
+    const recipe = this.find(key)?.weightLb;
+    if (typeof recipe === 'number' && recipe > 0) return this.snapWeight(key, recipe);
+    return this.weightOptions(key)[0] ?? WEIGHT_STEP;
+  }
+
+  /**
+   * Set the weight in lb. Snapped to the nearest weightOption when the store
+   * lists them, else to 0.25 lb steps, and clamped to weightRange. Returns
+   * what was set.
+   */
+  setWeight(key: string, lb: number): number {
+    const v = this.snapWeight(key, Number.isFinite(lb) ? lb : 0);
+    this.lb.set(key, v);
+    return v;
+  }
+
+  /** One step heavier (+1) or lighter (-1): the next weightOption, else 0.25 lb. Returns the new weight. */
+  stepWeight(key: string, dir: 1 | -1): number {
+    const cur = this.weight(key);
+    const opts = this.weightOptions(key);
+    if (!opts.length) return this.setWeight(key, cur + dir * WEIGHT_STEP);
+    const i = nearestIndex(opts, cur);
+    return this.setWeight(key, opts[Math.max(0, Math.min(opts.length - 1, i + dir))]);
+  }
+
+  private weightOptions(key: string): number[] {
+    const raw = this.selected(key)?.weightOptions || [];
+    const opts = [...new Set(raw.map(Number).filter((n) => Number.isFinite(n) && n > 0 && n <= MAX_WEIGHT_LB))];
+    return opts.sort((a, b) => a - b);
+  }
+
+  private snapWeight(key: string, lb: number): number {
+    const { min, max } = this.weightRange(key);
+    const opts = this.weightOptions(key);
+    const v = Math.max(min, Math.min(max, lb));
+    if (opts.length) return opts[nearestIndex(opts, v)];
+    return Math.max(min, Math.min(max, Math.round(v / WEIGHT_STEP) * WEIGHT_STEP));
+  }
+
   isSelected(key: string): boolean { return this.picks.has(key); }
   selectedCount(): number { return this.picks.size; }
 
@@ -248,9 +322,11 @@ export class CartSession {
   selections(): Selection[] {
     return this.items.map((it) => {
       const p = this.picks.get(it.key);
-      return p
-        ? { key: it.key, productId: p.productId, quantity: Math.min(this.quantity(it.key), this.maxQuantity(it.key)), remember: true, preferenceId: p.preferenceId }
-        : { key: it.key, productId: null, remember: false };
+      if (!p) return { key: it.key, productId: null, remember: false };
+      if (this.isWeight(it.key)) {
+        return { key: it.key, productId: p.productId, quantity: 1, weightLb: this.weight(it.key), remember: true, preferenceId: p.preferenceId };
+      }
+      return { key: it.key, productId: p.productId, quantity: Math.min(this.quantity(it.key), this.maxQuantity(it.key)), remember: true, preferenceId: p.preferenceId };
     });
   }
 
@@ -265,8 +341,10 @@ export class CartSession {
   }
 
   /**
-   * Estimated total of the selected items: unit price times quantity. `estimated`
-   * is true when any item is sold by weight or has no price, so show it as "about".
+   * Estimated total of the selected items: unit price times quantity, and for a
+   * sold-by-weight item price per lb times the weight (one package price when
+   * the store prices it as a package). `estimated` is true when any item is
+   * sold by weight or has no price, so show it as "about".
    */
   estimate(): { total: number; count: number; estimated: boolean; unpriced: number } {
     let total = 0, count = 0, unpriced = 0, estimated = false;
@@ -274,6 +352,13 @@ export class CartSession {
       const p = this.selected(it.key);
       if (!p) continue;
       count += 1;
+      if (p.soldByWeight) {
+        estimated = true;
+        if (typeof p.pricePerLb === 'number') total += p.pricePerLb * this.weight(it.key);
+        else if (typeof p.unitPrice === 'number') total += p.unitPrice;
+        else unpriced += 1;
+        continue;
+      }
       if (typeof p.unitPrice === 'number') total += p.unitPrice * Math.min(this.quantity(it.key), this.maxQuantity(it.key));
       else unpriced += 1;
       if (p.estimated) estimated = true;

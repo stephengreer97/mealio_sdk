@@ -175,6 +175,55 @@ The last instruction of a job.
 The SDK hands `result` to the app (or raises the failure) and does not call
 `step` again for this job.
 
+## Products, items and selections
+
+A prepare job's `done.result` is a `PreparedCart` (`packages/core/src/protocol.ts`).
+The fields an SDK needs for amounts and prices:
+
+| Object | Field | Meaning |
+| --- | --- | --- |
+| `CartItem` | `quantity` | Packages to add, from the recipe |
+| `CartItem` | `weightLb` | The recipe's own weight for the line in lb, when it gave the amount in lb, oz, g or kg. Absent otherwise |
+| `Product` | `unitPrice` | One unit's price as a number, for an estimate |
+| `Product` | `estimated` | The price is an estimate (weighed or "Avg." items) |
+| `Product` | `maxQuantity` | The store's per-order cap, or null |
+| `Product` | `soldByWeight` | Bought by weight (deli, meat and fish counters). Use a weight, not a count |
+| `Product` | `weightOptions` | The weights in lb the store sells it in, ascending. Absent when it lists none |
+| `Product` | `pricePerLb` | Price per lb for a weight item priced by the pound. Null for one priced as a package. Absent on count items |
+
+`POST /api/v1/sdk/carts/{cart}/add` takes `{ "selections": Selection[] }`:
+
+```json
+{ "key": "deli turkey", "productId": "30", "quantity": 1, "weightLb": 1.25, "remember": true, "preferenceId": null }
+```
+
+- `productId: null` leaves the item out of this run. Its remembered choice stays.
+- `quantity` is a count, 1 to 99, clamped to the store's cap.
+- `weightLb` is the pounds for a `soldByWeight` product: a JSON number above 0
+  and at most 20, or the server answers 400 `bad_weight`. It is ignored for a
+  product that is not sold by weight.
+
+**What the SDK sends for a weight item.** `weightLb` is the user's weight,
+else the item's `weightLb`, else the first `weightOption`, else 0.25. The user
+steps through `weightOptions` when there are some, else in 0.25 lb steps from
+0.25 to 20. A weight is always snapped to a weight the product sells. The
+estimate is `pricePerLb × weightLb`, or the package `unitPrice` once when
+`pricePerLb` is null, and is always marked estimated.
+
+**What the server does with it.** The server snaps `weightLb` up to the next
+`weightOption` (or the largest one), then:
+
+| Store | Weight selection |
+| --- | --- |
+| H-E-B | Written by weight (`weight` on `addItemToCartV2`), on top of what the line already holds |
+| Albertsons family | Written as `qty: 1, selectedWeight: "1.25"`, on top of what the line holds, capped at the product's max |
+| Every other store, and the Kroger family | Not written. The item comes back in `failed` with reason `weight_not_supported` |
+
+A weight line is verified by its weight: it is `added` only when the cart
+holds a weight line of the product of at least `weightLb`, and the added entry
+carries `weightLb`. A weight item retried after the first read is written only
+if the cart holds no line of it, so its pounds are never added twice.
+
 ## Allowlist
 
 The SDK refuses (`error: "blocked"`) any `page_open`, `fetch` or login
@@ -242,3 +291,4 @@ then switching the server's `kid`.
 | `session_expired` | The SDK session token expired; get a new one from your server |
 | `network` | Could not reach Mealio |
 | `unsupported` | An instruction `op` this SDK does not know |
+| `bad_weight` | A selection's `weightLb` was not a number above 0 and at most 20 |
