@@ -378,7 +378,7 @@ function ItemRow({ t, cart, item, storeName, open, onToggleOpen, onChange, disab
 
       {item.status === 'remembered_unavailable' && !on ? (
         <View style={s.warn}>
-          <Text style={s.warnText}>Your usual{item.remembered ? `, ${item.remembered.name},` : ''} is {item.reason === 'not_found' ? 'not available' : 'out of stock'} today. Pick another for this run. It stays your usual.</Text>
+          <Text style={s.warnText}>Your usual{item.remembered ? `, ${item.remembered.name},` : ''} is {item.reason === 'not_found' ? 'not available' : 'out of stock'} today. Pick another this time. It stays your usual.</Text>
         </View>
       ) : null}
 
@@ -449,7 +449,7 @@ function Done({ t, cart, result, storeName, onDone }: { t: MealioTheme; cart: Ca
   const [open, setOpen] = useState(() => result.failed.length > 0);
   const subtitle = [
     sum.total != null ? `${sum.estimated ? 'about ' : ''}${money(sum.total)}` : 'Prices at checkout',
-    result.verified ? 'checked in your cart' : null,
+    null,
   ].filter(Boolean).join(' · ');
   const title = n ? `${n} item${n === 1 ? '' : 's'} added` : 'Nothing was added';
   return (

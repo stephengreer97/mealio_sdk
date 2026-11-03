@@ -797,7 +797,7 @@ struct MealioItemRow: View {
     private var rememberedUnavailableText: String {
         let name = item.remembered.map { ", \($0.name)," } ?? ""
         let state = item.reason == "not_found" ? "not available" : "out of stock"
-        return "Your usual\(name) is \(state) today. Pick another for this run. It stays your usual."
+        return "Your usual\(name) is \(state) today. Pick another this time. It stays your usual."
     }
 
     private func meta(on: Bool, picked: Product?, options: [Product]) -> String {
@@ -1086,7 +1086,7 @@ struct MealioDoneView: View {
     private var subtitle: String {
         let sum = cart.addedTotal(result)
         let money: String = sum.total.map { (sum.estimated ? "about " : "") + mealioMoney($0) } ?? "Prices at checkout"
-        let parts: [String?] = [money, result.verified == true ? "checked in your cart" : nil]
+        let parts: [String?] = [money, nil]
         return parts.compactMap { $0 }.joined(separator: " \u{00B7} ")
     }
 

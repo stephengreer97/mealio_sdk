@@ -807,7 +807,7 @@ private fun ItemRow(
         if (item.status == ItemStatus.REMEMBERED_UNAVAILABLE && !on) {
             val name = item.remembered?.let { ", ${it.name}," } ?: ""
             val why = if (item.reason == "not_found") "not available" else "out of stock"
-            WarnBox(t, "Your usual$name is $why today. Pick another for this run. It stays your usual.", Modifier.padding(start = 12.dp, end = 12.dp, bottom = 12.dp))
+            WarnBox(t, "Your usual$name is $why today. Pick another this time. It stays your usual.", Modifier.padding(start = 12.dp, end = 12.dp, bottom = 12.dp))
         }
 
         if (open) {
@@ -954,7 +954,7 @@ private fun ColumnScope.Done(t: MealioTheme, cart: CartSession, result: AddResul
     val total = sum.total
     val subtitle = listOfNotNull(
         if (total != null) (if (sum.estimated) "about " else "") + money(total) else "Prices at checkout",
-        if (result.verified == true) "checked in your cart" else null,
+        null,
     ).joinToString(" · ")
     val title = if (n > 0) "$n item${if (n == 1) "" else "s"} added" else "Nothing was added"
     val card = RoundedCornerShape(t.radius + 2.dp)

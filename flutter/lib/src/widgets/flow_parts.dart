@@ -499,7 +499,6 @@ class _DoneViewState extends State<DoneView> {
     final left = _leftOut(cart, r, widget.storeName);
     final subtitle = <String>[
       if (sum.total != null) '${sum.estimated ? 'about ' : ''}${mealioMoney(sum.total!)}' else 'Prices at checkout',
-      if (r.verified ?? false) 'checked in your cart',
     ].join(' · ');
     final title = n > 0 ? '${plural(n, 'item')} added' : 'Nothing was added';
     final small = t.style(size: 12, height: 17 / 12, color: t.muted);

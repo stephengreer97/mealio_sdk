@@ -398,8 +398,8 @@ void main() {
         ),
       );
       expect(find.text('2 items added'), findsOneWidget);
-      expect(find.text(r'$3.00 · checked in your cart'), findsOneWidget);
-      expect(find.bySemanticsLabel(r'2 items added, $3.00 · checked in your cart'), findsOneWidget);
+      expect(find.text(r'$3.00'), findsOneWidget);
+      expect(find.bySemanticsLabel(r'2 items added, $3.00'), findsOneWidget);
       expect(find.byIcon(Icons.check), findsOneWidget);
       // An image for the onion, initials for the garlic.
       expect(find.byType(Image), findsOneWidget);

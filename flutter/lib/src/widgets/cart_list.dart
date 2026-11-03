@@ -432,7 +432,7 @@ class _ItemRowState extends State<_ItemRow> {
         margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
         text: 'Your usual${r != null ? ', ${r.name},' : ''} is '
             '${item.reason == 'not_found' ? 'not available' : 'out of stock'} today. '
-            'Pick another for this run. It stays your usual.',
+            'Pick another this time. It stays your usual.',
       ));
     }
 
