@@ -30,6 +30,9 @@ const List<String> supportedOps = <String>[
 /// A JSON object posted by a page script.
 typedef JsonMessage = Map<String, Object?>;
 
+/// At most this many recipes in one `prepareCart`.
+const int maxRecipes = 10;
+
 // ── lenient readers ────────────────────────────────────────────────────────
 
 String _str(Object? v, [String fallback = '']) => v is String ? v : fallback;
@@ -629,11 +632,46 @@ enum ItemStatus {
   }
 }
 
+/// A recipe that calls for a cart item, in a cart made from one or more
+/// recipes ([CartItem.recipes]).
+class ItemRecipe {
+  const ItemRecipe({required this.id, this.title, required this.quantity});
+
+  factory ItemRecipe.fromJson(Object? json) {
+    final m = _mapOrNull(json) ?? const <String, Object?>{};
+    return ItemRecipe(id: _str(m['id']), title: _strOrNull(m['title']), quantity: _int(m['quantity'], 1));
+  }
+
+  final String id;
+  final String? title;
+
+  /// This recipe's share of the item's quantity.
+  final int quantity;
+
+  Map<String, Object?> toJson() => <String, Object?>{'id': id, 'title': title, 'quantity': quantity};
+}
+
+/// A recipe a cart was made from ([PreparedCart.recipes]).
+class CartRecipe {
+  const CartRecipe({required this.id, this.title});
+
+  factory CartRecipe.fromJson(Object? json) {
+    final m = _mapOrNull(json) ?? const <String, Object?>{};
+    return CartRecipe(id: _str(m['id']), title: _strOrNull(m['title']));
+  }
+
+  final String id;
+  final String? title;
+
+  Map<String, Object?> toJson() => <String, Object?>{'id': id, 'title': title};
+}
+
 class CartItem {
   const CartItem({
     required this.key,
     required this.ingredient,
     required this.quantity,
+    this.recipes,
     this.weightLb,
     this.status = ItemStatus.choose,
     this.options = const <Product>[],
@@ -671,6 +709,7 @@ class CartItem {
       key: _str(m['key']),
       ingredient: _str(m['ingredient']),
       quantity: _int(m['quantity'], 1),
+      recipes: m['recipes'] is List ? _list(m['recipes']).map(ItemRecipe.fromJson).toList() : null,
       weightLb: _doubleOrNull(m['weightLb']),
       status: status,
       options: options,
@@ -684,7 +723,14 @@ class CartItem {
 
   final String key;
   final String ingredient;
+
+  /// Packages to buy: every recipe's share added together.
   final int quantity;
+
+  /// The recipes that call for this item. A cart from several recipes merges
+  /// an ingredient they share into one item, and a pick on it is remembered
+  /// under each of them. Null from servers older than multi-recipe.
+  final List<ItemRecipe>? recipes;
 
   /// The recipe's own weight for this line, in lb, when it gave one in a
   /// weight unit. Null otherwise.
@@ -720,6 +766,7 @@ class CartItem {
       'selectedId': selectedId,
       'remembered': remembered?.toJson(),
     };
+    _put(out, 'recipes', recipes?.map((ItemRecipe r) => r.toJson()).toList());
     _put(out, 'weightLb', weightLb);
     _put(out, 'rememberedPreferenceId', rememberedPreferenceId);
     _put(out, 'reason', reason);
@@ -737,6 +784,7 @@ class PreparedCart {
     required this.cartId,
     required this.store,
     this.storeName,
+    this.recipes,
     required this.items,
     this.ready = const <CartItem>[],
     this.needsChoice = const <CartItem>[],
@@ -757,6 +805,7 @@ class PreparedCart {
       cartId: _str(m['cartId']),
       store: _str(m['store']),
       storeName: _strOrNull(m['storeName']),
+      recipes: m['recipes'] is List ? _list(m['recipes']).map(CartRecipe.fromJson).toList() : null,
       items: items,
       ready: ready,
       needsChoice: needsChoice,
@@ -769,6 +818,10 @@ class PreparedCart {
 
   /// Display name, e.g. "H-E-B".
   final String? storeName;
+
+  /// The recipes this cart was made from, in the order they were sent. Null
+  /// from servers older than multi-recipe.
+  final List<CartRecipe>? recipes;
 
   /// Every recipe line, in recipe order. Show them all.
   final List<CartItem> items;
@@ -784,6 +837,7 @@ class PreparedCart {
   Map<String, Object?> toJson() {
     final out = <String, Object?>{'cartId': cartId, 'store': store};
     _put(out, 'storeName', storeName);
+    _put(out, 'recipes', recipes?.map((CartRecipe r) => r.toJson()).toList());
     out['items'] = items.map((CartItem i) => i.toJson()).toList();
     // ignore: deprecated_member_use_from_same_package
     out['ready'] = ready.map((CartItem i) => i.toJson()).toList();

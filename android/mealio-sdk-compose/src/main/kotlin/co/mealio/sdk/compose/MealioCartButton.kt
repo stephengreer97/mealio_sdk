@@ -10,6 +10,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -28,6 +29,8 @@ import co.mealio.sdk.Recipe
  *
  * ```
  * MealioCartButton(recipe = recipe, store = "heb")
+ * // Several meals in one cart:
+ * MealioCartButton(recipes = listOf(tacos, pasta), store = "heb")
  * ```
  *
  * @param store store id, e.g. "heb". Optional: without it the user's default
@@ -37,6 +40,24 @@ import co.mealio.sdk.Recipe
 @Composable
 fun MealioCartButton(
     recipe: Recipe,
+    store: String? = null,
+    zip: String? = null,
+    label: String = "Add to my grocery cart",
+    onAdded: (AddResult) -> Unit = {},
+    onClose: (AddResult?) -> Unit = {},
+    onError: (Exception) -> Unit = {},
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    theme: MealioTheme = LocalMealioTheme.current,
+) {
+    val recipes = remember(recipe) { listOf(recipe) }
+    MealioCartButton(recipes, store, zip, label, onAdded, onClose, onError, modifier, enabled, theme)
+}
+
+/** The button for several recipes in one cart, at most MAX_RECIPES. */
+@Composable
+fun MealioCartButton(
+    recipes: List<Recipe>,
     store: String? = null,
     zip: String? = null,
     label: String = "Add to my grocery cart",
@@ -62,7 +83,7 @@ fun MealioCartButton(
     }
     MealioCartFlow(
         visible = open,
-        recipe = recipe,
+        recipes = recipes,
         store = store,
         zip = zip,
         onAdded = onAdded,

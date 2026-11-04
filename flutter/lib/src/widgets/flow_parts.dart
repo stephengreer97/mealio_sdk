@@ -442,6 +442,12 @@ String listOr(List<String> xs) {
   return '${xs.sublist(0, xs.length - 1).join(', ')} or ${xs.last}';
 }
 
+/// "A and B", "A, B and C".
+String listAnd(List<String> xs) {
+  if (xs.length <= 1) return xs.isEmpty ? '' : xs.first;
+  return '${xs.sublist(0, xs.length - 1).join(', ')} and ${xs.last}';
+}
+
 /// The price as a row shows it. Sold by the pound: "\$9.99/lb est.".
 String priceText(Product p) {
   final perLb = p.pricePerLb;

@@ -14,11 +14,11 @@ import 'protocol.dart';
 import 'runner.dart';
 import 'verify.dart';
 
-/// The core protocol version this port follows (packages/core 0.1.0).
-const String sdkCoreVersion = '0.1.0';
+/// The core protocol version this port follows (packages/core 0.2.0).
+const String sdkCoreVersion = '0.2.0';
 
 /// This package's version, sent as `X-Mealio-SDK: flutter/<version>`.
-const String mealioSdkVersion = '0.2.0';
+const String mealioSdkVersion = '0.3.0';
 
 const String defaultBaseUrl = 'https://mealio.co';
 
@@ -123,13 +123,31 @@ class MealioClient {
   /// Start a cart: signs in to the store if needed, searches every ingredient.
   /// `store` is optional: without it Mealio uses the user's default store,
   /// and fails with `store_required` when they have none yet.
+  ///
+  /// Pass `recipe` for one recipe, or `recipes` for up to [maxRecipes] in one
+  /// cart: ingredients they share become one item, and each pick is
+  /// remembered under every recipe that calls for it. `recipes` wins when
+  /// both are given. Throws [MealioException] `bad_recipe` for none and
+  /// `too_many_recipes` for more than [maxRecipes], before any request.
   Future<CartSession> prepareCart({
     String? store,
-    required Recipe recipe,
+    Recipe? recipe,
+    List<Recipe>? recipes,
     String? zip,
     StepListener? onStep,
   }) async {
-    final input = <String, Object?>{'recipe': recipe.toJson()};
+    final list = recipes ?? (recipe == null ? const <Recipe>[] : <Recipe>[recipe]);
+    if (list.isEmpty) {
+      throw const MealioException(MealioErrorCode.badRecipe, 'Pass recipe, or recipes with at least one recipe.');
+    }
+    if (list.length > maxRecipes) {
+      throw const MealioException(MealioErrorCode.tooManyRecipes, 'At most $maxRecipes recipes in one cart.');
+    }
+    // One recipe goes as `recipe`, so a server from before multi-recipe still
+    // understands it.
+    final input = list.length == 1
+        ? <String, Object?>{'recipe': list.first.toJson()}
+        : <String, Object?>{'recipes': list.map((Recipe r) => r.toJson()).toList()};
     if (store != null) input['store'] = store;
     if (zip != null) input['zip'] = zip;
     input.addAll(await _about());

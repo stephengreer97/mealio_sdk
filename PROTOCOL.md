@@ -18,7 +18,7 @@ All calls are HTTPS to `https://mealio.co` (overridable for testing).
 | Call | Who | Purpose |
 | --- | --- | --- |
 | `POST /api/v1/sdk/hello` | SDK | Open a run: report version, platform, ops, storage epoch |
-| `POST /api/v1/sdk/carts` | SDK | Start a cart for a recipe. Returns the first signed envelope |
+| `POST /api/v1/sdk/carts` | SDK | Start a cart for one recipe or several. Returns the first signed envelope |
 | `POST /api/v1/sdk/jobs/{job}/step` | SDK | Return results for one envelope. Returns the next envelope |
 | `POST /api/v1/sdk/carts/{cart}/add` | SDK | Send the user's choices and start filling the cart |
 
@@ -175,6 +175,28 @@ The last instruction of a job.
 The SDK hands `result` to the app (or raises the failure) and does not call
 `step` again for this job.
 
+## One recipe or several
+
+`POST /api/v1/sdk/carts` takes `recipe` (one) or `recipes` (1 to 10, unique ids):
+
+```json
+{ "store": "heb", "recipes": [
+  { "id": "tacos", "title": "Tacos", "ingredients": [{ "name": "1 yellow onion" }] },
+  { "id": "pasta", "title": "Pasta", "ingredients": [{ "name": "2 yellow onions", "quantity": 2 }] }
+] }
+```
+
+Ingredients the recipes share become ONE item, with the quantities added up
+(`yellow onion`, quantity 3). The item's `recipes` lists each recipe that calls
+for it and its share. The add call does not change: a pick on a shared item is
+remembered under every recipe on it, so each recipe brings it back pre-selected
+whether it runs alone or with others. When two recipes remember different
+products for the same ingredient, the more recently saved one is pre-selected.
+
+SDKs send a single recipe as `recipe`, so they keep working against a server
+from before multi-recipe. The `cart.completed` webhook adds `recipeIds`
+(`recipeId` is the first).
+
 ## Products, items and selections
 
 A prepare job's `done.result` is a `PreparedCart` (`packages/core/src/protocol.ts`).
@@ -182,7 +204,9 @@ The fields an SDK needs for amounts and prices:
 
 | Object | Field | Meaning |
 | --- | --- | --- |
-| `CartItem` | `quantity` | Packages to add, from the recipe |
+| `CartItem` | `quantity` | Packages to add, from the recipe (every recipe's share added together) |
+| `CartItem` | `recipes` | `[{ id, title, quantity }]`: the recipes that call for it. Absent from older servers |
+| `PreparedCart` | `recipes` | `[{ id, title }]`: the recipes the cart was made from, in the order sent |
 | `CartItem` | `weightLb` | The recipe's own weight for the line in lb, when it gave the amount in lb, oz, g or kg. Absent otherwise |
 | `Product` | `unitPrice` | One unit's price as a number, for an estimate |
 | `Product` | `estimated` | The price is an estimate (weighed or "Avg." items) |

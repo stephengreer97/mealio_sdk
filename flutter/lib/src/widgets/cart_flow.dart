@@ -1,5 +1,6 @@
 // The drop-in: ONE sheet that runs the whole add-to-cart flow over the
-// partner's app. Loading, store sign-in, the list, adding, done. Mirrors
+// partner's app, for one recipe or several in one cart. Loading, store
+// sign-in, the list, adding, done. Mirrors
 // packages/react-native/src/MealioCartFlow.tsx and MealioCartButton.tsx.
 
 import 'dart:async';
@@ -16,13 +17,27 @@ import '../webview_host.dart';
 import 'cart_list.dart';
 import 'flow_parts.dart';
 
-/// Starts a cart. The default is `MealioCart.instance.prepareCart`.
+/// Starts a cart for one recipe. The default is
+/// `MealioCart.instance.prepareCart`.
 typedef PrepareCart = Future<CartSession> Function({
   String? store,
   required Recipe recipe,
   String? zip,
   StepListener? onStep,
 });
+
+/// Starts a cart for one or more recipes. The default is
+/// `MealioCart.instance.prepareCart`, which also fits this type.
+typedef PrepareCarts = Future<CartSession> Function({
+  String? store,
+  required List<Recipe> recipes,
+  String? zip,
+  StepListener? onStep,
+});
+
+/// `recipes` when given, else `recipe` as a list of one.
+List<Recipe> _recipeList(Recipe? recipe, List<Recipe>? recipes) =>
+    recipes ?? (recipe == null ? const <Recipe>[] : <Recipe>[recipe]);
 
 /// Lists the stores. The default is `MealioCart.instance.stores`.
 typedef LoadStores = Future<List<StoreInfo>> Function();
@@ -37,7 +52,8 @@ enum _Phase { loading, list, adding, done, error, stores }
 class MealioCartFlow extends StatefulWidget {
   const MealioCartFlow({
     super.key,
-    required this.recipe,
+    this.recipe,
+    this.recipes,
     this.store,
     this.zip,
     required this.onClose,
@@ -45,10 +61,17 @@ class MealioCartFlow extends StatefulWidget {
     this.onError,
     this.theme,
     this.prepareCart,
+    this.prepareCarts,
     this.loadStores,
-  });
+  }) : assert(recipe != null || recipes != null, 'Pass recipe or recipes.');
 
-  final Recipe recipe;
+  /// One recipe. Pass this or [recipes].
+  final Recipe? recipe;
+
+  /// Several recipes in one cart, at most [maxRecipes]. Ingredients they
+  /// share become one item, each item says which recipes it is for, and a
+  /// pick is remembered under every one of them. Wins over [recipe].
+  final List<Recipe>? recipes;
 
   /// Store id from GET /api/v1/stores, e.g. "heb". Optional: without it the
   /// user's default store is used, and the sheet asks them to pick one the
@@ -70,35 +93,47 @@ class MealioCartFlow extends StatefulWidget {
   /// Defaults to `MealioTheme.of(context)`.
   final MealioTheme? theme;
 
-  /// Replaces `MealioCart.instance.prepareCart`, for tests and custom clients.
+  /// Replaces `MealioCart.instance.prepareCart` for a single recipe, for
+  /// tests and custom clients. Not used for several recipes: set
+  /// [prepareCarts] for those.
   final PrepareCart? prepareCart;
+
+  /// Replaces `MealioCart.instance.prepareCart` for any number of recipes,
+  /// for tests and custom clients. Wins over [prepareCart].
+  final PrepareCarts? prepareCarts;
 
   /// Replaces `MealioCart.instance.stores`, for tests and custom clients.
   final LoadStores? loadStores;
 
   /// Shows the flow over the app. Resolves with the result when something was
-  /// added, else null. It never opens the store's cart.
+  /// added, else null. It never opens the store's cart. Pass `recipe` for
+  /// one recipe or `recipes` for several in one cart.
   static Future<AddResult?> show(
     BuildContext context, {
-    required Recipe recipe,
+    Recipe? recipe,
+    List<Recipe>? recipes,
     String? store,
     String? zip,
     ValueChanged<AddResult>? onAdded,
     ValueChanged<Object>? onError,
     MealioTheme? theme,
     PrepareCart? prepareCart,
+    PrepareCarts? prepareCarts,
     LoadStores? loadStores,
   }) async {
+    assert(recipe != null || recipes != null, 'Pass recipe or recipes.');
     final t = theme ?? MealioTheme.of(context);
     AddResult? added;
     final r = await Navigator.of(context, rootNavigator: true).push<AddResult>(
       MealioSheetRoute<AddResult>(
         builder: (BuildContext sheetContext) => MealioCartFlow(
           recipe: recipe,
+          recipes: recipes,
           store: store,
           zip: zip,
           theme: t,
           prepareCart: prepareCart,
+          prepareCarts: prepareCarts,
           loadStores: loadStores,
           onAdded: (AddResult a) {
             added = a;
@@ -194,15 +229,21 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
       _errorMessage = null;
     });
     try {
-      final prepare = widget.prepareCart ?? MealioCart.instance.prepareCart;
-      final c = await prepare(
-        store: storeId,
-        recipe: widget.recipe,
-        zip: widget.zip,
-        onStep: (MealioStep s, Instruction _) {
-          if (_run == id && mounted) setState(() => _step = s);
-        },
-      );
+      void onStep(MealioStep s, Instruction _) {
+        if (_run == id && mounted) setState(() => _step = s);
+      }
+
+      final recipes = _recipes;
+      final many = widget.prepareCarts;
+      final one = widget.prepareCart;
+      final CartSession c;
+      if (many != null) {
+        c = await many(store: storeId, recipes: recipes, zip: widget.zip, onStep: onStep);
+      } else if (one != null && recipes.length == 1) {
+        c = await one(store: storeId, recipe: recipes.first, zip: widget.zip, onStep: onStep);
+      } else {
+        c = await MealioCart.instance.prepareCart(store: storeId, recipes: recipes, zip: widget.zip, onStep: onStep);
+      }
       if (_run != id || !mounted) return;
       setState(() {
         _store = c.store.isEmpty ? storeId : c.store;
@@ -245,6 +286,15 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
       _phase = _Phase.error;
     });
     widget.onError?.call(e);
+  }
+
+  List<Recipe> get _recipes => _recipeList(widget.recipe, widget.recipes);
+
+  /// The header's small line: the recipe's title, or "3 meals".
+  String? get _kicker {
+    final recipes = _recipes;
+    if (recipes.length == 1) return recipes.first.title;
+    return recipes.length > 1 ? '${recipes.length} meals' : null;
   }
 
   void _close() {
@@ -299,7 +349,12 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
         ],
       );
     } else if (_phase == _Phase.loading) {
-      body = LoadingView(theme: t, step: _step, storeName: storeName, count: widget.recipe.ingredients.length);
+      body = LoadingView(
+        theme: t,
+        step: _step,
+        storeName: storeName,
+        count: _recipes.fold<int>(0, (int n, Recipe r) => n + r.ingredients.length),
+      );
     } else if (_phase == _Phase.stores) {
       body = _StorePicker(
         theme: t,
@@ -333,7 +388,7 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
     // a sign-in in progress (WebViewHost.flowClosed).
     return SheetFrame(
       theme: t,
-      kicker: widget.recipe.title,
+      kicker: _kicker,
       title: login != null ? login.title : _title(storeName),
       onClose: _close,
       child: body,
@@ -427,13 +482,16 @@ class _StorePicker extends StatelessWidget {
 ///
 /// ```dart
 /// MealioCartButton(recipe: recipe, store: 'heb')
+/// // Several meals in one cart:
+/// MealioCartButton(recipes: <Recipe>[tacos, pasta], store: 'heb')
 /// ```
 ///
 /// A themed button that runs the whole flow in one sheet.
 class MealioCartButton extends StatefulWidget {
   const MealioCartButton({
     super.key,
-    required this.recipe,
+    this.recipe,
+    this.recipes,
     this.store,
     this.zip,
     this.label,
@@ -442,9 +500,13 @@ class MealioCartButton extends StatefulWidget {
     this.onError,
     this.disabled = false,
     this.theme,
-  });
+  }) : assert(recipe != null || recipes != null, 'Pass recipe or recipes.');
 
-  final Recipe recipe;
+  /// One recipe. Pass this or [recipes].
+  final Recipe? recipe;
+
+  /// Several recipes in one cart, at most [maxRecipes]. Wins over [recipe].
+  final List<Recipe>? recipes;
 
   /// Store id, e.g. "heb". Optional: without it the user's default store is
   /// used, and the sheet asks them to pick one the first time.
@@ -481,6 +543,7 @@ class _MealioCartButtonState extends State<MealioCartButton> {
       final r = await MealioCartFlow.show(
         context,
         recipe: widget.recipe,
+        recipes: widget.recipes,
         store: widget.store,
         zip: widget.zip,
         theme: widget.theme,

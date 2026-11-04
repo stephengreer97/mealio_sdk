@@ -18,15 +18,16 @@ import java.net.URLEncoder
 // drive it through step calls until done or fail, and a single retry with a
 // fresh session token on 401.
 
-const val SDK_CORE_VERSION = "0.1.0"
+const val SDK_CORE_VERSION = "0.2.0"
 const val DEFAULT_BASE_URL = "https://mealio.co"
 
 /**
  * An error raised to the app. `code` is one of the PROTOCOL.md codes:
  * bad_envelope, blocked, store_unavailable, login_cancelled, session_expired,
  * network, unsupported, store_required. Also "server" (Mealio answered with an error),
- * "unknown_item" / "unknown_product" (CartSession.choose), or any code the
- * server's `fail` instruction carries.
+ * "unknown_item" / "unknown_product" (CartSession.choose), "bad_recipe" /
+ * "too_many_recipes" (prepareCart with no recipes or more than MAX_RECIPES),
+ * or any code the server's `fail` instruction carries.
  */
 /**
  * What the SDK is doing right now, for a progress screen. Inferred from the
@@ -184,12 +185,30 @@ class MealioClient @JvmOverloads constructor(
      */
     @JvmOverloads
     suspend fun prepareCart(store: String?, recipe: Recipe, zip: String? = null, onStep: StepListener? = null): CartSession =
-        runLock.withLock {
-            val body = about(JSONObject().putNullable("store", store).put("recipe", recipe.toJson()).putNullable("zip", zip))
+        prepareCart(store, listOf(recipe), zip, onStep)
+
+    /**
+     * Start one cart from several recipes, at most [MAX_RECIPES]. Ingredients
+     * they share become one item, each item lists the recipes it is for, and a
+     * pick is remembered under every one of them. Throws MealioException
+     * "bad_recipe" for an empty list and "too_many_recipes" for more than
+     * MAX_RECIPES, before any network call.
+     */
+    @JvmOverloads
+    suspend fun prepareCart(store: String?, recipes: List<Recipe>, zip: String? = null, onStep: StepListener? = null): CartSession {
+        if (recipes.isEmpty()) throw MealioException("bad_recipe", "Pass at least one recipe.")
+        if (recipes.size > MAX_RECIPES) throw MealioException("too_many_recipes", "At most $MAX_RECIPES recipes in one cart.")
+        return runLock.withLock {
+            val fields = JSONObject().putNullable("store", store).putNullable("zip", zip)
+            // One recipe goes as `recipe`, so a server from before multi-recipe still understands it.
+            if (recipes.size == 1) fields.put("recipe", recipes[0].toJson())
+            else fields.put("recipes", JSONArray(recipes.map { it.toJson() }))
+            val body = about(fields)
             val result = drive(post("/api/v1/sdk/carts", body), onStep)
             val o = result as? JSONObject ?: throw MealioException("server", "Mealio returned no cart")
             CartSession(this, PreparedCart.fromJson(o))
         }
+    }
 
     /** Search the store again for one item ("minced garlic jar"). */
     @JvmOverloads

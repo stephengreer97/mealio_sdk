@@ -360,9 +360,30 @@ enum class ItemStatus(val wire: String) {
     }
 }
 
+/** A recipe that calls for a cart item, in a cart made from one or more recipes. */
+data class ItemRecipe(
+    val id: String,
+    val title: String? = null,
+    /** This recipe's share of the item's quantity. */
+    val quantity: Int = 1,
+) {
+    companion object {
+        fun fromJson(o: JSONObject): ItemRecipe =
+            ItemRecipe(o.str("id") ?: "", o.str("title"), o.num("quantity")?.toInt() ?: 1)
+    }
+}
+
+/** A recipe a cart was made from, as PreparedCart lists them. */
+data class CartRecipe(val id: String, val title: String? = null) {
+    companion object {
+        fun fromJson(o: JSONObject): CartRecipe = CartRecipe(o.str("id") ?: "", o.str("title"))
+    }
+}
+
 data class CartItem(
     val key: String,
     val ingredient: String,
+    /** Packages to buy: every recipe's share added together. */
     val quantity: Int,
     /** @deprecated 0.1 shape: the remembered product when it is in stock. Use [remembered] and [selectedId]. */
     val chosen: Product? = null,
@@ -378,6 +399,12 @@ data class CartItem(
     val rememberedPreferenceId: String? = null,
     /** The recipe's own weight for this line, in lb, when it gave one in a weight unit. */
     val weightLb: Double? = null,
+    /**
+     * The recipes that call for this item. A cart from several recipes merges an
+     * ingredient they share into one item, and a pick on it is remembered under
+     * each of them. Empty from servers older than multi-recipe.
+     */
+    val recipes: List<ItemRecipe> = emptyList(),
 ) {
     companion object {
         fun fromJson(o: JSONObject): CartItem = fromJson(o, null)
@@ -410,6 +437,7 @@ data class CartItem(
                 remembered = remembered,
                 rememberedPreferenceId = o.str("rememberedPreferenceId"),
                 weightLb = o.num("weightLb")?.takeIf { it.isFinite() },
+                recipes = o.arr("recipes")?.objects()?.map { ItemRecipe.fromJson(it) } ?: emptyList(),
             )
         }
     }
@@ -426,6 +454,8 @@ data class PreparedCart(
     val items: List<CartItem> = ready + needsChoice + unavailable,
     /** Display name, e.g. "H-E-B". */
     val storeName: String? = null,
+    /** The recipes this cart was made from, in the order they were sent. Empty from older servers. */
+    val recipes: List<CartRecipe> = emptyList(),
 ) {
     companion object {
         fun fromJson(o: JSONObject): PreparedCart {
@@ -443,6 +473,7 @@ data class PreparedCart(
                 unavailable = unavailable,
                 items = items,
                 storeName = o.str("storeName"),
+                recipes = o.arr("recipes")?.objects()?.map { CartRecipe.fromJson(it) } ?: emptyList(),
             )
         }
     }
@@ -592,3 +623,6 @@ data class Recipe(
         .putIfNotNull("title", title)
         .put("ingredients", JSONArray(ingredients.map { it.toJson() }))
 }
+
+/** At most this many recipes in one prepareCart. */
+const val MAX_RECIPES = 10

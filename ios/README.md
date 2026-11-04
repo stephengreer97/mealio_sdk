@@ -62,6 +62,36 @@ That is the whole integration.
 - `label:` changes the button text (default "Add to my grocery cart");
   `disabled:` fades it.
 
+### Several recipes in one cart
+
+Pass `recipes:` instead of `recipe:` to fill one cart from up to 10 meals
+(`MAX_RECIPES`):
+
+```swift
+MealioCartButton(recipes: [tacos, pasta], store: "heb")
+
+// or
+.mealioCartFlow(isPresented: $showCart, recipes: [tacos, pasta])
+```
+
+Ingredients the recipes share become one item, with the quantities added
+together. The sheet's header says "2 meals", and each item shows which meals it
+is for ("For Tacos and Pasta"). A pick is remembered under every recipe on the
+item, so next time each meal comes back with that product checked. Building
+your own UI:
+
+```swift
+let session = try await MealioCart.prepareCart(store: "heb", recipes: [tacos, pasta])
+session.recipes                    // [CartRecipe]: id, title, in the order sent
+session.recipes(for: key)          // [ItemRecipe]: id, title, quantity (that recipe's share)
+session.recipesLabel(for: key)     // "For Tacos and Pasta", nil on a one-recipe cart
+```
+
+An empty list throws `bad_recipe` and more than 10 throws `too_many_recipes`,
+both before any network call. One recipe is sent exactly as `recipe:` is, so
+it works with every server; `recipes` and `CartItem.recipes` are empty from
+servers older than multi-recipe.
+
 ### Your own button
 
 Present the same sheet from any control with the view modifier:
@@ -129,7 +159,7 @@ Or in `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/mealio/mealio_sdk.git", from: "0.2.0"),
+    .package(url: "https://github.com/mealio/mealio_sdk.git", from: "0.3.0"),
 ],
 targets: [
     .target(name: "MyApp", dependencies: [.product(name: "MealioSDK", package: "mealio_sdk")]),
@@ -142,7 +172,7 @@ the repository root, add the package from a local checkout of `ios/` instead.
 ### CocoaPods
 
 ```ruby
-pod 'MealioSDK', :git => 'https://github.com/mealio/mealio_sdk.git', :tag => 'ios-v0.2.0'
+pod 'MealioSDK', :git => 'https://github.com/mealio/mealio_sdk.git', :tag => 'ios-v0.3.0'
 ```
 
 ## Your server creates an SDK session
@@ -302,6 +332,8 @@ All errors are `MealioError` with a `code` and a readable `message`:
 | `server` | Mealio answered with an error, or something the SDK could not read |
 | `store_required` | No store was given and the user has no default store yet (the drop-in shows its store picker) |
 | `not_configured` | `MealioCart.configure` was not called |
+| `bad_recipe` | `prepareCart` was given an empty `recipes` list |
+| `too_many_recipes` | `prepareCart` was given more than 10 recipes |
 
 ## Development
 

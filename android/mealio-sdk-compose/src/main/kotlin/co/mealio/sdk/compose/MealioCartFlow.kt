@@ -107,6 +107,7 @@ import co.mealio.sdk.Product
 import co.mealio.sdk.Recipe
 import co.mealio.sdk.Step
 import co.mealio.sdk.StoreInfo
+import co.mealio.sdk.forRecipes
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -145,6 +146,27 @@ fun MealioCartFlow(
     onError: (Exception) -> Unit = {},
     theme: MealioTheme = LocalMealioTheme.current,
 ) {
+    val recipes = remember(recipe) { listOf(recipe) }
+    MealioCartFlow(visible, recipes, store, zip, onClose, onAdded, onError, theme)
+}
+
+/**
+ * The whole flow for several recipes in one cart (at most MAX_RECIPES).
+ * Ingredients they share become one item, each item says which recipes it is
+ * for, and a pick is remembered under every one of them. Otherwise the same as
+ * the one-recipe MealioCartFlow.
+ */
+@Composable
+fun MealioCartFlow(
+    visible: Boolean,
+    recipes: List<Recipe>,
+    store: String? = null,
+    zip: String? = null,
+    onClose: (AddResult?) -> Unit,
+    onAdded: (AddResult) -> Unit = {},
+    onError: (Exception) -> Unit = {},
+    theme: MealioTheme = LocalMealioTheme.current,
+) {
     if (!visible) return
     // Everything below lives only while the sheet is open, so each open starts fresh.
     val backRef = remember { mutableStateOf<() -> Unit>({}) }
@@ -165,14 +187,14 @@ fun MealioCartFlow(
                 it.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
             }
         }
-        FlowSheet(theme, recipe, store, zip, onClose, onAdded, onError, backRef)
+        FlowSheet(theme, recipes, store, zip, onClose, onAdded, onError, backRef)
     }
 }
 
 @Composable
 private fun FlowSheet(
     t: MealioTheme,
-    recipe: Recipe,
+    recipes: List<Recipe>,
     initialStore: String?,
     zip: String?,
     onClose: (AddResult?) -> Unit,
@@ -228,7 +250,7 @@ private fun FlowSheet(
         phase = Phase.LOADING; step = Step.CONNECTING; cart = null; result = null; error = null
         job = scope.launch {
             try {
-                val c = MealioCart.prepareCart(storeId, recipe, zip) { s, _ -> step = s }
+                val c = MealioCart.prepareCart(storeId, recipes, zip) { s, _ -> step = s }
                 store = c.store
                 cart = c
                 phase = Phase.LIST
@@ -271,6 +293,9 @@ private fun FlowSheet(
     LaunchedEffect(Unit) { start(initialStore) }
 
     val storeName = cart?.storeName ?: store?.let { storeLabel(it) } ?: "your store"
+    // The kicker over the title: the recipe's own title, or "3 meals".
+    val kicker = if (recipes.size == 1) recipes[0].title else if (recipes.size > 1) "${recipes.size} meals" else null
+    val lineCount = recipes.sumOf { it.ingredients.size }
     val shown = remember { MutableTransitionState(false).apply { targetState = true } }
 
     Box(
@@ -298,12 +323,12 @@ private fun FlowSheet(
                         .background(t.border),
                 )
                 val l = login
-                Header(t, recipe.title, l?.title ?: headerTitle(phase, storeName), onClose = ::close)
+                Header(t, kicker, l?.title ?: headerTitle(phase, storeName), onClose = ::close)
                 val c = cart
                 val r = result
                 when {
                     l != null -> LoginPane(t, l, storeName)
-                    phase == Phase.LOADING -> Loading(t, step, storeName, recipe.ingredients.size)
+                    phase == Phase.LOADING -> Loading(t, step, storeName, lineCount)
                     phase == Phase.STORES -> StorePicker(
                         t, stores, store,
                         onPick = { id -> store = id; start(id) },
@@ -734,6 +759,9 @@ private fun ItemRow(
                     .clickable(role = Role.Button, onClickLabel = "Show the options", onClick = onToggleOpen),
             ) {
                 Text(item.ingredient, style = t.ts(12, FontWeight.Medium, t.muted), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                forRecipes(cart, item.key)?.let {
+                    Text(it, style = t.ts(11, color = t.muted), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
                 Text(
                     shown?.name ?: "Choose a product",
                     style = t.ts(

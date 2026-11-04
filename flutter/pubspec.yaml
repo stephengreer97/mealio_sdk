@@ -2,7 +2,7 @@ name: mealio_sdk
 description: >-
   Mealio Cart SDK for Flutter. Adds a recipe's ingredients to the user's own
   grocery store cart, driven by signed instructions from Mealio.
-version: 0.2.0
+version: 0.3.0
 homepage: https://mealio.co
 publish_to: none
 

@@ -15,7 +15,14 @@ import { money, type MealioTheme } from './theme';
 
 export interface MealioCartFlowProps {
   visible: boolean;
-  recipe: Recipe;
+  /** One recipe. Pass this or `recipes`. */
+  recipe?: Recipe;
+  /**
+   * Several recipes in one cart (at most 10). Ingredients they share become one
+   * item, each item says which recipes it is for, and a pick is remembered
+   * under every one of them.
+   */
+  recipes?: Recipe[];
   /**
    * Store id from GET /api/v1/stores, e.g. "heb". Optional: without it the
    * user's default store is used, and the sheet asks them to pick one the
@@ -49,6 +56,9 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
   const [stores, setStores] = useState<StoreInfo[] | null>(null);
   const backTo = useRef<Phase>('list');
   const bump = useCallback(() => setVersion((v) => v + 1), []);
+  const recipes = useMemo(() => props.recipes ?? (props.recipe ? [props.recipe] : []), [props.recipes, props.recipe]);
+  const kicker = recipes.length === 1 ? recipes[0].title : recipes.length > 1 ? `${recipes.length} meals` : undefined;
+  const lineCount = useMemo(() => recipes.reduce((n, r) => n + r.ingredients.length, 0), [recipes]);
 
   useEffect(() => {
     if (!visible) return;
@@ -69,7 +79,7 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
     const id = ++run.current;
     setPhase('loading'); setStep('connecting'); setCart(null); setResult(null); setError(null);
     try {
-      const c = await mealio.prepareCart({ store: storeId, recipe: props.recipe, zip: props.zip }, { onStep: (s) => run.current === id && setStep(s) });
+      const c = await mealio.prepareCart({ store: storeId, recipes, zip: props.zip }, { onStep: (s) => run.current === id && setStep(s) });
       if (run.current !== id) return;
       setStore(c.store); setCart(c); setPhase('list');
     } catch (e: any) {
@@ -80,7 +90,7 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
       props.onError?.(e);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.zip, props.recipe]);
+  }, [props.zip, recipes]);
 
   useEffect(() => { if (visible) start(props.store ?? null); else run.current += 1; }, [visible]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -114,14 +124,14 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
       <View style={s.scrim}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={s.sheet}>
           <View style={s.grabber} />
-          <Header t={t} recipeTitle={props.recipe.title} title={internal.login ? internal.login.title : headerTitle(phase, storeName)} onClose={close} />
+          <Header t={t} recipeTitle={kicker} title={internal.login ? internal.login.title : headerTitle(phase, storeName)} onClose={close} />
           {internal.login ? (
             <View style={s.flex}>
               <Text style={s.loginNote}>Sign in on {storeName}&apos;s own page. Mealio never sees your password.</Text>
               <View style={s.loginWeb}>{internal.login.webview}</View>
             </View>
           ) : phase === 'loading' ? (
-            <Loading t={t} step={step} storeName={storeName} count={props.recipe.ingredients.length} />
+            <Loading t={t} step={step} storeName={storeName} count={lineCount} />
           ) : phase === 'stores' ? (
             <StorePicker t={t} stores={stores} current={store} onPick={(id) => { setStore(id); start(id); }}
               onBack={cart && backTo.current === 'list' ? () => setPhase('list') : null} />
@@ -326,6 +336,7 @@ function ItemRow({ t, cart, item, storeName, open, onToggleOpen, onChange, disab
         <Thumb t={t} product={shown || options[0] || null} dim={!on} />
         <Pressable style={s.flex} onPress={onToggleOpen} accessibilityRole="button" accessibilityHint="Shows the options">
           <Text style={s.ingredient} numberOfLines={1}>{item.ingredient}</Text>
+          {forRecipes(cart, item.key) ? <Text style={s.forRecipes} numberOfLines={1}>{forRecipes(cart, item.key)}</Text> : null}
           <Text style={[s.name, !on && (shown ? s.nameOff : s.namePlaceholder)]} numberOfLines={2}>{shown ? shown.name : 'Choose a product'}</Text>
           <Text style={s.small}>{meta}</Text>
         </Pressable>
@@ -572,6 +583,19 @@ function lbText(lb: number): string {
 
 /** The price as a row shows it. Sold by the pound: "$9.99/lb est.". */
 /** "A, B or C". */
+/** "For Tacos and Pasta", on a cart made from more than one recipe. Null otherwise. */
+export function forRecipes(cart: CartSession, key: string): string | null {
+  if (cart.recipes.length < 2) return null;
+  const names = cart.recipesFor(key).map((r) => r.title || '').filter(Boolean);
+  return names.length ? `For ${listAnd(names)}` : null;
+}
+
+function listAnd(xs: string[]): string {
+  if (xs.length <= 1) return xs[0] || '';
+  if (xs.length === 2) return `${xs[0]} and ${xs[1]}`;
+  return `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`;
+}
+
 function listOr(xs: string[]): string {
   if (xs.length <= 1) return xs[0] || '';
   return `${xs.slice(0, -1).join(', ')} or ${xs[xs.length - 1]}`;
@@ -683,6 +707,7 @@ function make(t: MealioTheme) {
     thumb: { width: 48, height: 48, borderRadius: 10, backgroundColor: t.surface },
     thumbBig: { width: '100%', height: 72, borderRadius: 10, backgroundColor: t.surface },
     ingredient: { ...f, fontSize: 12, fontWeight: '500', color: t.muted },
+    forRecipes: { ...f, fontSize: 11, color: t.muted, marginTop: 1 },
     name: { ...f, fontSize: 15, lineHeight: 20, fontWeight: '600', color: t.text },
     nameOff: { color: t.muted, textDecorationLine: 'line-through' },
     namePlaceholder: { color: t.muted },

@@ -47,7 +47,7 @@ dependencyResolutionManagement {
 
 // app/build.gradle.kts
 dependencies {
-    implementation("co.mealio:mealio-sdk-compose:0.2.0") // pulls in mealio-sdk
+    implementation("co.mealio:mealio-sdk-compose:0.3.0") // pulls in mealio-sdk
 }
 ```
 
@@ -102,6 +102,31 @@ MealioCartButton(
     modifier = Modifier.fillMaxWidth(),
 )
 ```
+
+### Several meals in one cart
+
+Pass `recipes` instead of `recipe`, up to 10 (`MAX_RECIPES`), each with its
+own `id`. Ingredients the recipes share become one item, and a pick on it is
+remembered under every recipe that calls for it.
+
+```kotlin
+MealioCartButton(recipes = listOf(tacos, pasta), store = "heb")
+```
+
+The sheet's kicker reads "2 meals", and each item says which meals it is for
+("For Tacos and Pasta"). Without Compose:
+
+```kotlin
+val cart = MealioCart.prepareCart("heb", listOf(tacos, pasta))
+cart.recipes                       // [CartRecipe(id, title)], in the order sent
+cart.recipesFor(item.key)          // [ItemRecipe(id, title, quantity)]: each recipe's share
+forRecipes(cart, item.key)         // "For Tacos and Pasta", or null on a one-recipe cart
+```
+
+An empty list fails with `bad_recipe` and more than 10 with
+`too_many_recipes`, before any network call. One recipe is still sent as
+`recipe`, so older servers keep working; they return no `recipes` lists, and
+both come back empty.
 
 ### Your own button: `MealioCartFlow`
 
@@ -199,6 +224,7 @@ WebView in your app, not only the stores'.
 @Composable fun MealioCartFlow(visible: Boolean, recipe: Recipe, store: String? = null, zip: String? = null,
     onClose: (AddResult?) -> Unit, onAdded: (AddResult) -> Unit = {}, onError: (Exception) -> Unit = {},
     theme: MealioTheme = LocalMealioTheme.current)
+// MealioCartButton and MealioCartFlow each have a twin taking `recipes: List<Recipe>` in place of `recipe`.
 @Composable fun MealioCartList(cart: CartSession, storeName: String, busy: Boolean, onAdd: () -> Unit,
     modifier: Modifier = Modifier, onChange: () -> Unit = {}, onChangeStore: (() -> Unit)? = null, theme: MealioTheme = ...)
 data class MealioTheme(accent, onAccent, background, surface, text, muted, border, radius, fontFamily, warnBackground, warnText)
@@ -212,6 +238,7 @@ object MealioCart {
     val isConfigured: Boolean
     val client: MealioClient
     suspend fun prepareCart(store: String?, recipe: Recipe, zip: String? = null, onStep: StepListener? = null): CartSession
+    suspend fun prepareCart(store: String?, recipes: List<Recipe>, zip: String? = null, onStep: StepListener? = null): CartSession
     suspend fun stores(): List<StoreInfo>
     suspend fun signOutOfStore(store: String)
     suspend fun signOutOfAllStores()
@@ -220,6 +247,8 @@ object MealioCart {
 class CartSession {
     val cartId: String; val store: String; val storeName: String?; val cart: PreparedCart
     val items: List<CartItem>                       // every recipe line, in order
+    val recipes: List<CartRecipe>                   // the recipes the cart was made from; empty from older servers
+    fun recipesFor(key: String): List<ItemRecipe>   // the recipes an item is for; empty from older servers
     fun options(key: String): List<Product>         // server options + search results, no repeats
     fun selectedId(key: String): String?
     fun isSelected(key: String): Boolean
@@ -242,11 +271,15 @@ enum class Step { CONNECTING, CHECKING_SIGN_IN, SIGNING_IN, SEARCHING, ADDING }
 typealias StepListener = (Step, Instruction) -> Unit
 fun stepOf(ins: Instruction): Step
 data class StoreInfo(val id: String, val name: String, val via: String)
+data class CartRecipe(val id: String, val title: String?)
+data class ItemRecipe(val id: String, val title: String?, val quantity: Int)
+const val MAX_RECIPES = 10
+fun forRecipes(cart: CartSession, key: String): String?   // "For Tacos and Pasta"; null unless 2+ recipes
 class MealioException(val code: String, message: String, cause: Throwable? = null) : Exception
 ```
 
 `CartItem` has `key, ingredient, quantity, status, options, selectedId,
-remembered, rememberedPreferenceId, reason`. `Product` has `id, name, price,
+remembered, rememberedPreferenceId, reason, recipes`. `Product` has `id, name, price,
 imageUrl, size, outOfStock, badge, preferences, unitPrice, estimated`.
 `AddResult` has `added, skipped, failed, storeCartUrl, verified`. Each
 `AddedItem` has `key, productId, name, quantity, weightLb` and, from newer
@@ -259,8 +292,9 @@ read back.
 Error codes are the ones in PROTOCOL.md: `bad_envelope`, `blocked`,
 `store_unavailable`, `login_cancelled`, `session_expired`, `network`,
 `unsupported`, plus `store_required` (no store given and no default yet),
-`server` (Mealio answered with an error) and `unknown_item` /
-`unknown_product` from `select`.
+`server` (Mealio answered with an error), `unknown_item` /
+`unknown_product` from `select`, and `bad_recipe` / `too_many_recipes` from
+`prepareCart` with no recipes or more than 10.
 
 There is no separate hello call. `prepareCart`, `search` and `addToCart` each
 send `sdk: {platform, version, core, ops}` and `epoch` in their body.
@@ -319,12 +353,14 @@ The unit tests run on the JVM (JUnit 4):
   every refusal reason, allowlist edges and matcher rules, with a fake Host.
   It signs extra envelopes with the same deterministic test key.
 - `ClientTest` covers the drive loop, the 401 retry, headers and the
-  `sdk`/`epoch` body fields, the store list, optional store and
+  `sdk`/`epoch` body fields, `recipe` vs `recipes` in the cart body and the
+  recipe count limits, the store list, optional store and
   `store_required`, allowlist widening, error mapping, and the 0.1 server
   shape through the deprecated API.
 - `CartSessionTest` covers remembered items pre-selected, deselect, search
   merging options, `estimate()` with server unit prices ("2 for $1.05"),
-  the estimated flag, `stepOf` and the runner's onStep.
+  the estimated flag, `stepOf` and the runner's onStep, and the multi-recipe
+  fields (`recipes`, `recipesFor`, `forRecipes`) with and without a newer server.
 - `GuardScriptTest` checks `GUARD_SCRIPT` and `BRIDGE_SHIM` byte for byte
   against `guard-expected.js` / `bridge-expected.js`, which are the exact
   strings `packages/core/src/guard.ts` produces. If `guard.ts` changes,

@@ -1,4 +1,5 @@
-// The one-view integration: MealioCartButton(recipe: recipe, store: "heb").
+// The one-view integration: MealioCartButton(recipe: recipe, store: "heb"),
+// or MealioCartButton(recipes: [tacos, pasta]) to fill one cart from several meals.
 // It draws a themed button and runs the whole flow in one sheet.
 // Mirrors packages/react-native/src/MealioCartButton.tsx.
 
@@ -7,7 +8,7 @@ import SwiftUI
 
 @MainActor
 public struct MealioCartButton: View {
-    private let recipe: Recipe
+    private let recipes: [Recipe]
     private let store: String?
     private let zip: String?
     private let label: String
@@ -36,7 +37,22 @@ public struct MealioCartButton: View {
                 onAdded: ((AddResult) -> Void)? = nil,
                 onClose: ((AddResult?) -> Void)? = nil,
                 onError: ((Error) -> Void)? = nil) {
-        self.recipe = recipe
+        self.init(recipes: [recipe], store: store, zip: zip, label: label, disabled: disabled,
+                  onAdded: onAdded, onClose: onClose, onError: onError)
+    }
+
+    /// One cart from several recipes (at most `MAX_RECIPES`). Ingredients they
+    /// share become one item, and each item says which recipes it is for.
+    /// Other parameters as in `init(recipe:...)`.
+    public init(recipes: [Recipe],
+                store: String? = nil,
+                zip: String? = nil,
+                label: String = "Add to my grocery cart",
+                disabled: Bool = false,
+                onAdded: ((AddResult) -> Void)? = nil,
+                onClose: ((AddResult?) -> Void)? = nil,
+                onError: ((Error) -> Void)? = nil) {
+        self.recipes = recipes
         self.store = store
         self.zip = zip
         self.label = label
@@ -61,7 +77,7 @@ public struct MealioCartButton: View {
         }
         .buttonStyle(.plain)
         .disabled(isDisabled)
-        .mealioCartFlow(isPresented: $open, recipe: recipe, store: store, zip: zip,
+        .mealioCartFlow(isPresented: $open, recipes: recipes, store: store, zip: zip,
                         onAdded: onAdded, onError: onError, onClose: onClose)
     }
 }

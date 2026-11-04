@@ -8,6 +8,7 @@ import android.content.Context
  * ```
  * MealioCart.configure(context, "pk_live_...", sessionTokenProvider = { myServer.mealioSessionToken() })
  * // Compose: MealioCartButton(recipe, store = "heb") runs the whole flow.
+ * // Several meals in one cart: MealioCartButton(recipes = listOf(tacos, pasta)).
  * // Or by hand:
  * val session = MealioCart.prepareCart("heb", recipe, zip = "78701")
  * session.select(item.key, session.options(item.key).first().id)
@@ -15,7 +16,7 @@ import android.content.Context
  * ```
  */
 object MealioCart {
-    const val SDK_VERSION = "0.2.0"
+    const val SDK_VERSION = "0.3.0"
 
     private class State(val client: MealioClient, val host: WebViewHost, val sessions: StoreSessions)
 
@@ -72,6 +73,16 @@ object MealioCart {
     @JvmOverloads
     suspend fun prepareCart(store: String?, recipe: Recipe, zip: String? = null, onStep: StepListener? = null): CartSession =
         current().client.prepareCart(store, recipe, zip, onStep)
+
+    /**
+     * Start one cart from several recipes (at most [MAX_RECIPES]). Ingredients
+     * they share become one item; [CartSession.recipesFor] says which recipes
+     * each item is for. Throws MealioException ("bad_recipe" for none,
+     * "too_many_recipes" for more than MAX_RECIPES).
+     */
+    @JvmOverloads
+    suspend fun prepareCart(store: String?, recipes: List<Recipe>, zip: String? = null, onStep: StepListener? = null): CartSession =
+        current().client.prepareCart(store, recipes, zip, onStep)
 
     /** Stores the SDK supports right now (GET /api/v1/stores). */
     suspend fun stores(): List<StoreInfo> = current().client.stores()

@@ -162,6 +162,14 @@ class CartSession extends ChangeNotifier {
   /// Every item in recipe order.
   List<CartItem> get items => cart.items;
 
+  /// The recipes this cart was made from, in the order sent. Empty from
+  /// servers older than multi-recipe.
+  List<CartRecipe> get recipes => cart.recipes ?? const <CartRecipe>[];
+
+  /// The recipes that call for an item, for a "For Tacos and Pasta" line.
+  /// Empty from older servers and for a key the cart does not have.
+  List<ItemRecipe> recipesFor(String key) => _find(key)?.recipes ?? const <ItemRecipe>[];
+
   // ignore: deprecated_member_use_from_same_package
   @Deprecated('Use items')
   List<CartItem> get ready => cart.ready;

@@ -5,9 +5,9 @@
 import Foundation
 
 /// SDK version, sent as `X-Mealio-SDK: ios/<version>` and in the `sdk` body field.
-public let MEALIO_SDK_VERSION = "0.2.0"
+public let MEALIO_SDK_VERSION = "0.3.0"
 /// The version of the reference core this SDK ports.
-public let SDK_CORE_VERSION = "0.1.0"
+public let SDK_CORE_VERSION = "0.2.0"
 public let DEFAULT_BASE_URL = URL(string: "https://mealio.co")!
 
 /// An error the SDK raises to the app. `code` is one of `MealioError.Code`, or
@@ -51,6 +51,10 @@ public struct MealioError: Error, LocalizedError, Equatable, CustomStringConvert
         public static let unknownProduct = "unknown_product"
         /// `MealioCart.configure` has not been called.
         public static let notConfigured = "not_configured"
+        /// `prepareCart` was given no recipe.
+        public static let badRecipe = "bad_recipe"
+        /// `prepareCart` was given more than `MAX_RECIPES` recipes.
+        public static let tooManyRecipes = "too_many_recipes"
     }
 }
 
@@ -189,9 +193,31 @@ public final class MealioClient {
     /// and fails with `store_required` when they have none yet.
     public func prepareCart(store: String? = nil, recipe: Recipe, zip: String? = nil,
                             onStep: StepListener? = nil) async throws -> CartSession {
-        struct Body: Encodable { let store: String?; let recipe: Recipe; let zip: String?; let sdk: SDKInfo; let epoch: Int }
+        try await prepareCart(store: store, recipes: [recipe], zip: zip, onStep: onStep)
+    }
+
+    /// Start one cart from several recipes (1 to `MAX_RECIPES`). Ingredients
+    /// they share become one item, and each pick is remembered under every
+    /// recipe that calls for it. Throws `bad_recipe` for an empty list and
+    /// `too_many_recipes` past the limit, before any network call.
+    public func prepareCart(store: String? = nil, recipes: [Recipe], zip: String? = nil,
+                            onStep: StepListener? = nil) async throws -> CartSession {
+        if recipes.isEmpty {
+            throw MealioError(code: MealioError.Code.badRecipe, message: "Pass recipe, or recipes with at least one recipe.")
+        }
+        if recipes.count > MAX_RECIPES {
+            throw MealioError(code: MealioError.Code.tooManyRecipes, message: "At most \(MAX_RECIPES) recipes in one cart.")
+        }
+        struct One: Encodable { let store: String?; let recipe: Recipe; let zip: String?; let sdk: SDKInfo; let epoch: Int }
+        struct Many: Encodable { let store: String?; let recipes: [Recipe]; let zip: String?; let sdk: SDKInfo; let epoch: Int }
         let a = about()
-        let start = try await post("/api/v1/sdk/carts", body: Body(store: store, recipe: recipe, zip: zip, sdk: a.sdk, epoch: a.epoch))
+        // One recipe goes as `recipe`, so a server from before multi-recipe still understands it.
+        let start: JSONValue
+        if recipes.count == 1 {
+            start = try await post("/api/v1/sdk/carts", body: One(store: store, recipe: recipes[0], zip: zip, sdk: a.sdk, epoch: a.epoch))
+        } else {
+            start = try await post("/api/v1/sdk/carts", body: Many(store: store, recipes: recipes, zip: zip, sdk: a.sdk, epoch: a.epoch))
+        }
         let result = try await drive(start, onStep: onStep)
         do {
             return CartSession(client: self, cart: try result.decode(PreparedCart.self))

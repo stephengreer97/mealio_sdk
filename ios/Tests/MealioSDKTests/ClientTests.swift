@@ -747,4 +747,164 @@ final class ClientTests: XCTestCase {
         XCTAssertEqual(cs.selections()[1], Selection(key: "garlic", productId: "g1", quantity: 1, remember: true, preferenceId: "thin"))
         XCTAssertEqual(cs.estimate().count, 2)
     }
+
+    // MARK: Multi-recipe carts
+
+    /// A cart from four recipes: ingredients they share merged into one item.
+    static let multiCartJSON = #"""
+    {"cartId":"c/3","store":"heb","storeName":"H-E-B",
+     "recipes":[{"id":"tacos","title":"Tacos"},{"id":"pasta","title":"Pasta"},{"id":"soup","title":null},{"id":"salad","title":"Salad"}],
+     "items":[
+      {"key":"onion","ingredient":"onion","quantity":3,"status":"choose","selectedId":null,"remembered":null,
+       "options":[{"id":"o1","name":"Onion"}],
+       "recipes":[{"id":"tacos","title":"Tacos","quantity":1},{"id":"pasta","title":"Pasta","quantity":2}]},
+      {"key":"garlic","ingredient":"garlic","quantity":3,"status":"choose","selectedId":null,"remembered":null,
+       "options":[{"id":"g1","name":"Garlic"}],
+       "recipes":[{"id":"tacos","title":"Tacos","quantity":1},{"id":"pasta","title":"Pasta","quantity":1},{"id":"salad","title":"Salad","quantity":1}]},
+      {"key":"stock","ingredient":"stock","quantity":1,"status":"choose","selectedId":null,"remembered":null,
+       "options":[{"id":"st1","name":"Stock"}],
+       "recipes":[{"id":"soup","title":null,"quantity":1}]},
+      {"key":"lime","ingredient":"lime","quantity":1,"status":"choose","selectedId":null,"remembered":null,
+       "options":[{"id":"l1","name":"Lime"}],
+       "recipes":[{"id":"tacos","title":"Tacos"}]}
+     ]}
+    """#
+
+    private static func recipe(_ id: String, _ title: String? = nil) -> Recipe {
+        Recipe(id: id, title: title, ingredients: [RecipeIngredient(name: "onion")])
+    }
+
+    @MainActor
+    func testOneRecipeIsSentAsRecipeAndSeveralAsRecipes() async throws {
+        let cart: JSONValue = try XCTUnwrap(JSONValue.parse(ClientTests.multiCartJSON))
+        let client = makeClient(keys: TestSigner.keys)
+
+        // One recipe, either overload: `recipe`, so older servers still understand it.
+        let one = Recorder()
+        serveDone(cart, rec: one)
+        _ = try await client.prepareCart(recipe: ClientTests.recipe("r1", "Tacos"))
+        let b1 = try XCTUnwrap(one.body("/api/v1/sdk/carts"))
+        XCTAssertEqual(b1["recipe"]?["id"], .string("r1"))
+        XCTAssertEqual(b1["recipe"]?["title"], .string("Tacos"))
+        XCTAssertNil(b1["recipes"])
+
+        let oneList = Recorder()
+        serveDone(cart, rec: oneList)
+        _ = try await client.prepareCart(recipes: [ClientTests.recipe("r1")])
+        let b2 = try XCTUnwrap(oneList.body("/api/v1/sdk/carts"))
+        XCTAssertEqual(b2["recipe"]?["id"], .string("r1"))
+        XCTAssertNil(b2["recipes"])
+
+        // Several: `recipes`, in order, with store and zip alongside.
+        let many = Recorder()
+        serveDone(cart, rec: many)
+        let session = try await client.prepareCart(store: "heb", recipes: [ClientTests.recipe("r1"), ClientTests.recipe("r2")],
+                                                   zip: "78701")
+        let b3 = try XCTUnwrap(many.body("/api/v1/sdk/carts"))
+        XCTAssertNil(b3["recipe"])
+        XCTAssertEqual(b3["recipes"]?.arrayValue?.compactMap { $0["id"]?.stringValue }, ["r1", "r2"])
+        XCTAssertEqual(b3["store"], .string("heb"))
+        XCTAssertEqual(b3["zip"], .string("78701"))
+        XCTAssertEqual(b3["sdk"]?["platform"], .string("ios"))
+        XCTAssertEqual(session.recipes.map(\.id), ["tacos", "pasta", "soup", "salad"])
+
+        // The limit itself is fine.
+        let ten = Recorder()
+        serveDone(cart, rec: ten)
+        _ = try await client.prepareCart(recipes: (0..<MAX_RECIPES).map { ClientTests.recipe("r\($0)") })
+        XCTAssertEqual(ten.body("/api/v1/sdk/carts")?["recipes"]?.arrayValue?.count, MAX_RECIPES)
+    }
+
+    @MainActor
+    func testNoRecipesOrTooManyThrowBeforeAnyRequest() async throws {
+        let rec = Recorder()
+        StubURLProtocol.handler = { req, body in
+            rec.record(req, body: body)
+            return (500, Data())
+        }
+        let client = makeClient(keys: TestSigner.keys)
+        do {
+            _ = try await client.prepareCart(recipes: [])
+            XCTFail("expected bad_recipe")
+        } catch let e as MealioError {
+            XCTAssertEqual(e.code, MealioError.Code.badRecipe)
+            XCTAssertEqual(e.code, "bad_recipe")
+        }
+        do {
+            _ = try await client.prepareCart(recipes: (0...MAX_RECIPES).map { ClientTests.recipe("r\($0)") })
+            XCTFail("expected too_many_recipes")
+        } catch let e as MealioError {
+            XCTAssertEqual(e.code, MealioError.Code.tooManyRecipes)
+            XCTAssertEqual(e.code, "too_many_recipes")
+        }
+        XCTAssertEqual(rec.paths, [])
+        XCTAssertEqual(MAX_RECIPES, 10)
+    }
+
+    func testMultiRecipeFieldsDecode() throws {
+        let cart = try JSONDecoder().decode(PreparedCart.self, from: Data(ClientTests.multiCartJSON.utf8))
+        XCTAssertEqual(cart.recipes, [CartRecipe(id: "tacos", title: "Tacos"), CartRecipe(id: "pasta", title: "Pasta"),
+                                      CartRecipe(id: "soup", title: nil), CartRecipe(id: "salad", title: "Salad")])
+        XCTAssertEqual(cart.items[0].quantity, 3)
+        XCTAssertEqual(cart.items[0].recipes, [ItemRecipe(id: "tacos", title: "Tacos", quantity: 1),
+                                               ItemRecipe(id: "pasta", title: "Pasta", quantity: 2)])
+        XCTAssertEqual(cart.items[2].recipes, [ItemRecipe(id: "soup", title: nil, quantity: 1)])
+        // A share with no quantity counts as 1.
+        XCTAssertEqual(cart.items[3].recipes?.first?.quantity, 1)
+    }
+
+    func testCartsFromOlderServersHaveNoRecipes() throws {
+        let cart = try JSONDecoder().decode(PreparedCart.self, from: Data(ClientTests.newCartJSON.utf8))
+        XCTAssertNil(cart.recipes)
+        XCTAssertNil(cart.items[0].recipes)
+        let old = try JSONDecoder().decode(PreparedCart.self, from: Data(ClientTests.cartJSON.utf8))
+        XCTAssertNil(old.recipes)
+        XCTAssertTrue(old.items.allSatisfy { $0.recipes == nil })
+        XCTAssertNil(mealioForRecipes(cart, key: "onion"))
+    }
+
+    @MainActor
+    func testSessionListsRecipesAndTheRecipesForEachItem() throws {
+        let client = makeClient(keys: TestSigner.keys)
+        let multi = try makeSession(client, json: ClientTests.multiCartJSON)
+        XCTAssertEqual(multi.recipes.map(\.id), ["tacos", "pasta", "soup", "salad"])
+        XCTAssertEqual(multi.recipes(for: "onion").map(\.id), ["tacos", "pasta"])
+        XCTAssertEqual(multi.recipes(for: "onion").map(\.quantity), [1, 2])
+        XCTAssertEqual(multi.recipes(for: "nope"), [])
+        XCTAssertEqual(multi.recipesLabel(for: "onion"), "For Tacos and Pasta")
+
+        let old = try makeSession(client, json: ClientTests.newCartJSON)
+        XCTAssertEqual(old.recipes, [])
+        XCTAssertEqual(old.recipes(for: "onion"), [])
+        XCTAssertNil(old.recipesLabel(for: "onion"))
+    }
+
+    func testForRecipesLabel() throws {
+        let cart = try JSONDecoder().decode(PreparedCart.self, from: Data(ClientTests.multiCartJSON.utf8))
+        XCTAssertEqual(mealioForRecipes(cart, key: "onion"), "For Tacos and Pasta")
+        XCTAssertEqual(mealioForRecipes(cart, key: "garlic"), "For Tacos, Pasta and Salad")
+        XCTAssertEqual(mealioForRecipes(cart, key: "lime"), "For Tacos")
+        // Untitled recipes are left out; with no names left there is no line.
+        XCTAssertNil(mealioForRecipes(cart, key: "stock"))
+        XCTAssertNil(mealioForRecipes(cart, key: "nope"))
+
+        // A one-recipe cart never shows the line.
+        let single = PreparedCart(cartId: "c", store: "heb",
+                                  items: [CartItem(key: "a", ingredient: "a", status: .choose,
+                                                   recipes: [ItemRecipe(id: "tacos", title: "Tacos")])],
+                                  recipes: [CartRecipe(id: "tacos", title: "Tacos")])
+        XCTAssertNil(mealioForRecipes(single, key: "a"))
+
+        // Empty titles count as untitled.
+        let blank = PreparedCart(cartId: "c", store: "heb",
+                                 items: [CartItem(key: "a", ingredient: "a", status: .choose,
+                                                  recipes: [ItemRecipe(id: "x", title: ""), ItemRecipe(id: "y", title: "Soup")])],
+                                 recipes: [CartRecipe(id: "x", title: ""), CartRecipe(id: "y", title: "Soup")])
+        XCTAssertEqual(mealioForRecipes(blank, key: "a"), "For Soup")
+
+        XCTAssertEqual(mealioListAnd([]), "")
+        XCTAssertEqual(mealioListAnd(["A"]), "A")
+        XCTAssertEqual(mealioListAnd(["A", "B"]), "A and B")
+        XCTAssertEqual(mealioListAnd(["A", "B", "C", "D"]), "A, B, C and D")
+    }
 }

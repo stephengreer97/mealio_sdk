@@ -12,11 +12,11 @@ import { Modal, Platform, Pressable, SafeAreaView, StyleSheet, Text, View } from
 import { WebView, type WebViewMessageEvent, type WebViewNavigation } from 'react-native-webview';
 import {
   MealioClient, matchesAny, parseMessage,
-  type CartSession, type Host, type JsonMessage, type Matcher, type Recipe, type StepListener, type StoreInfo,
+  type CartSession, type Host, type JsonMessage, type Matcher, type PrepareCartInput, type StepListener, type StoreInfo,
 } from '@mealio/sdk-core';
 import { resolveTheme, type MealioTheme } from './theme';
 
-export const SDK_VERSION = '0.2.0';
+export const SDK_VERSION = '0.3.0';
 
 export interface EpochStorage {
   get(): Promise<number>;
@@ -38,7 +38,8 @@ export interface MealioProviderProps {
 }
 
 export interface MealioApi {
-  prepareCart(input: { store?: string | null; recipe: Recipe; zip?: string | null }, opts?: { onStep?: StepListener }): Promise<CartSession>;
+  /** `recipe` for one, or `recipes` for up to 10 in one cart. */
+  prepareCart(input: PrepareCartInput, opts?: { onStep?: StepListener }): Promise<CartSession>;
   stores(): Promise<StoreInfo[]>;
   signOutOfAllStores(): Promise<void>;
   theme: MealioTheme;
