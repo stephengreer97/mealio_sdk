@@ -40,6 +40,12 @@
     ],
     "experiments": {
       "tsconfigPaths": false
-    }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "ac68b5c2-ef03-4f26-a6e7-70d0c727deb5"
+      }
+    },
+    "owner": "mealio"
   }
 }
