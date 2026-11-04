@@ -54,6 +54,21 @@ Day to day:
 npx expo start --dev-client
 ```
 
+## A build for demos
+
+The development build loads its code from Metro on your computer, so it only
+works near that computer. For showing Simmer to people, use the preview build:
+the code is built in and it runs anywhere with internet.
+
+```bash
+eas build -p android --profile preview   # an .apk, install from the Expo link
+eas build -p ios --profile preview       # internal: registered iPhones only
+```
+
+Its keys come from EAS environment variables (environment `preview`):
+`EXPO_PUBLIC_MEALIO_PK` and `EXPO_PUBLIC_SIMMER_DEMO_TOKEN`. The server address
+is in `eas.json`. Rebuild after changing code: a preview build does not reload.
+
 ## Demo script
 
 1. Open **This week**, tap **Plan a sample week**. Five meals land on Monday to

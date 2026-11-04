@@ -1,10 +1,25 @@
 {
-  "cli": { "version": ">= 18.4.0", "appVersionSource": "remote" },
+  "cli": {
+    "version": ">= 18.4.0",
+    "appVersionSource": "remote"
+  },
   "build": {
     "development": {
       "developmentClient": true,
       "distribution": "internal",
-      "env": { "EXPO_PUBLIC_SIMMER_SERVER": "https://simmer-demo-server.vercel.app" }
+      "env": {
+        "EXPO_PUBLIC_SIMMER_SERVER": "https://simmer-demo-server.vercel.app"
+      }
+    },
+    "preview": {
+      "distribution": "internal",
+      "environment": "preview",
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "EXPO_PUBLIC_SIMMER_SERVER": "https://simmer-demo-server.vercel.app"
+      }
     }
   }
 }
