@@ -109,6 +109,45 @@ class ClientTest {
     }
 
     @Test
+    fun oneRecipeGoesAsRecipeAndSeveralAsRecipes(): Unit = runBlocking {
+        val bodies = mutableListOf<JSONObject>()
+        val client = MealioClient(config(), FakeHost(), FakeTransport { _, _, b -> bodies.add(b); HttpResponse(503, "{}") })
+        val tacos = Recipe("r1", listOf(RecipeIngredient("onion")), title = "Tacos")
+        val pasta = Recipe("r2", listOf(RecipeIngredient("onion"), RecipeIngredient("penne")), title = "Pasta")
+
+        code { client.prepareCart("heb", tacos) }
+        code { client.prepareCart("heb", listOf(tacos)) }
+        code { client.prepareCart("heb", listOf(tacos, pasta), zip = "78701") }
+        assertEquals(3, bodies.size)
+
+        // One recipe, either overload: `recipe`, so an older server understands it.
+        for (b in bodies.take(2)) {
+            assertEquals("Tacos", b.getJSONObject("recipe").getString("title"))
+            assertFalse(b.has("recipes"))
+        }
+        val several = bodies[2]
+        assertFalse(several.has("recipe"))
+        val sent = several.getJSONArray("recipes").objects()
+        assertEquals(listOf("r1", "r2"), sent.map { it.getString("id") })
+        assertEquals(2, sent[1].getJSONArray("ingredients").length())
+        assertEquals("heb", several.getString("store"))
+        assertEquals("78701", several.getString("zip"))
+        assertEquals(SDK_CORE_VERSION, several.getJSONObject("sdk").getString("core"))
+    }
+
+    @Test
+    fun noRecipesOrTooManyFailBeforeAnyRequest(): Unit = runBlocking {
+        var tokens = 0
+        val transport = FakeTransport { _, _, _ -> error("no calls") }
+        val client = MealioClient(config { tokens += 1; "tok" }, FakeHost(), transport)
+        assertEquals("bad_recipe", code { client.prepareCart("heb", emptyList<Recipe>()) })
+        val eleven = (1..MAX_RECIPES + 1).map { Recipe("r$it", listOf(RecipeIngredient("salt"))) }
+        assertEquals("too_many_recipes", code { client.prepareCart("heb", eleven) })
+        assertTrue(transport.seen.isEmpty())
+        assertEquals(0, tokens)
+    }
+
+    @Test
     fun epochDefaultsToZero(): Unit = runBlocking {
         var body: JSONObject? = null
         val client = MealioClient(config(), FakeHost(), FakeTransport { _, _, b -> body = b; HttpResponse(503, "{}") })

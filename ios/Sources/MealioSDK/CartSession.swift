@@ -82,6 +82,26 @@ private func priceOfAdded(_ a: AddedItem, _ fallback: Product?) -> AddedPrice? {
     return AddedPrice(amount: round(unit * Double(max(1, a.quantity))), estimated: est)
 }
 
+/// "For Tacos and Pasta": which recipes call for an item, on a cart made from
+/// two or more recipes. Nil on a one-recipe cart, from older servers, or when
+/// none of the item's recipes has a title. Mirrors `forRecipes` in the React
+/// Native drop-in.
+public func mealioForRecipes(_ cart: PreparedCart, key: String) -> String? {
+    guard (cart.recipes ?? []).count >= 2 else { return nil }
+    let item = cart.items.first { $0.key == key }
+    let names = (item?.recipes ?? []).compactMap { r -> String? in
+        guard let t = r.title, !t.isEmpty else { return nil }
+        return t
+    }
+    return names.isEmpty ? nil : "For \(mealioListAnd(names))"
+}
+
+/// "A", "A and B", "A, B and C".
+func mealioListAnd(_ xs: [String]) -> String {
+    guard xs.count > 1, let last = xs.last else { return xs.first ?? "" }
+    return "\(xs.dropLast().joined(separator: ", ")) and \(last)"
+}
+
 @MainActor
 public final class CartSession: ObservableObject {
     struct Pick: Equatable {
@@ -117,6 +137,14 @@ public final class CartSession: ObservableObject {
     public var storeName: String? { cart.storeName }
     /// Every item, in recipe order (older servers: rebuilt from the 0.1 groupings).
     public var items: [CartItem] { cart.items }
+    /// The recipes this cart was made from. Older servers: none listed.
+    public var recipes: [CartRecipe] { cart.recipes ?? [] }
+    /// The recipes that call for an item, for a "For Tacos and Pasta" line.
+    /// Empty from older servers.
+    public func recipes(for key: String) -> [ItemRecipe] { find(key)?.recipes ?? [] }
+    /// "For Tacos and Pasta" for an item on a cart from two or more recipes,
+    /// nil otherwise. See `mealioForRecipes(_:key:)`.
+    public func recipesLabel(for key: String) -> String? { mealioForRecipes(cart, key: key) }
 
     @available(*, deprecated, message: "Use items")
     public var ready: [CartItem] { cart.ready }

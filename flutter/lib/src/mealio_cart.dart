@@ -55,7 +55,8 @@ class _ScopedHost implements MealioHost {
 ///   sessionTokenProvider: () => myServer.mealioSessionToken(),
 ///   theme: const MealioTheme(accent: Color(0xFF0B5FFF)),
 /// );
-/// // Then, anywhere: MealioCartButton(recipe: recipe, store: 'heb')
+/// // Then, anywhere: MealioCartButton(recipe: recipe, store: 'heb'),
+/// // or MealioCartButton(recipes: <Recipe>[tacos, pasta]) for one cart.
 /// ```
 class MealioCart {
   MealioCart._(this._client);
@@ -116,16 +117,20 @@ class MealioCart {
   /// needed and searches every ingredient. Without `store`, Mealio uses the
   /// user's default store and fails with `store_required` when there is none.
   /// `onStep` reports progress. Throws [MealioException].
+  ///
+  /// Pass `recipes` instead of `recipe` to fill one cart from up to
+  /// [maxRecipes] recipes. Ingredients they share become one item.
   Future<CartSession> prepareCart({
     String? store,
-    required Recipe recipe,
+    Recipe? recipe,
+    List<Recipe>? recipes,
     String? zip,
     StepListener? onStep,
   }) async {
     if (WebViewHost.current == null) {
       throw const MealioException(MealioErrorCode.noScope, 'Place MealioScope near the root of your app.');
     }
-    return _client.prepareCart(store: store, recipe: recipe, zip: zip, onStep: onStep);
+    return _client.prepareCart(store: store, recipe: recipe, recipes: recipes, zip: zip, onStep: onStep);
   }
 
   /// Signs the user out of `store`.

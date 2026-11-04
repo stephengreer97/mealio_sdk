@@ -11,6 +11,24 @@ import '../protocol.dart';
 import '../theme.dart';
 import 'flow_parts.dart';
 
+/// "For Tacos and Pasta": the line under an item's ingredient on a cart made
+/// from two or more recipes. Null on a one-recipe cart, from older servers,
+/// and when none of the item's recipes has a title.
+String? forRecipes(CartSession session, String key) =>
+    forRecipesLabel(session.recipes.length, session.recipesFor(key));
+
+/// [forRecipes] without a session. `cartRecipeCount` is how many recipes the
+/// cart was made from; `itemRecipes` are the ones that call for the item.
+/// Untitled recipes are left out: "For A and B", "For A, B and C".
+String? forRecipesLabel(int cartRecipeCount, List<ItemRecipe> itemRecipes) {
+  if (cartRecipeCount < 2) return null;
+  final names = itemRecipes
+      .map((ItemRecipe r) => r.title?.trim() ?? '')
+      .where((String n) => n.isNotEmpty)
+      .toList();
+  return names.isEmpty ? null : 'For ${listAnd(names)}';
+}
+
 /// The list screen on its own, for apps that host it in their own sheet.
 /// Rebuilds whenever `session` changes.
 class MealioCartList extends StatefulWidget {
@@ -286,6 +304,14 @@ class _ItemRowState extends State<_ItemRow> {
     );
     final ingredient = Text(item.ingredient,
         maxLines: 1, overflow: TextOverflow.ellipsis, style: t.style(size: 12, weight: FontWeight.w500, color: t.muted));
+    final forLine = forRecipes(_s, item.key);
+    final Widget? forText = forLine == null
+        ? null
+        : Padding(
+            padding: const EdgeInsets.only(top: 1),
+            child: Text(forLine,
+                maxLines: 1, overflow: TextOverflow.ellipsis, style: t.style(size: 11, color: t.muted)),
+          );
 
     if (item.status == ItemStatus.unavailable) {
       return Semantics(
@@ -304,6 +330,7 @@ class _ItemRowState extends State<_ItemRow> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: <Widget>[
                     ingredient,
+                    if (forText != null) forText,
                     Text('Not found at $storeName', style: t.style(size: 14, weight: FontWeight.w600, color: t.muted)),
                   ],
                 ),
@@ -375,6 +402,7 @@ class _ItemRowState extends State<_ItemRow> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: <Widget>[
                     ingredient,
+                    if (forText != null) forText,
                     Text(shown?.name ?? 'Choose a product',
                         maxLines: 2, overflow: TextOverflow.ellipsis, style: nameStyle),
                     if (meta.isNotEmpty) Text(meta, style: t.style(size: 12, height: 17 / 12, color: t.muted)),

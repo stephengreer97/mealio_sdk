@@ -1,0 +1,45 @@
+{
+  "expo": {
+    "name": "Simmer",
+    "slug": "simmer",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "scheme": "simmer",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#FBF6EF"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "co.mealio.simmer",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "co.mealio.simmer",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#C4532D"
+      }
+    },
+    "plugins": [
+      "expo-dev-client",
+      "expo-font",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash.png",
+          "imageWidth": 200,
+          "backgroundColor": "#FBF6EF"
+        }
+      ]
+    ],
+    "experiments": {
+      "tsconfigPaths": false
+    }
+  }
+}

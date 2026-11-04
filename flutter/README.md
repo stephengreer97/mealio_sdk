@@ -110,6 +110,26 @@ final AddResult? result = await MealioCartFlow.show(context, recipe: recipe, sto
 
 `null` means nothing was added.
 
+### Several recipes in one cart
+
+Pass `recipes` instead of `recipe` (at most `maxRecipes`, 10). Ingredients the
+recipes share become one item, and a pick is remembered under every recipe
+that calls for it. The sheet's header says "3 meals", and each row says which
+meals it is for ("For Tacos and Pasta").
+
+```dart
+MealioCartButton(recipes: [tacos, pasta, soup], store: 'heb')
+
+// or
+await MealioCartFlow.show(context, recipes: [tacos, pasta, soup]);
+final session = await MealioCart.instance.prepareCart(recipes: [tacos, pasta, soup]);
+session.recipes;                     // [CartRecipe(id, title)], in the order sent
+session.recipesFor(item.key);        // [ItemRecipe(id, title, quantity)] for one item
+```
+
+More than 10 throws `too_many_recipes` and none throws `bad_recipe`, before
+any request. Older servers send neither list; both read as empty.
+
 ### Theme
 
 `MealioTheme` has `accent`, `onAccent`, `background`, `surface`, `text`,

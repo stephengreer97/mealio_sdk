@@ -4,6 +4,7 @@
 //         try await MyServer.mealioSessionToken()   // POST /api/v1/sessions, server side
 //     }
 //     MealioCartButton(recipe: recipe, store: "heb")   // the whole flow, in one sheet
+//     MealioCartButton(recipes: [tacos, pasta])         // one cart from several meals
 
 #if canImport(UIKit) && canImport(WebKit)
 import UIKit
@@ -63,6 +64,17 @@ public enum MealioCart {
             throw MealioError(code: MealioError.Code.notConfigured, message: "Call MealioCart.configure first")
         }
         return try await client.prepareCart(store: store, recipe: recipe, zip: zip, onStep: onStep)
+    }
+
+    /// Start one cart from several recipes (1 to `MAX_RECIPES`). Ingredients
+    /// they share become one item; each pick is remembered under every recipe
+    /// that calls for it.
+    public static func prepareCart(store: String? = nil, recipes: [Recipe], zip: String? = nil,
+                                   onStep: StepListener? = nil) async throws -> CartSession {
+        guard let client = client else {
+            throw MealioError(code: MealioError.Code.notConfigured, message: "Call MealioCart.configure first")
+        }
+        return try await client.prepareCart(store: store, recipes: recipes, zip: zip, onStep: onStep)
     }
 
     /// Stores the SDK supports right now (`GET /api/v1/stores`).

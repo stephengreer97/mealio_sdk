@@ -575,10 +575,57 @@ public enum ItemStatus: String, Codable, Equatable {
     case unavailable
 }
 
+/// A recipe that calls for a cart item, in a cart made from one or more recipes.
+public struct ItemRecipe: Codable, Equatable, Identifiable {
+    public let id: String
+    public let title: String?
+    /// This recipe's share of the item's quantity.
+    public let quantity: Int
+
+    public init(id: String, title: String? = nil, quantity: Int = 1) {
+        self.id = id
+        self.title = title
+        self.quantity = quantity
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, title, quantity }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        title = try c.decodeIfPresent(String.self, forKey: .title)
+        quantity = try c.decodeIfPresent(Int.self, forKey: .quantity) ?? 1
+    }
+}
+
+/// One recipe a cart was made from: `PreparedCart.recipes`.
+public struct CartRecipe: Codable, Equatable, Identifiable {
+    public let id: String
+    public let title: String?
+
+    public init(id: String, title: String? = nil) {
+        self.id = id
+        self.title = title
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, title }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        title = try c.decodeIfPresent(String.self, forKey: .title)
+    }
+}
+
 public struct CartItem: Codable, Equatable, Identifiable {
     public let key: String
     public let ingredient: String
+    /// Packages to buy: every recipe's share added together.
     public let quantity: Int
+    /// The recipes that call for this item. A cart from several recipes
+    /// merges an ingredient they share into one item, and a pick on it is
+    /// remembered under each of them. Nil from servers older than multi-recipe.
+    public let recipes: [ItemRecipe]?
     /// The recipe's own weight for this line, in lb, when it gave the amount
     /// in a weight unit (lb, oz, g or kg). Nil otherwise.
     public let weightLb: Double?
@@ -599,10 +646,12 @@ public struct CartItem: Codable, Equatable, Identifiable {
 
     public init(key: String, ingredient: String, quantity: Int = 1, status: ItemStatus, options: [Product] = [],
                 selectedId: String? = nil, remembered: Product? = nil, rememberedPreferenceId: String? = nil,
-                reason: String? = nil, chosen: Product? = nil, weightLb: Double? = nil) {
+                reason: String? = nil, chosen: Product? = nil, weightLb: Double? = nil,
+                recipes: [ItemRecipe]? = nil) {
         self.key = key
         self.ingredient = ingredient
         self.quantity = quantity
+        self.recipes = recipes
         self.weightLb = weightLb
         self.status = status
         self.options = options
@@ -614,7 +663,7 @@ public struct CartItem: Codable, Equatable, Identifiable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case key, ingredient, quantity, weightLb, status, options, selectedId, remembered, rememberedPreferenceId, reason, chosen
+        case key, ingredient, quantity, recipes, weightLb, status, options, selectedId, remembered, rememberedPreferenceId, reason, chosen
     }
 
     /// Every field past `key` is optional, so a 0.1 payload (chosen / options /
@@ -624,6 +673,7 @@ public struct CartItem: Codable, Equatable, Identifiable {
         key = try c.decode(String.self, forKey: .key)
         ingredient = try c.decodeIfPresent(String.self, forKey: .ingredient) ?? key
         quantity = try c.decodeIfPresent(Int.self, forKey: .quantity) ?? 1
+        recipes = try c.decodeIfPresent([ItemRecipe].self, forKey: .recipes)
         weightLb = try c.decodeIfPresent(Double.self, forKey: .weightLb)
         reason = try c.decodeIfPresent(String.self, forKey: .reason)
         chosen = try c.decodeIfPresent(Product.self, forKey: .chosen)
@@ -647,6 +697,9 @@ public struct PreparedCart: Codable, Equatable {
     public let store: String
     /// Display name, e.g. "H-E-B".
     public let storeName: String?
+    /// The recipes this cart was made from, in the order they were sent. Nil
+    /// from servers older than multi-recipe.
+    public let recipes: [CartRecipe]?
     /// Every recipe line, in recipe order. Show them all. Rebuilt from the
     /// 0.1 groupings when an older server leaves it out.
     public let items: [CartItem]
@@ -656,23 +709,26 @@ public struct PreparedCart: Codable, Equatable {
     public let unavailable: [CartItem]
 
     public init(cartId: String, store: String, storeName: String? = nil, items: [CartItem],
-                ready: [CartItem] = [], needsChoice: [CartItem] = [], unavailable: [CartItem] = []) {
+                ready: [CartItem] = [], needsChoice: [CartItem] = [], unavailable: [CartItem] = [],
+                recipes: [CartRecipe]? = nil) {
         self.cartId = cartId
         self.store = store
         self.storeName = storeName
+        self.recipes = recipes
         self.items = items
         self.ready = ready
         self.needsChoice = needsChoice
         self.unavailable = unavailable
     }
 
-    private enum CodingKeys: String, CodingKey { case cartId, store, storeName, items, ready, needsChoice, unavailable }
+    private enum CodingKeys: String, CodingKey { case cartId, store, storeName, recipes, items, ready, needsChoice, unavailable }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         cartId = try c.decode(String.self, forKey: .cartId)
         store = try c.decode(String.self, forKey: .store)
         storeName = try c.decodeIfPresent(String.self, forKey: .storeName)
+        recipes = try c.decodeIfPresent([CartRecipe].self, forKey: .recipes)
         ready = try c.decodeIfPresent([CartItem].self, forKey: .ready) ?? []
         needsChoice = try c.decodeIfPresent([CartItem].self, forKey: .needsChoice) ?? []
         unavailable = try c.decodeIfPresent([CartItem].self, forKey: .unavailable) ?? []
@@ -856,3 +912,6 @@ public struct Recipe: Codable, Equatable {
         self.ingredients = ingredients
     }
 }
+
+/// At most this many recipes in one `prepareCart`.
+public let MAX_RECIPES = 10

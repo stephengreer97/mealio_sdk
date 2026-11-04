@@ -375,3 +375,52 @@ describe('cart session', () => {
     expect(() => cs.select('garlic', 'nope')).toThrow();
   });
 });
+
+describe('several recipes', () => {
+  function capture() {
+    const bodies: any[] = [];
+    const fetchImpl = (async (url: string, init: any) => {
+      bodies.push(JSON.parse(init.body));
+      return { ok: false, status: 400, json: async () => ({ code: 'stop', message: 'stop' }) };
+    }) as any;
+    const client = new MealioClient({
+      publishableKey: 'pk_test', getSessionToken: async () => 'tok', platform: 'web-test', sdkVersion: '0',
+      baseUrl: 'https://mealio.test', fetchImpl, keys: KEYS,
+    }, fakeHost());
+    return { client, bodies };
+  }
+  const r = (id: string) => ({ id, title: id.toUpperCase(), ingredients: [{ name: 'onion' }] });
+
+  it('sends one recipe as `recipe`, so older servers still understand it', async () => {
+    const { client, bodies } = capture();
+    await client.prepareCart({ store: 'heb', recipes: [r('a')] }).catch(() => null);
+    expect(bodies[0].recipe.id).toBe('a');
+    expect(bodies[0].recipes).toBeUndefined();
+  });
+
+  it('sends several as `recipes`', async () => {
+    const { client, bodies } = capture();
+    await client.prepareCart({ store: 'heb', recipes: [r('a'), r('b')] }).catch(() => null);
+    expect(bodies[0].recipes.map((x: any) => x.id)).toEqual(['a', 'b']);
+    expect(bodies[0].recipe).toBeUndefined();
+  });
+
+  it('refuses none or more than 10 before calling the server', async () => {
+    const { client, bodies } = capture();
+    await expect(client.prepareCart({ store: 'heb', recipes: [] })).rejects.toMatchObject({ code: 'bad_recipe' });
+    await expect(client.prepareCart({ store: 'heb', recipes: Array.from({ length: 11 }, (_, i) => r('r' + i)) })).rejects.toMatchObject({ code: 'too_many_recipes' });
+    expect(bodies).toHaveLength(0);
+  });
+
+  it('a session says which recipes each item is for', () => {
+    const item = { key: 'onion', ingredient: 'onion', quantity: 3, status: 'choose', options: [], selectedId: null, remembered: null,
+      recipes: [{ id: 'a', title: 'Tacos', quantity: 1 }, { id: 'b', title: 'Pasta', quantity: 2 }] };
+    const cs = new CartSession({} as any, { cartId: 'c', store: 'heb', recipes: [{ id: 'a', title: 'Tacos' }, { id: 'b', title: 'Pasta' }], items: [item], ready: [], needsChoice: [item], unavailable: [] } as any);
+    expect(cs.recipes.map((x) => x.id)).toEqual(['a', 'b']);
+    expect(cs.recipesFor('onion').map((x) => x.quantity)).toEqual([1, 2]);
+    // An older server sends neither.
+    const old = new CartSession({} as any, { cartId: 'c', store: 'heb', items: [{ ...item, recipes: undefined }], ready: [], needsChoice: [], unavailable: [] } as any);
+    expect(old.recipes).toEqual([]);
+    expect(old.recipesFor('onion')).toEqual([]);
+  });
+});

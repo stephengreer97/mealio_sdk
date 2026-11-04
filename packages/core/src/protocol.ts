@@ -155,10 +155,25 @@ export interface Product {
 
 export type ItemStatus = 'remembered' | 'choose' | 'remembered_unavailable' | 'unavailable';
 
+/** A recipe that calls for a cart item, in a cart made from one or more recipes. */
+export interface ItemRecipe {
+  id: string;
+  title: string | null;
+  /** This recipe's share of the item's quantity. */
+  quantity: number;
+}
+
 export interface CartItem {
   key: string;
   ingredient: string;
+  /** Packages to buy: every recipe's share added together. */
   quantity: number;
+  /**
+   * The recipes that call for this item. A cart from several recipes merges an
+   * ingredient they share into one item, and a pick on it is remembered under
+   * each of them. Absent from servers older than multi-recipe.
+   */
+  recipes?: ItemRecipe[];
   /** The recipe's own weight for this line, in lb, when it gave one in a weight unit. */
   weightLb?: number;
   /**
@@ -185,6 +200,8 @@ export interface PreparedCart {
   store: string;
   /** Display name, e.g. "H-E-B". */
   storeName?: string;
+  /** The recipes this cart was made from, in the order they were sent. */
+  recipes?: Array<{ id: string; title: string | null }>;
   /** Every recipe line, in recipe order. Show them all. */
   items: CartItem[];
   /** @deprecated 0.1 groupings derived from items. */
@@ -275,3 +292,16 @@ export interface Recipe {
   title?: string;
   ingredients: RecipeIngredient[];
 }
+
+/** At most this many recipes in one prepareCart. */
+export const MAX_RECIPES = 10;
+
+/**
+ * What prepareCart takes. Send `recipe` for one, or `recipes` for up to
+ * MAX_RECIPES at once: ingredients they share become one item, and each pick
+ * is remembered under every recipe that calls for it.
+ */
+export type PrepareCartInput = { store?: string | null; zip?: string | null } & (
+  | { recipe: Recipe; recipes?: undefined }
+  | { recipes: Recipe[]; recipe?: undefined }
+);

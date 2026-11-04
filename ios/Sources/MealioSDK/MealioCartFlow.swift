@@ -30,11 +30,28 @@ public extension View {
                         onAdded: ((AddResult) -> Void)? = nil,
                         onError: ((Error) -> Void)? = nil,
                         onClose: ((AddResult?) -> Void)? = nil) -> some View {
+        mealioCartFlow(isPresented: isPresented, recipes: [recipe], store: store, zip: zip,
+                       onAdded: onAdded, onError: onError, onClose: onClose)
+    }
+
+    /// Present the whole cart flow for several recipes (at most `MAX_RECIPES`)
+    /// in one sheet. Ingredients they share become one item, each item says
+    /// which recipes it is for, and a pick is remembered under every one of them.
+    ///
+    ///     .mealioCartFlow(isPresented: $showCart, recipes: [tacos, pasta])
+    @MainActor
+    func mealioCartFlow(isPresented: Binding<Bool>,
+                        recipes: [Recipe],
+                        store: String? = nil,
+                        zip: String? = nil,
+                        onAdded: ((AddResult) -> Void)? = nil,
+                        onError: ((Error) -> Void)? = nil,
+                        onClose: ((AddResult?) -> Void)? = nil) -> some View {
         // VERIFY: the sheet content closure is not @MainActor in the iOS 15
         // SDK; it is formed in a @MainActor function, so Swift 5 mode infers
         // main-actor isolation for it and the MealioCartFlow init call is fine.
         sheet(isPresented: isPresented) {
-            MealioCartFlow(recipe: recipe, store: store, zip: zip,
+            MealioCartFlow(recipes: recipes, store: store, zip: zip,
                            onAdded: onAdded, onError: onError,
                            onClose: { result in onClose?(result) })
         }
@@ -47,7 +64,7 @@ public extension View {
 /// `MealioCartButton`, or your own `.sheet { MealioCartFlow(...) }`.
 @MainActor
 public struct MealioCartFlow: View {
-    private let recipe: Recipe
+    private let recipes: [Recipe]
     private let store: String?
     private let zip: String?
     private let onAdded: ((AddResult) -> Void)?
@@ -70,7 +87,19 @@ public struct MealioCartFlow: View {
                 onAdded: ((AddResult) -> Void)? = nil,
                 onError: ((Error) -> Void)? = nil,
                 onClose: @escaping (AddResult?) -> Void = { _ in }) {
-        self.recipe = recipe
+        self.init(recipes: [recipe], store: store, zip: zip,
+                  onAdded: onAdded, onError: onError, onClose: onClose)
+    }
+
+    /// One cart from several recipes (at most `MAX_RECIPES`). Ingredients
+    /// they share become one item, each item says which recipes it is for,
+    /// and a pick is remembered under every one of them. Other parameters as
+    /// in `init(recipe:...)`.
+    public init(recipes: [Recipe], store: String? = nil, zip: String? = nil,
+                onAdded: ((AddResult) -> Void)? = nil,
+                onError: ((Error) -> Void)? = nil,
+                onClose: @escaping (AddResult?) -> Void = { _ in }) {
+        self.recipes = recipes
         self.store = store
         self.zip = zip
         self.onAdded = onAdded
@@ -79,6 +108,13 @@ public struct MealioCartFlow: View {
     }
 
     private var t: MealioTheme { MealioCart.theme }
+    /// The recipe's title for one recipe, "3 meals" for several.
+    private var kicker: String? {
+        if recipes.count == 1 { return recipes[0].title }
+        return recipes.count > 1 ? "\(recipes.count) meals" : nil
+    }
+    /// Ingredient lines across every recipe, for the loading screen.
+    private var lineCount: Int { recipes.reduce(0) { $0 + $1.ingredients.count } }
     private var storeName: String {
         model.cart?.storeName ?? model.store.map { mealioStoreLabel($0) } ?? "your store"
     }
@@ -90,7 +126,7 @@ public struct MealioCartFlow: View {
                 .frame(width: 36, height: 5)
                 .padding(.top, 8)
                 .accessibilityHidden(true)
-            MealioFlowHeader(t: t, recipeTitle: recipe.title,
+            MealioFlowHeader(t: t, recipeTitle: kicker,
                              title: model.login?.title ?? headerTitle,
                              onClose: { dismiss() })
             content
@@ -99,7 +135,7 @@ public struct MealioCartFlow: View {
         .background(t.background.ignoresSafeArea())
         .interactiveDismissDisabled(model.phase == .adding)
         .onAppear {
-            model.open(recipe: recipe, store: store, zip: zip, onAdded: onAdded, onError: onError)
+            model.open(recipes: recipes, store: store, zip: zip, onAdded: onAdded, onError: onError)
         }
         .onDisappear {
             // Close button, Done, or a swipe: all end here, exactly once.
@@ -135,7 +171,7 @@ public struct MealioCartFlow: View {
         } else {
             switch model.phase {
             case .loading:
-                MealioLoadingView(t: t, step: model.step, storeName: storeName, count: recipe.ingredients.count)
+                MealioLoadingView(t: t, step: model.step, storeName: storeName, count: lineCount)
             case .stores:
                 MealioStorePicker(t: t, stores: model.stores, current: model.store,
                                   onPick: { model.pick($0) },
@@ -146,7 +182,7 @@ public struct MealioCartFlow: View {
                                    onChangeStore: { model.openStores(from: .list) },
                                    onAdd: { model.add() })
                 } else {
-                    MealioLoadingView(t: t, step: model.step, storeName: storeName, count: recipe.ingredients.count)
+                    MealioLoadingView(t: t, step: model.step, storeName: storeName, count: lineCount)
                 }
             case .done:
                 if let cart = model.cart, let result = model.result {
@@ -183,7 +219,7 @@ final class MealioFlowModel: ObservableObject {
     private var hosting = false
     private weak var host: WebViewHost?
     private var loginSub: AnyCancellable?
-    private var recipe = Recipe(id: "", ingredients: [])
+    private var recipes: [Recipe] = []
     private var backTo: Phase = .list
     private var zip: String?
     private var onAdded: ((AddResult) -> Void)?
@@ -193,11 +229,11 @@ final class MealioFlowModel: ObservableObject {
     // property default above is a plain constant.
     nonisolated init() {}
 
-    func open(recipe: Recipe, store: String?, zip: String?,
+    func open(recipes: [Recipe], store: String?, zip: String?,
               onAdded: ((AddResult) -> Void)?, onError: ((Error) -> Void)?) {
         guard !hosting else { return }
         hosting = true
-        self.recipe = recipe
+        self.recipes = recipes
         self.store = store
         self.zip = zip
         self.onAdded = onAdded
@@ -222,10 +258,10 @@ final class MealioFlowModel: ObservableObject {
         cart = nil
         result = nil
         error = nil
-        let store = self.store, recipe = self.recipe, zip = self.zip
+        let store = self.store, recipes = self.recipes, zip = self.zip
         Task { [weak self] in
             do {
-                let c = try await MealioCart.prepareCart(store: store, recipe: recipe, zip: zip, onStep: { s, _ in
+                let c = try await MealioCart.prepareCart(store: store, recipes: recipes, zip: zip, onStep: { s, _ in
                     guard let self = self, self.run == id else { return }
                     self.step = s
                 })
@@ -681,6 +717,13 @@ struct MealioItemRow: View {
                             .font(t.font(12, .medium))
                             .foregroundColor(t.muted)
                             .lineLimit(1)
+                        // Only on a cart from two or more recipes: "For Tacos and Pasta".
+                        if let forLine = cart.recipesLabel(for: item.key) {
+                            Text(forLine)
+                                .font(t.font(11))
+                                .foregroundColor(t.muted)
+                                .lineLimit(1)
+                        }
                         Text(shown?.name ?? "Choose a product")
                             .font(t.font(15, .semibold))
                             .foregroundColor(on ? t.text : t.muted)

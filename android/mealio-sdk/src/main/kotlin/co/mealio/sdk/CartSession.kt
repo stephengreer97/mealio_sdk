@@ -96,6 +96,12 @@ class CartSession internal constructor(
     /** Every item in recipe order. */
     val items: List<CartItem> get() = cart.items
 
+    /** The recipes this cart was made from. Empty from older servers. */
+    val recipes: List<CartRecipe> get() = cart.recipes
+
+    /** The recipes that call for an item, for a "For Tacos and Pasta" line. Empty from older servers. */
+    fun recipesFor(key: String): List<ItemRecipe> = find(key)?.recipes ?: emptyList()
+
     @Deprecated("Use items") val ready: List<CartItem> get() = cart.ready
     @Deprecated("Use items") val needsChoice: List<CartItem> get() = cart.needsChoice
     @Deprecated("Use items") val unavailable: List<CartItem> get() = cart.unavailable
@@ -371,4 +377,26 @@ class CartSession internal constructor(
     fun selectionFor(key: String): Selection? = selections().firstOrNull { it.key == key }
 
     private fun find(key: String): CartItem? = items.firstOrNull { it.key == key }
+}
+
+/**
+ * "For Tacos and Pasta": the line under an item on a cart made from more than
+ * one recipe. Null on a one-recipe cart, and when none of the item's recipes
+ * has a title. Untitled recipes are left out.
+ */
+fun forRecipes(cart: CartSession, key: String): String? =
+    forRecipes(cart.recipes.size, cart.recipesFor(key))
+
+/** [forRecipes] without a session: `recipeCount` is how many recipes the cart was made from. */
+fun forRecipes(recipeCount: Int, itemRecipes: List<ItemRecipe>): String? {
+    if (recipeCount < 2) return null
+    val names = itemRecipes.mapNotNull { it.title?.takeIf { t -> t.isNotEmpty() } }
+    return if (names.isEmpty()) null else "For " + listAnd(names)
+}
+
+/** "A", "A and B", "A, B and C". */
+internal fun listAnd(xs: List<String>): String = when (xs.size) {
+    0 -> ""
+    1 -> xs[0]
+    else -> xs.dropLast(1).joinToString(", ") + " and " + xs.last()
 }

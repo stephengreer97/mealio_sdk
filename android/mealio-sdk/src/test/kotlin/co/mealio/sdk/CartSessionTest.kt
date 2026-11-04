@@ -508,4 +508,61 @@ class CartSessionTest {
         assertEquals(AddedItem("turkey", "t1", "Deli Turkey", 1, weightLb = 0.5, pricePerLb = 12.0, estimated = true), r.added[1])
         assertEquals(AddedItem("salt", "s1", "Salt", 1), r.added[2])
     }
+
+    /** Tacos and Pasta share the onion; the penne is Pasta's alone; the salt names an untitled recipe only. */
+    private fun multiRecipe(): JSONObject {
+        fun forR(vararg rs: Triple<String, String?, Int>) = JSONArray(rs.map { (id, title, q) ->
+            JSONObject().put("id", id).put("title", title ?: JSONObject.NULL).put("quantity", q)
+        })
+        return JSONObject().put("cartId", "c2").put("store", "heb")
+            .put("recipes", JSONArray()
+                .put(JSONObject().put("id", "r1").put("title", "Tacos"))
+                .put(JSONObject().put("id", "r2").put("title", "Pasta"))
+                .put(JSONObject().put("id", "r3").put("title", JSONObject.NULL)))
+            .put("items", JSONArray()
+                .put(item("onion", "choose", listOf(product("o1", "Onion")), quantity = 3)
+                    .put("recipes", forR(Triple("r1", "Tacos", 1), Triple("r2", "Pasta", 2))))
+                .put(item("penne", "choose", listOf(product("p1", "Penne")))
+                    .put("recipes", forR(Triple("r2", "Pasta", 1))))
+                .put(item("salt", "choose", listOf(product("s1", "Salt")))
+                    .put("recipes", forR(Triple("r3", null, 1)))))
+    }
+
+    @Test
+    fun parsesTheRecipesOfAMultiRecipeCart() {
+        val cs = session(multiRecipe())
+        assertEquals(listOf(CartRecipe("r1", "Tacos"), CartRecipe("r2", "Pasta"), CartRecipe("r3", null)), cs.recipes)
+        assertEquals(listOf(ItemRecipe("r1", "Tacos", 1), ItemRecipe("r2", "Pasta", 2)), cs.recipesFor("onion"))
+        assertEquals(3, cs.items[0].quantity)
+        assertEquals(listOf(ItemRecipe("r2", "Pasta", 1)), cs.recipesFor("penne"))
+        assertEquals(listOf(ItemRecipe("r3", null, 1)), cs.recipesFor("salt"))
+        assertTrue(cs.recipesFor("zzz").isEmpty())
+    }
+
+    @Test
+    fun anOlderServerSendsNoRecipes() {
+        val cs = session()
+        assertTrue(cs.recipes.isEmpty())
+        assertTrue(cs.cart.recipes.isEmpty())
+        assertTrue(cs.recipesFor("onion").isEmpty())
+        assertTrue(cs.items.all { it.recipes.isEmpty() })
+        assertNull(forRecipes(cs, "onion"))
+    }
+
+    @Test
+    fun forRecipesNamesTheRecipesOnlyOnAMultiRecipeCart() {
+        val cs = session(multiRecipe())
+        assertEquals("For Tacos and Pasta", forRecipes(cs, "onion"))
+        assertEquals("For Pasta", forRecipes(cs, "penne"))
+        // Untitled recipes are left out; with no names there is no line.
+        assertNull(forRecipes(cs, "salt"))
+
+        val three = listOf(ItemRecipe("a", "Tacos"), ItemRecipe("b", null), ItemRecipe("c", "Pasta"), ItemRecipe("d", "Soup"))
+        assertEquals("For Tacos, Pasta and Soup", forRecipes(4, three))
+        // One recipe in the cart: never a line, even when the item names it.
+        assertNull(forRecipes(1, listOf(ItemRecipe("a", "Tacos"))))
+        assertNull(forRecipes(2, emptyList()))
+        assertEquals("", listAnd(emptyList()))
+        assertEquals("A", listAnd(listOf("A")))
+    }
 }

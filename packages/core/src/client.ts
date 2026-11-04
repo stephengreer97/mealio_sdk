@@ -4,12 +4,12 @@
 import { Runner, type Host } from './runner';
 import { Allowlist } from './allowlist';
 import { openEnvelope, EnvelopeError } from './verify';
-import { SUPPORTED_OPS } from './protocol';
+import { MAX_RECIPES, SUPPORTED_OPS } from './protocol';
 import type {
-  AddedItem, AddResult, AllowlistPayload, CartItem, Envelope, Instruction, PreparedCart, Product, Recipe, SearchResult, Selection, StepRequest, StoreInfo,
+  AddedItem, AddResult, AllowlistPayload, CartItem, Envelope, Instruction, ItemRecipe, PreparedCart, PrepareCartInput, Product, SearchResult, Selection, StepRequest, StoreInfo,
 } from './protocol';
 
-export const SDK_CORE_VERSION = '0.1.0';
+export const SDK_CORE_VERSION = '0.2.0';
 export const DEFAULT_BASE_URL = 'https://mealio.co';
 
 export type MealioErrorCode =
@@ -83,8 +83,15 @@ export class MealioClient {
    * `store` is optional: without it Mealio uses the user's default store, and
    * fails with `store_required` when they have none yet.
    */
-  async prepareCart(input: { store?: string | null; recipe: Recipe; zip?: string | null }, opts: { onStep?: StepListener } = {}): Promise<CartSession> {
-    const start = await this.post<JobStart>('/api/v1/sdk/carts', { ...input, ...(await this.about()) });
+  async prepareCart(input: PrepareCartInput, opts: { onStep?: StepListener } = {}): Promise<CartSession> {
+    const recipes = input.recipes ?? (input.recipe ? [input.recipe] : []);
+    if (recipes.length === 0) throw new MealioError('bad_recipe', 'Pass recipe, or recipes with at least one recipe.');
+    if (recipes.length > MAX_RECIPES) throw new MealioError('too_many_recipes', `At most ${MAX_RECIPES} recipes in one cart.`);
+    // One recipe goes as `recipe`, so a server from before multi-recipe still understands it.
+    const body = recipes.length === 1
+      ? { store: input.store, zip: input.zip, recipe: recipes[0] }
+      : { store: input.store, zip: input.zip, recipes };
+    const start = await this.post<JobStart>('/api/v1/sdk/carts', { ...body, ...(await this.about()) });
     const result = await this.drive(start, opts.onStep) as unknown as PreparedCart;
     return new CartSession(this, result);
   }
@@ -227,6 +234,10 @@ export class CartSession {
     if (this.cart.items) return this.cart.items;
     return [...this.cart.ready, ...this.cart.needsChoice, ...this.cart.unavailable];
   }
+  /** The recipes this cart was made from. Older servers: none listed. */
+  get recipes(): Array<{ id: string; title: string | null }> { return this.cart.recipes ?? []; }
+  /** The recipes that call for an item, for a "for Tacos, Pasta" line. Empty from older servers. */
+  recipesFor(key: string): ItemRecipe[] { return this.find(key)?.recipes ?? []; }
   /** @deprecated */ get ready(): CartItem[] { return this.cart.ready; }
   /** @deprecated */ get needsChoice(): CartItem[] { return this.cart.needsChoice; }
   /** @deprecated */ get unavailable(): CartItem[] { return this.cart.unavailable; }

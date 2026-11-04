@@ -1,4 +1,5 @@
-// The one-line integration: <MealioCartButton recipe={recipe} store="heb" />.
+// The one-line integration: <MealioCartButton recipe={recipe} store="heb" />,
+// or recipes={[...]} to fill one cart from several meals.
 // It draws a themed button and runs the whole flow in one sheet.
 
 import React, { useState } from 'react';
@@ -8,7 +9,10 @@ import { useMealio } from './MealioProvider';
 import { MealioCartFlow } from './MealioCartFlow';
 
 export interface MealioCartButtonProps {
-  recipe: Recipe;
+  /** One recipe. Pass this or `recipes`. */
+  recipe?: Recipe;
+  /** Several recipes in one cart, at most 10. */
+  recipes?: Recipe[];
   /** Optional. Without it the user's default store is used, or they pick one. */
   store?: string | null;
   zip?: string | null;
@@ -37,6 +41,7 @@ export function MealioCartButton(props: MealioCartButtonProps) {
       <MealioCartFlow
         visible={open}
         recipe={props.recipe}
+        recipes={props.recipes}
         store={props.store}
         zip={props.zip}
         onAdded={props.onAdded}

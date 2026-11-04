@@ -1,3 +1,20 @@
+## 0.3.0
+
+- Several recipes in one cart: `prepareCart(recipes: [...])` on `MealioCart` and
+  `MealioClient` (1 to `maxRecipes`, 10). One recipe is still sent as `recipe`, so
+  older servers keep working. `bad_recipe` for none and `too_many_recipes` for more
+  than 10, both thrown before any request. `recipe` is now optional.
+- `PreparedCart.recipes` (`CartRecipe`: `id`, `title`) and `CartItem.recipes`
+  (`ItemRecipe`: `id`, `title`, `quantity`). Both null from older servers.
+- `CartSession.recipes` and `CartSession.recipesFor(key)`, empty from older servers.
+- Drop-in: `MealioCartButton`, `MealioCartFlow` and `MealioCartFlow.show` take
+  `recipes`. The header says "N meals", loading counts every recipe's ingredients,
+  and on a cart of two or more recipes each row says "For Tacos and Pasta".
+  `forRecipes(session, key)` and `forRecipesLabel(count, itemRecipes)` build that line.
+- `MealioCartFlow(prepareCarts:)` and the `PrepareCarts` type inject a multi-recipe
+  prepare. `prepareCart:` (`PrepareCart`) is unchanged and used for one recipe.
+- `sdkCoreVersion` 0.2.0.
+
 ## 0.2.0
 
 - Drop-in: `MealioCartButton` and `MealioCartFlow.show` run the whole flow in one

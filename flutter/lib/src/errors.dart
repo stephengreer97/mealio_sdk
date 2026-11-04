@@ -14,6 +14,12 @@ abstract final class MealioErrorCode {
   /// No store was given and the user has no default store yet.
   static const String storeRequired = 'store_required';
 
+  /// `prepareCart` was given no recipe.
+  static const String badRecipe = 'bad_recipe';
+
+  /// `prepareCart` was given more than `maxRecipes` (10) recipes.
+  static const String tooManyRecipes = 'too_many_recipes';
+
   /// Mealio answered with an error the protocol does not name.
   static const String server = 'server';
 
