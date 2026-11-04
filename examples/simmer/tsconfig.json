@@ -1,0 +1,26 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "baseUrl": ".",
+    "paths": {
+      "@mealio/react-native-cart": [
+        "../../packages/react-native/src/index.ts"
+      ],
+      "@mealio/sdk-core": [
+        "../../packages/core/src/index.ts"
+      ],
+      "*": [
+        "node_modules/@types/*",
+        "node_modules/*"
+      ]
+    }
+  },
+  "include": [
+    "**/*.ts",
+    "**/*.tsx",
+    "../../packages/react-native/src/**/*.tsx",
+    "../../packages/react-native/src/**/*.ts",
+    "../../packages/core/src/**/*.ts"
+  ]
+}

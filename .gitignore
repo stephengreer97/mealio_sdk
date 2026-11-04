@@ -8,3 +8,7 @@ build/
 .idea/
 .DS_Store
 coverage/
+
+# Local secrets: never commit.
+.env
+.env*.local
