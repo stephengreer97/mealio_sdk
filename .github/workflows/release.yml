@@ -8,7 +8,7 @@ name: release
 #
 # Every version in the repo must equal the tag (scripts/check-versions.mjs),
 # and the full test suite runs first. Secrets this needs, once:
-#   NPM_TOKEN                          npm granular token, "Read and write (stage only)" on @mealio
+#   (npm needs no secret: Trusted Publishing, configured on npmjs.com)
 #   MAVEN_CENTRAL_USERNAME / _PASSWORD Central Portal user token
 #   SIGNING_KEY / SIGNING_KEY_PASSWORD ASCII-armored GPG private key + passphrase
 #   COCOAPODS_TRUNK_TOKEN              from `pod trunk me --verbose` after registering
@@ -42,6 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      id-token: write   # npm Trusted Publishing: GitHub OIDC, no stored token
     steps:
       - uses: actions/checkout@v4
       # npm stage publish needs npm 11.15+ on Node 22.14+.
@@ -54,16 +55,13 @@ jobs:
       - run: npm run build -w @mealio/sdk-core -w @mealio/react-native-cart
       # STAGED, not published: each version waits in npm's review queue until a
       # maintainer approves it with 2FA (npmjs.com, or `npm stage approve`).
-      # NPM_TOKEN is a stage-only granular token. Core first: the React Native
-      # package depends on this exact version.
+      # No token: both packages trust this workflow (Trusted Publishing, set up
+      # on npmjs.com per package: stephengreer97/mealio_sdk, release.yml).
+      # Core first: the React Native package depends on this exact version.
       - run: npm stage publish --access public
         working-directory: packages/core
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - run: npm stage publish --access public
         working-directory: packages/react-native
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   maven:
     needs: tests
@@ -88,6 +86,10 @@ jobs:
   cocoapods:
     needs: tests
     runs-on: macos-14
+    # CocoaPods Trunk is closing to new releases. A refusal there must not fail
+    # a release that npm, Maven, pub.dev and SwiftPM have already taken; Swift
+    # Package Manager is the iOS route.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - run: pod trunk push MealioSDK.podspec --allow-warnings
