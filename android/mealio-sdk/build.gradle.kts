@@ -1,7 +1,10 @@
+import com.vanniktech.maven.publish.AndroidSingleVariantLibrary
+import com.vanniktech.maven.publish.SonatypeHost
+
 plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
-    `maven-publish`
+    id("com.vanniktech.maven.publish")
 }
 
 android {
@@ -28,12 +31,6 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
-
-    publishing {
-        singleVariant("release") {
-            withSourcesJar()
-        }
-    }
 }
 
 dependencies {
@@ -53,15 +50,36 @@ dependencies {
     testImplementation("org.json:json:20231013")
 }
 
-afterEvaluate {
-    publishing {
-        publications {
-            create<MavenPublication>("release") {
-                from(components["release"])
-                groupId = "co.mealio"
-                artifactId = "mealio-sdk"
-                version = "0.3.0"
+// Maven Central: co.mealio:mealio-sdk. Signed only when a key is present (the
+// release workflow passes one), so CI can still publishToMavenLocal.
+mavenPublishing {
+    configure(AndroidSingleVariantLibrary(variant = "release", sourcesJar = true, publishJavadocJar = true))
+    publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL, automaticRelease = true)
+    if (providers.gradleProperty("signingInMemoryKey").isPresent) signAllPublications()
+    coordinates("co.mealio", "mealio-sdk", providers.gradleProperty("mealioVersion").get())
+    pom {
+        name.set("Mealio Cart SDK")
+        description.set("Adds a recipe's ingredients to the user's own grocery store cart, driven by signed instructions from Mealio.")
+        inceptionYear.set("2026")
+        url.set("https://developers.mealio.co")
+        licenses {
+            license {
+                name.set("Mealio Cart SDK License")
+                url.set("https://github.com/stephengreer97/mealio_sdk/blob/main/LICENSE")
+                distribution.set("repo")
             }
+        }
+        developers {
+            developer {
+                id.set("mealio")
+                name.set("Mealio")
+                email.set("support@mealio.co")
+            }
+        }
+        scm {
+            url.set("https://github.com/stephengreer97/mealio_sdk")
+            connection.set("scm:git:https://github.com/stephengreer97/mealio_sdk.git")
+            developerConnection.set("scm:git:ssh://git@github.com/stephengreer97/mealio_sdk.git")
         }
     }
 }

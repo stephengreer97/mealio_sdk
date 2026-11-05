@@ -1,15 +1,35 @@
 {
   "name": "@mealio/sdk-core",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "description": "Platform-neutral core of the Mealio Cart SDK: protocol types, signature checks, allowlist and the relay loop.",
+  "license": "SEE LICENSE IN LICENSE",
+  "author": "Mealio <support@mealio.co>",
+  "homepage": "https://developers.mealio.co",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stephengreer97/mealio_sdk.git",
+    "directory": "packages/core"
+  },
+  "bugs": {
+    "url": "https://github.com/stephengreer97/mealio_sdk/issues"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "source": "src/index.ts",
-  "files": ["dist", "src"],
+  "files": [
+    "dist",
+    "src",
+    "LICENSE",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepack": "npm run build"
   },
   "dependencies": {
     "@noble/ed25519": "2.1.0",

@@ -1,18 +1,37 @@
 {
   "name": "@mealio/react-native-cart",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "description": "Mealio Cart SDK for React Native: put an Add to my grocery cart button in your app.",
+  "license": "SEE LICENSE IN LICENSE",
+  "author": "Mealio <support@mealio.co>",
+  "homepage": "https://developers.mealio.co",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stephengreer97/mealio_sdk.git",
+    "directory": "packages/react-native"
+  },
+  "bugs": {
+    "url": "https://github.com/stephengreer97/mealio_sdk/issues"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "react-native": "src/index.ts",
   "source": "src/index.ts",
-  "files": ["dist", "src", "README.md"],
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepack": "npm run build"
   },
   "dependencies": {
-    "@mealio/sdk-core": "0.1.0"
+    "@mealio/sdk-core": "0.4.0"
   },
   "peerDependencies": {
     "react": ">=18",
@@ -21,7 +40,9 @@
     "@react-native-cookies/cookies": ">=6.2"
   },
   "peerDependenciesMeta": {
-    "@react-native-cookies/cookies": { "optional": true }
+    "@react-native-cookies/cookies": {
+      "optional": true
+    }
   },
   "optionalDependencies": {},
   "devDependencies": {
@@ -30,5 +51,6 @@
     "react-native": "0.76.5",
     "react-native-webview": "13.12.5",
     "typescript": "5.6.3"
-  }
+  },
+  "react-native": "src/index.ts"
 }

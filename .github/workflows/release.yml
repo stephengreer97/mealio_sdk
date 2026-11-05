@@ -1,0 +1,106 @@
+name: release
+
+# Push a tag `vX.Y.Z` to publish every SDK at that version:
+#   npm         @mealio/sdk-core, @mealio/react-native-cart
+#   Maven       co.mealio:mealio-sdk, co.mealio:mealio-sdk-compose (Central Portal)
+#   CocoaPods   MealioSDK (Swift Package Manager reads the tag itself)
+#   pub.dev     mealio_sdk
+#
+# Every version in the repo must equal the tag (scripts/check-versions.mjs),
+# and the full test suite runs first. Secrets this needs, once:
+#   NPM_TOKEN                          npm granular token, publish to @mealio
+#   MAVEN_CENTRAL_USERNAME / _PASSWORD Central Portal user token
+#   SIGNING_KEY / SIGNING_KEY_PASSWORD ASCII-armored GPG private key + passphrase
+#   COCOAPODS_TRUNK_TOKEN              from `pod trunk me --verbose` after registering
+# pub.dev needs no secret: it trusts this workflow through GitHub OIDC once
+# "Automated publishing" is enabled for the package on pub.dev (after the
+# first version is published by hand).
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+jobs:
+  versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node scripts/check-versions.mjs "${GITHUB_REF_NAME}"
+
+  tests:
+    needs: versions
+    uses: ./.github/workflows/ci.yml
+
+  npm:
+    needs: tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # npm provenance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+      - run: npm install --no-audit --no-fund
+      # Core first: the React Native package depends on this exact version.
+      - run: npm publish -w @mealio/sdk-core --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - run: npm publish -w @mealio/react-native-cart --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  maven:
+    needs: tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v3
+      - run: ./gradlew publishAndReleaseToMavenCentral --no-configuration-cache
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
+
+  cocoapods:
+    needs: tests
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - run: pod trunk push MealioSDK.podspec --allow-warnings
+        env:
+          COCOAPODS_TRUNK_TOKEN: ${{ secrets.COCOAPODS_TRUNK_TOKEN }}
+
+  pub:
+    needs: tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # pub.dev trusts this workflow via OIDC
+    steps:
+      - uses: actions/checkout@v4
+      # setup-dart exchanges the GitHub OIDC token for a pub.dev credential.
+      - uses: dart-lang/setup-dart@v1
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - run: flutter pub get
+        working-directory: flutter
+      - run: flutter pub publish --force
+        working-directory: flutter

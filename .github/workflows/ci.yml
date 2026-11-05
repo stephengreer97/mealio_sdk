@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The release workflow runs the whole suite before it publishes anything.
+  workflow_call:
 
 jobs:
   typescript:
@@ -16,6 +18,9 @@ jobs:
       - run: npm install --no-audit --no-fund
       - run: npm test
       - run: npm run typecheck
+      # What `npm publish` would upload, without uploading it.
+      - run: npm pack --dry-run -w @mealio/sdk-core -w @mealio/react-native-cart
+      - run: node scripts/check-versions.mjs
 
   android:
     runs-on: ubuntu-latest
@@ -30,6 +35,8 @@ jobs:
           java-version: 17
       - uses: gradle/actions/setup-gradle@v3
       - run: ./gradlew :mealio-sdk:testDebugUnitTest :mealio-sdk:assembleRelease :mealio-sdk-compose:assembleRelease
+      # The Maven Central artifacts (AAR, sources, javadoc, POM), unsigned, to the local repo.
+      - run: ./gradlew publishToMavenLocal
 
   flutter:
     runs-on: ubuntu-latest
@@ -44,6 +51,7 @@ jobs:
       - run: flutter pub get
       - run: flutter analyze
       - run: flutter test
+      - run: dart pub publish --dry-run
 
   ios:
     runs-on: macos-14
@@ -54,3 +62,8 @@ jobs:
       - uses: actions/checkout@v4
       - run: swift test
       - run: xcodebuild -scheme MealioSDK -destination 'platform=iOS Simulator,name=iPhone 15' test
+      # The root Package.swift is what Swift Package Manager users get.
+      - run: swift build
+        working-directory: .
+      - run: pod lib lint MealioSDK.podspec --allow-warnings
+        working-directory: .

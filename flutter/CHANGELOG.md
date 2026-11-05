@@ -1,3 +1,17 @@
+## 0.4.0
+
+First public release.
+
+- Security: URLs are parsed strictly by the allowlist (no userinfo, backslash
+  or whitespace); identity providers are scoped to the store that uses them;
+  the hidden page stays on its store; bridge messages from sub-frames are
+  dropped; a signed fetch naming an order or payment is refused; the login
+  sheet checks POST navigations.
+- Warm-up: `MealioCart.warm()` runs the login check for the user's store
+  before they tap, so the cart starts at search. `MealioCartButton` calls it.
+- The list says "Pick a product for each item and Mealio will remember your
+  preferences." while any item still needs a choice; the footnote is gone.
+
 ## 0.3.0
 
 - Several recipes in one cart: `prepareCart(recipes: [...])` on `MealioCart` and

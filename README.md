@@ -21,6 +21,25 @@ against an allowlist built into the SDK (checkout and payment are always
 blocked), runs it in a hidden WebView signed in to the user's store, and sends
 back what the store answered. See [PROTOCOL.md](PROTOCOL.md).
 
+## Install
+
+| Platform | Install |
+| --- | --- |
+| React Native | `npm install @mealio/react-native-cart react-native-webview` |
+| iOS (Swift Package Manager) | `.package(url: "https://github.com/stephengreer97/mealio_sdk.git", from: "0.4.0")` |
+| iOS (CocoaPods) | `pod 'MealioSDK', '~> 0.4'` |
+| Android | `implementation("co.mealio:mealio-sdk:0.4.0")`, plus `co.mealio:mealio-sdk-compose:0.4.0` for the Compose sheet |
+| Flutter | `flutter pub add mealio_sdk` |
+
+Use of the SDK is subject to the [Mealio Cart SDK License](LICENSE).
+
+## Releasing
+
+Bump every version together (`node scripts/check-versions.mjs` must pass),
+merge, then push a tag `vX.Y.Z`. `.github/workflows/release.yml` runs the full
+suite and publishes npm, Maven Central, CocoaPods and pub.dev; Swift Package
+Manager reads the tag directly.
+
 ## Packages
 
 | Path | What |
