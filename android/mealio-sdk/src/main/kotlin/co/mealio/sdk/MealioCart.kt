@@ -16,7 +16,7 @@ import android.content.Context
  * ```
  */
 object MealioCart {
-    const val SDK_VERSION = "0.4.1"
+    const val SDK_VERSION = "0.4.2"
 
     private class State(val client: MealioClient, val host: WebViewHost, val sessions: StoreSessions)
 

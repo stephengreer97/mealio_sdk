@@ -18,7 +18,7 @@ import 'verify.dart';
 const String sdkCoreVersion = '0.2.0';
 
 /// This package's version, sent as `X-Mealio-SDK: flutter/<version>`.
-const String mealioSdkVersion = '0.4.1';
+const String mealioSdkVersion = '0.4.2';
 
 const String defaultBaseUrl = 'https://mealio.co';
 

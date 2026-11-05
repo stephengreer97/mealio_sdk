@@ -1,6 +1,6 @@
 {
   "name": "@mealio/react-native-cart",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Mealio Cart SDK for React Native: put an Add to my grocery cart button in your app.",
   "license": "SEE LICENSE IN LICENSE",
   "author": "Mealio <contact@mealio.co>",
@@ -31,16 +31,20 @@
     "prepack": "npm run build"
   },
   "dependencies": {
-    "@mealio/sdk-core": "0.4.1"
+    "@mealio/sdk-core": "0.4.2"
   },
   "peerDependencies": {
     "react": ">=18",
     "react-native": ">=0.74",
     "react-native-webview": ">=13.6",
-    "@react-native-cookies/cookies": ">=6.2"
+    "@react-native-cookies/cookies": ">=6.2",
+    "@preeternal/react-native-cookie-manager": ">=7.0.0"
   },
   "peerDependenciesMeta": {
     "@react-native-cookies/cookies": {
+      "optional": true
+    },
+    "@preeternal/react-native-cookie-manager": {
       "optional": true
     }
   },

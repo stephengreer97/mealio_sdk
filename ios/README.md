@@ -172,7 +172,7 @@ The repository root's `Package.swift` is the one Swift Package Manager reads;
 ### CocoaPods
 
 ```ruby
-pod 'MealioSDK', :git => 'https://github.com/stephengreer97/mealio_sdk.git', :tag => 'v0.4.1'
+pod 'MealioSDK', :git => 'https://github.com/stephengreer97/mealio_sdk.git', :tag => 'v0.4.2'
 ```
 
 ## Your server creates an SDK session
