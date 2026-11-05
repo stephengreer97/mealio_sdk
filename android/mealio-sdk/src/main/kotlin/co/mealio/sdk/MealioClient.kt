@@ -21,6 +21,9 @@ import java.net.URLEncoder
 const val SDK_CORE_VERSION = "0.2.0"
 const val DEFAULT_BASE_URL = "https://mealio.co"
 
+/** How long a warm-up is offered to the next prepare. The server holds the same line (WARM_TTL_MS). */
+const val WARM_FRESH_MS = 4 * 60_000L
+
 /**
  * An error raised to the app. `code` is one of the PROTOCOL.md codes:
  * bad_envelope, blocked, store_unavailable, login_cancelled, session_expired,
@@ -158,6 +161,11 @@ class MealioClient @JvmOverloads constructor(
 
     @Volatile private var token: String? = null
 
+    /** A finished warm-up the next prepare may start from. */
+    private class Warmed(val job: String, val store: String, val at: Long, val pageOpens: Int, val epoch: Int)
+    @Volatile private var warmed: Warmed? = null
+    @Volatile private var lastWarmAt = 0L
+
     /** The allowlist in force, including hosts a signed widening added. */
     val allowlist: Allowlist get() = runner.allowlist
 
@@ -204,10 +212,67 @@ class MealioClient @JvmOverloads constructor(
             if (recipes.size == 1) fields.put("recipe", recipes[0].toJson())
             else fields.put("recipes", JSONArray(recipes.map { it.toJson() }))
             val body = about(fields)
+            takeWarm(store, body.optInt("epoch"))?.let { body.put("warm", it) }
             val result = drive(post("/api/v1/sdk/carts", body), onStep)
             val o = result as? JSONObject ?: throw MealioException("server", "Mealio returned no cart")
             CartSession(this, PreparedCart.fromJson(o))
         }
+    }
+
+    /**
+     * Run the login check for the user's store now, before they tap, so the
+     * cart that follows can start at search. Mealio picks the store: the
+     * user's default, or none, in which case nothing happens (a new user has
+     * no store to check yet). Never shows sign-in, never throws, and does
+     * nothing if it ran in the last few minutes, or while a cart is running.
+     * MealioCartButton calls it when it appears. Mirrors MealioClient.warm()
+     * in packages/core.
+     */
+    @JvmOverloads
+    suspend fun warm(store: String? = null) {
+        val now = System.currentTimeMillis()
+        synchronized(this) {
+            if (now - lastWarmAt < WARM_FRESH_MS) return
+            lastWarmAt = now
+        }
+        // Holding runLock is what makes a prepare wait for this: both drive the
+        // one hidden page. A run already holding it makes a warm-up pointless.
+        if (!runLock.tryLock()) return
+        try {
+            val body = about(JSONObject().putIfNotNull("store", store))
+            val start = post("/api/v1/sdk/warm", body)
+            val job = start.opt("job") as? String
+            if (job == null) { warmed = null; return }
+            val r = drive(start, null) as? JSONObject
+            val s = r?.opt("store") as? String
+            warmed = if (r?.opt("signedIn") == true && s != null) {
+                Warmed(job, s, System.currentTimeMillis(), runner.pageOpens, body.optInt("epoch"))
+            } else null
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // A warm-up that fails costs the user nothing: the cart runs as it always has.
+            warmed = null
+        } finally {
+            runLock.unlock()
+        }
+    }
+
+    /** Forget any warm-up, e.g. after signing out of the stores. */
+    fun clearWarm() {
+        synchronized(this) {
+            warmed = null
+            lastWarmAt = 0L
+        }
+    }
+
+    /** The warm job id, once, if the page it left is still showing and it is still fresh. */
+    private fun takeWarm(store: String?, epoch: Int): String? {
+        val w = synchronized(this) { warmed.also { warmed = null } } ?: return null
+        if (store != null && store != w.store) return null
+        if (w.pageOpens != runner.pageOpens || w.epoch != epoch) return null
+        if (System.currentTimeMillis() - w.at > WARM_FRESH_MS) return null
+        return w.job
     }
 
     /** Search the store again for one item ("minced garlic jar"). */

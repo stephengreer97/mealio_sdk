@@ -77,6 +77,12 @@ public struct MealioCartButton: View {
         }
         .buttonStyle(.plain)
         .disabled(isDisabled)
+        // WARM THE LOGIN CHECK while the user reads the recipe. Only for a known
+        // user with a store on file: the server answers "nothing to warm"
+        // otherwise. The client runs it at most once every few minutes.
+        .task(id: store) {
+            if !isDisabled { await MealioCart.warm(store: store) }
+        }
         .mealioCartFlow(isPresented: $open, recipes: recipes, store: store, zip: zip,
                         onAdded: onAdded, onError: onError, onClose: onClose)
     }

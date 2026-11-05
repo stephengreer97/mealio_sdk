@@ -133,6 +133,15 @@ class MealioCart {
     return _client.prepareCart(store: store, recipe: recipe, recipes: recipes, zip: zip, onStep: onStep);
   }
 
+  /// Runs the login check for the user's store ahead of time, so the next
+  /// cart starts at search. MealioCartButton does this when it appears; call
+  /// it yourself if you start carts another way. Never shows sign-in, never
+  /// throws, and does nothing until a MealioScope is mounted.
+  Future<void> warm({String? store}) async {
+    if (WebViewHost.current == null) return;
+    await _client.warm(store: store);
+  }
+
   /// Signs the user out of `store`.
   ///
   /// webview_flutter can only clear ALL WebView cookies, not one site's, so
@@ -143,6 +152,7 @@ class MealioCart {
   /// Clears every store login on this device and bumps the stored
   /// store-session epoch, which the next cart reports to Mealio.
   Future<void> signOutOfAllStores() async {
+    _client.clearWarm();
     final host = WebViewHost.current;
     if (host != null) {
       await host.clearStoreSessions();

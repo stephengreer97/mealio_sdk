@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -21,6 +22,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import co.mealio.sdk.AddResult
+import co.mealio.sdk.MealioCart
 import co.mealio.sdk.Recipe
 
 /**
@@ -69,6 +71,12 @@ fun MealioCartButton(
     theme: MealioTheme = LocalMealioTheme.current,
 ) {
     var open by rememberSaveable { mutableStateOf(false) }
+    // WARM THE LOGIN CHECK while the user reads the recipe. Only for a known
+    // user with a store on file: the server answers "nothing to warm"
+    // otherwise. The client runs it at most once every few minutes.
+    LaunchedEffect(store, enabled) {
+        if (enabled) MealioCart.warm(store)
+    }
     Box(
         modifier
             .heightIn(min = 52.dp)

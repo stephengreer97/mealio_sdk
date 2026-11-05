@@ -536,6 +536,26 @@ class MealioCartButton extends StatefulWidget {
 class _MealioCartButtonState extends State<MealioCartButton> {
   bool _open = false;
 
+  // WARM THE LOGIN CHECK while the user reads the recipe. Only for a known
+  // user with a store on file: the server answers "nothing to warm"
+  // otherwise. The client runs it at most once every few minutes.
+  @override
+  void initState() {
+    super.initState();
+    _warm();
+  }
+
+  @override
+  void didUpdateWidget(MealioCartButton old) {
+    super.didUpdateWidget(old);
+    if (old.store != widget.store || (old.disabled && !widget.disabled)) _warm();
+  }
+
+  void _warm() {
+    if (widget.disabled || !MealioCart.isConfigured) return;
+    MealioCart.instance.warm(store: widget.store).ignore();
+  }
+
   Future<void> _tap() async {
     if (_open) return;
     _open = true;

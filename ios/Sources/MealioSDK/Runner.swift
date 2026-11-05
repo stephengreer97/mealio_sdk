@@ -25,6 +25,10 @@ public final class Runner {
     private let host: MealioHost
     private let keys: [String: String]
     private var fetchStamps: [String: [TimeInterval]] = [:]
+    /// How many times the hidden page has been told to load. A warm-up is only
+    /// worth anything while the page it left behind is still the one showing,
+    /// and this is how the client knows nothing has loaded over it since.
+    public private(set) var pageOpens = 0
 
     public init(host: MealioHost, allowlist: Allowlist = Allowlist(), keys: [String: String] = MealioKeys.all) {
         self.host = host
@@ -63,6 +67,7 @@ public final class Runner {
             guard allowlist.check(store, op.url, .page).ok else {
                 return InstructionResult(id: op.id, ok: false, ms: 0, error: "blocked")
             }
+            pageOpens += 1
             do {
                 let r = try await host.openPage(store: store, url: op.url, timeoutMs: op.timeoutMs)
                 return InstructionResult(id: op.id, ok: r.ok, ms: ms(), error: r.error, finalUrl: r.finalUrl)

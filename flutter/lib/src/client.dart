@@ -87,6 +87,19 @@ class ClientConfig {
   final Map<String, String>? keys;
 }
 
+/// How long a warm-up is offered to the next prepare. The server holds the same line (WARM_TTL_MS).
+const Duration warmFresh = Duration(minutes: 4);
+
+/// A finished warm-up the next prepare may start from.
+class _Warmed {
+  _Warmed(this.job, this.store, this.at, this.pageOpens, this.epoch);
+  final String job;
+  final String store;
+  final int at;
+  final int pageOpens;
+  final Object? epoch;
+}
+
 class _JobStart {
   _JobStart(this.job, this.envelope);
   final String job;
@@ -104,6 +117,9 @@ class MealioClient {
   final String _base;
   final http.Client _http;
   String? _token;
+  _Warmed? _warmed;
+  Future<void>? _warming;
+  int _lastWarmAt = 0;
 
   /// The allowlist in force, after any widening.
   Allowlist get allowlist => _runner.allowlist;
@@ -150,14 +166,77 @@ class MealioClient {
         : <String, Object?>{'recipes': list.map((Recipe r) => r.toJson()).toList()};
     if (store != null) input['store'] = store;
     if (zip != null) input['zip'] = zip;
+    await _settleWarm();
     input.addAll(await _about());
+    final warm = _takeWarm(store, input['epoch']);
+    if (warm != null) input['warm'] = warm;
     final start = _jobStart(await _post('/api/v1/sdk/carts', input));
     final result = await _drive(start, onStep);
     return CartSession(this, PreparedCart.fromJson(result));
   }
 
+  /// Run the login check for the user's store now, before they tap, so the
+  /// cart that follows can start at search. Mealio picks the store: the
+  /// user's default, or none, in which case nothing happens (a new user has
+  /// no store to check yet). Never shows sign-in, never throws, and does
+  /// nothing if it ran in the last few minutes. MealioCartButton calls it
+  /// when it appears. Mirrors MealioClient.warm() in packages/core.
+  Future<void> warm({String? store}) {
+    final inFlight = _warming;
+    if (inFlight != null) return inFlight;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - _lastWarmAt < warmFresh.inMilliseconds) return Future<void>.value();
+    _lastWarmAt = now;
+    final w = _runWarm(store).whenComplete(() => _warming = null);
+    _warming = w;
+    return w;
+  }
+
+  /// Forget any warm-up, e.g. after signing out of the stores.
+  void clearWarm() {
+    _warmed = null;
+    _lastWarmAt = 0;
+  }
+
+  Future<void> _runWarm(String? store) async {
+    try {
+      final about = await _about();
+      final res = await _post('/api/v1/sdk/warm', <String, Object?>{if (store != null) 'store': store, ...about});
+      if (res is! Map || res['job'] is! String) {
+        _warmed = null;
+        return;
+      }
+      final start = _jobStart(res);
+      final r = await _drive(start, null);
+      _warmed = r is Map && r['signedIn'] == true && r['store'] is String
+          ? _Warmed(start.job, r['store']! as String, DateTime.now().millisecondsSinceEpoch, _runner.pageOpens, about['epoch'])
+          : null;
+    } catch (_) {
+      // A warm-up that fails costs the user nothing: the cart runs as it always has.
+      _warmed = null;
+    }
+  }
+
+  /// Every job drives the one hidden page: none may start while a warm-up is driving it.
+  Future<void> _settleWarm() async {
+    final w = _warming;
+    if (w != null) await w;
+  }
+
+  /// The warm job id, once, if the page it left is still showing and it is still fresh.
+  String? _takeWarm(String? store, Object? epoch) {
+    final w = _warmed;
+    _warmed = null;
+    if (w == null) return null;
+    if (store != null && store != w.store) return null;
+    if (w.pageOpens != _runner.pageOpens || w.epoch != epoch) return null;
+    if (DateTime.now().millisecondsSinceEpoch - w.at > warmFresh.inMilliseconds) return null;
+    return w.job;
+  }
+
   /// Search the store again for one item ("minced garlic jar").
   Future<SearchResult> search(String cartId, String key, String query, {StepListener? onStep}) async {
+    await _settleWarm();
     final start = _jobStart(await _post(
       '/api/v1/sdk/carts/${Uri.encodeComponent(cartId)}/search',
       <String, Object?>{'key': key, 'query': query, ...await _about()},
@@ -167,6 +246,7 @@ class MealioClient {
 
   /// Fill the store cart with the user's choices.
   Future<AddResult> addToCart(String cartId, List<Selection> selections, {StepListener? onStep}) async {
+    await _settleWarm();
     final start = _jobStart(await _post(
       '/api/v1/sdk/carts/${Uri.encodeComponent(cartId)}/add',
       <String, Object?>{

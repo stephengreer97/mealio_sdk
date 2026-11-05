@@ -87,9 +87,21 @@ object MealioCart {
     /** Stores the SDK supports right now (GET /api/v1/stores). */
     suspend fun stores(): List<StoreInfo> = current().client.stores()
 
+    /**
+     * Run the login check for the user's store ahead of time, so the next cart
+     * starts at search. MealioCartButton does this when it appears; call it
+     * yourself if you start carts another way. Never shows sign-in, never
+     * throws, and does nothing before [configure].
+     */
+    @JvmOverloads
+    suspend fun warm(store: String? = null) {
+        state?.client?.warm(store)
+    }
+
     /** Sign the user out of one store on this device. */
     suspend fun signOutOfStore(store: String) {
         val s = current()
+        s.client.clearWarm()
         val hosts = s.client.allowlist.hostsFor(store) ?: STORES[store]
         if (hosts != null) s.sessions.clearStore(hosts)
         s.host.reset()
@@ -103,6 +115,7 @@ object MealioCart {
      */
     suspend fun signOutOfAllStores() {
         val s = current()
+        s.client.clearWarm()
         s.sessions.clearAll()
         s.host.reset()
         s.sessions.bumpEpoch()
