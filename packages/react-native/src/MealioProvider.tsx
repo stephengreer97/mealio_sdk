@@ -16,7 +16,7 @@ import {
 } from '@mealio/sdk-core';
 import { resolveTheme, type MealioTheme } from './theme';
 
-export const SDK_VERSION = '0.3.0';
+export const SDK_VERSION = '0.4.0';
 
 export interface EpochStorage {
   get(): Promise<number>;

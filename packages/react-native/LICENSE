@@ -1,0 +1,26 @@
+Mealio Cart SDK License
+
+Copyright (c) 2026 Mealio. All rights reserved.
+
+This software (the "SDK") is licensed, not sold. You may use the SDK only to
+integrate an application you develop with Mealio's services, under an active
+Mealio developer account and Mealio's terms (https://mealio.co/terms), and only
+in the unmodified form Mealio publishes. You may distribute the SDK only as an
+unmodified part of such an application.
+
+You may not, except as allowed above or with Mealio's written permission:
+  - copy, modify, adapt, translate or create derivative works of the SDK;
+  - distribute, sublicense, sell, rent or lend the SDK on its own;
+  - use the SDK, its protocol or any part of it to build or operate a product
+    or service that competes with Mealio, or that talks to anything other than
+    Mealio's services;
+  - remove or alter this notice.
+
+Mealio may update this license or end your right to use the SDK, for example
+when your developer account ends. Your right to use the SDK ends automatically
+if you break these terms.
+
+THE SDK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+INCLUDING THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE
+AND NON-INFRINGEMENT. IN NO EVENT SHALL MEALIO BE LIABLE FOR ANY CLAIM, DAMAGES
+OR OTHER LIABILITY ARISING FROM, OUT OF OR IN CONNECTION WITH THE SDK OR ITS USE.

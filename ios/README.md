@@ -159,7 +159,7 @@ Or in `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/mealio/mealio_sdk.git", from: "0.3.0"),
+    .package(url: "https://github.com/stephengreer97/mealio_sdk.git", from: "0.4.0"),
 ],
 targets: [
     .target(name: "MyApp", dependencies: [.product(name: "MealioSDK", package: "mealio_sdk")]),
