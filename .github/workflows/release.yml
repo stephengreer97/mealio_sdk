@@ -102,5 +102,14 @@ jobs:
           channel: stable
       - run: flutter pub get
         working-directory: flutter
-      - run: flutter pub publish --force
+      # pub.dev takes a package's FIRST version only by hand, so that one may
+      # already be live when its tag is pushed. Skip a version that exists.
+      - id: live
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          if curl -fsS https://pub.dev/api/packages/mealio_sdk | grep -q "\"version\":\"$v\""; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"; echo "mealio_sdk $v is already on pub.dev"
+          fi
+      - if: steps.live.outputs.skip != 'true'
+        run: flutter pub publish --force
         working-directory: flutter
