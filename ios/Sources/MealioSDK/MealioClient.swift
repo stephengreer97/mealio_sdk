@@ -268,7 +268,10 @@ public final class MealioClient {
         let now = Date().timeIntervalSince1970
         if warming != nil || now - lastWarmAt < MealioClient.warmFreshSeconds { return nil }
         lastWarmAt = now
-        let task = Task { [weak self] in await self?.runWarm(store: store) }
+        let task = Task<Void, Never> { [weak self] in
+            guard let self = self else { return }
+            await self.runWarm(store: store)
+        }
         warming = task
         return task
     }
