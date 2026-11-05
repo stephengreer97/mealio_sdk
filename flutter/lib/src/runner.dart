@@ -52,6 +52,12 @@ class Runner {
   final Map<String, String>? _keys;
   final Map<String, List<int>> _fetchStamps = <String, List<int>>{};
 
+  /// How many times the hidden page has been told to load. A warm-up is only
+  /// worth anything while the page it left behind is still the one showing,
+  /// and this is how the client knows nothing has loaded over it since.
+  int get pageOpens => _pageOpens;
+  int _pageOpens = 0;
+
   /// Verify and run one envelope. Throws [EnvelopeError] when it must be refused.
   ///
   /// `onStep` is called before each instruction that actually runs (not for
@@ -95,6 +101,7 @@ class Runner {
       case final PageOpen i: {
         final v = allowlist.check(store, i.url, UrlUse.page);
         if (!v.ok) return PageOpenResult(id: i.id, ok: false, error: 'blocked', ms: 0);
+        _pageOpens += 1;
         try {
           final r = await _host.openPage(store, i.url, i.timeoutMs);
           return PageOpenResult(id: i.id, ok: r.ok, finalUrl: r.finalUrl, error: r.error, ms: _now() - t0);

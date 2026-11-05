@@ -144,6 +144,18 @@ public final class MealioClient {
     private var token: String?
     private let base: String
 
+    /// How long a warm-up is offered to the next prepare. The server holds the same line (WARM_TTL_MS).
+    public static let warmFreshSeconds: TimeInterval = 4 * 60
+
+    /// A finished warm-up the next prepare may start from.
+    struct Warmed { let job: String; let store: String; let at: TimeInterval; let pageOpens: Int; let epoch: Int }
+    // Warm-up state. Touched only inside the small synchronous helpers below,
+    // never across an await, so a plain lock is enough.
+    private let warmLock = NSLock()
+    private var warmed: Warmed?
+    private var warming: Task<Void, Never>?
+    private var lastWarmAt: TimeInterval = 0
+
     /// Max envelopes in one job before the SDK gives up on it.
     static let maxSteps = 200
 
@@ -208,15 +220,17 @@ public final class MealioClient {
         if recipes.count > MAX_RECIPES {
             throw MealioError(code: MealioError.Code.tooManyRecipes, message: "At most \(MAX_RECIPES) recipes in one cart.")
         }
-        struct One: Encodable { let store: String?; let recipe: Recipe; let zip: String?; let sdk: SDKInfo; let epoch: Int }
-        struct Many: Encodable { let store: String?; let recipes: [Recipe]; let zip: String?; let sdk: SDKInfo; let epoch: Int }
+        struct One: Encodable { let store: String?; let recipe: Recipe; let zip: String?; let sdk: SDKInfo; let epoch: Int; let warm: String? }
+        struct Many: Encodable { let store: String?; let recipes: [Recipe]; let zip: String?; let sdk: SDKInfo; let epoch: Int; let warm: String? }
+        await settleWarm()
         let a = about()
+        let warm = takeWarm(store: store, epoch: a.epoch)
         // One recipe goes as `recipe`, so a server from before multi-recipe still understands it.
         let start: JSONValue
         if recipes.count == 1 {
-            start = try await post("/api/v1/sdk/carts", body: One(store: store, recipe: recipes[0], zip: zip, sdk: a.sdk, epoch: a.epoch))
+            start = try await post("/api/v1/sdk/carts", body: One(store: store, recipe: recipes[0], zip: zip, sdk: a.sdk, epoch: a.epoch, warm: warm))
         } else {
-            start = try await post("/api/v1/sdk/carts", body: Many(store: store, recipes: recipes, zip: zip, sdk: a.sdk, epoch: a.epoch))
+            start = try await post("/api/v1/sdk/carts", body: Many(store: store, recipes: recipes, zip: zip, sdk: a.sdk, epoch: a.epoch, warm: warm))
         }
         let result = try await drive(start, onStep: onStep)
         do {
@@ -226,10 +240,89 @@ public final class MealioClient {
         }
     }
 
+    // MARK: - warm-up
+
+    /// Run the login check for the user's store now, before they tap, so the
+    /// cart that follows can start at search. Mealio picks the store: the
+    /// user's default, or none, in which case nothing happens (a new user has
+    /// no store to check yet). Never shows sign-in, never throws, and does
+    /// nothing if it ran in the last few minutes. MealioCartButton calls it
+    /// when it appears. Mirrors MealioClient.warm() in packages/core.
+    public func warm(store: String? = nil) async {
+        guard let task = beginWarm(store: store) else {
+            if let inFlight = currentWarm() { await inFlight.value }
+            return
+        }
+        await task.value
+    }
+
+    /// Forget any warm-up, e.g. after signing out of the stores.
+    public func clearWarm() {
+        warmLock.lock(); defer { warmLock.unlock() }
+        warmed = nil
+        lastWarmAt = 0
+    }
+
+    private func beginWarm(store: String?) -> Task<Void, Never>? {
+        warmLock.lock(); defer { warmLock.unlock() }
+        let now = Date().timeIntervalSince1970
+        if warming != nil || now - lastWarmAt < MealioClient.warmFreshSeconds { return nil }
+        lastWarmAt = now
+        let task = Task { [weak self] in await self?.runWarm(store: store) }
+        warming = task
+        return task
+    }
+
+    private func currentWarm() -> Task<Void, Never>? {
+        warmLock.lock(); defer { warmLock.unlock() }
+        return warming
+    }
+
+    private func finishWarm(_ w: Warmed?) {
+        warmLock.lock(); defer { warmLock.unlock() }
+        warmed = w
+        warming = nil
+    }
+
+    private func runWarm(store: String?) async {
+        struct Body: Encodable { let store: String?; let sdk: SDKInfo; let epoch: Int }
+        let a = about()
+        var result: Warmed?
+        do {
+            let start = try await post("/api/v1/sdk/warm", body: Body(store: store, sdk: a.sdk, epoch: a.epoch))
+            if let job = start["job"]?.stringValue {
+                let r = try await drive(start, onStep: nil)
+                if r["signedIn"]?.boolValue == true, let s = r["store"]?.stringValue {
+                    result = Warmed(job: job, store: s, at: Date().timeIntervalSince1970, pageOpens: runner.pageOpens, epoch: a.epoch)
+                }
+            }
+        } catch {
+            // A warm-up that fails costs the user nothing: the cart runs as it always has.
+        }
+        finishWarm(result)
+    }
+
+    /// Every job drives the one hidden page: none may start while a warm-up is driving it.
+    private func settleWarm() async {
+        if let w = currentWarm() { await w.value }
+    }
+
+    /// The warm job id, once, if the page it left is still showing and it is still fresh.
+    private func takeWarm(store: String?, epoch: Int) -> String? {
+        warmLock.lock(); defer { warmLock.unlock() }
+        guard let w = warmed else { return nil }
+        warmed = nil
+        if let store = store, store != w.store { return nil }
+        if w.pageOpens != runner.pageOpens || w.epoch != epoch { return nil }
+        if Date().timeIntervalSince1970 - w.at > MealioClient.warmFreshSeconds { return nil }
+        return w.job
+    }
+
     /// Search the store again for one item ("minced garlic jar").
     public func search(cartId: String, key: String, query: String,
                        onStep: StepListener? = nil) async throws -> SearchResult {
         struct Body: Encodable { let key: String; let query: String; let sdk: SDKInfo; let epoch: Int }
+        await settleWarm()
         let a = about()
         let start = try await post("/api/v1/sdk/carts/\(MealioClient.encodeComponent(cartId))/search",
                                    body: Body(key: key, query: query, sdk: a.sdk, epoch: a.epoch))
@@ -245,6 +338,7 @@ public final class MealioClient {
     public func addToCart(cartId: String, selections: [Selection],
                           onStep: StepListener? = nil) async throws -> AddResult {
         struct Body: Encodable { let selections: [Selection]; let sdk: SDKInfo; let epoch: Int }
+        await settleWarm()
         let a = about()
         let start = try await post("/api/v1/sdk/carts/\(MealioClient.encodeComponent(cartId))/add",
                                    body: Body(selections: selections, sdk: a.sdk, epoch: a.epoch))

@@ -104,7 +104,15 @@ public enum MealioCart {
     /// The store-session epoch every call reports. Bumped by every sign-out.
     public static var storeEpoch: Int { StoreEpoch.current() }
 
+    /// Run the login check for the user's store ahead of time, so the next
+    /// cart starts at search. MealioCartButton does this when it appears; call
+    /// it yourself if you start carts another way. Never shows sign-in.
+    public static func warm(store: String? = nil) async {
+        await client?.warm(store: store)
+    }
+
     private static func afterSignOut() {
+        client?.clearWarm()
         host?.resetHiddenPage()
         StoreEpoch.bump()
     }

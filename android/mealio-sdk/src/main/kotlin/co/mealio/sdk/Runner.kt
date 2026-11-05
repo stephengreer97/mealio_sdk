@@ -33,6 +33,14 @@ class Runner @JvmOverloads constructor(
     private val fetchStamps = HashMap<String, ArrayDeque<Long>>()
 
     /**
+     * How many times the hidden page has been told to load. A warm-up is only
+     * worth anything while the page it left behind is still the one showing,
+     * and this is how the client knows nothing has loaded over it since.
+     */
+    @Volatile var pageOpens = 0
+        private set
+
+    /**
      * Verify and run one envelope. Throws EnvelopeException when it must be refused.
      * `onStep` is called before each instruction that is executed (not for
      * done/fail or skipped ones). An exception it throws never breaks the run.
@@ -75,6 +83,7 @@ class Runner @JvmOverloads constructor(
                 if (!allowlist.check(store, ins.url, UrlUse.PAGE).ok) {
                     return InstructionResult.PageOpenResult(ins.id, ok = false, error = "blocked", ms = 0)
                 }
+                pageOpens += 1
                 try {
                     val r = host.openPage(store, ins.url, ins.timeoutMs)
                     InstructionResult.PageOpenResult(ins.id, r.ok, r.finalUrl, r.error, ms())
