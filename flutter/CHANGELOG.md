@@ -1,7 +1,9 @@
 ## 0.4.1
 
 - No code changes. The release pipeline now publishes npm through Trusted
-  Publishing and first ships the iOS SDK to CocoaPods.
+  Publishing. The iOS SDK installs from GitHub with Swift Package Manager or
+  CocoaPods (`:git`, `:tag`); nothing is pushed to CocoaPods Trunk, which stops
+  taking releases on 2026-12-02.
 
 ## 0.4.0
 

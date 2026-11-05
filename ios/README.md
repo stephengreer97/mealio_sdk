@@ -166,13 +166,13 @@ targets: [
 ]
 ```
 
-The package manifest lives in `ios/`. If your SPM setup needs the manifest at
-the repository root, add the package from a local checkout of `ios/` instead.
+The repository root's `Package.swift` is the one Swift Package Manager reads;
+`ios/Package.swift` adds the tests and is for working on the SDK itself.
 
 ### CocoaPods
 
 ```ruby
-pod 'MealioSDK', :git => 'https://github.com/mealio/mealio_sdk.git', :tag => 'ios-v0.3.0'
+pod 'MealioSDK', :git => 'https://github.com/stephengreer97/mealio_sdk.git', :tag => 'v0.4.1'
 ```
 
 ## Your server creates an SDK session

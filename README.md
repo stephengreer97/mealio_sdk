@@ -27,7 +27,7 @@ back what the store answered. See [PROTOCOL.md](PROTOCOL.md).
 | --- | --- |
 | React Native | `npm install @mealio/react-native-cart react-native-webview` |
 | iOS (Swift Package Manager) | `.package(url: "https://github.com/stephengreer97/mealio_sdk.git", from: "0.4.0")` |
-| iOS (CocoaPods) | `pod 'MealioSDK', '~> 0.4'` |
+| iOS (CocoaPods) | `pod 'MealioSDK', :git => 'https://github.com/stephengreer97/mealio_sdk.git', :tag => 'v0.4.1'` (installed from GitHub: CocoaPods Trunk stops taking releases on 2026-12-02) |
 | Android | `implementation("co.mealio:mealio-sdk:0.4.0")`, plus `co.mealio:mealio-sdk-compose:0.4.0` for the Compose sheet |
 | Flutter | `flutter pub add mealio_sdk` |
 
@@ -37,8 +37,8 @@ Use of the SDK is subject to the [Mealio Cart SDK License](LICENSE).
 
 Bump every version together (`node scripts/check-versions.mjs` must pass),
 merge, then push a tag `vX.Y.Z`. `.github/workflows/release.yml` runs the full
-suite and publishes npm, Maven Central, CocoaPods and pub.dev; Swift Package
-Manager reads the tag directly.
+suite and publishes npm, Maven Central and pub.dev; Swift Package Manager and
+CocoaPods (from git) read the tag directly.
 
 ## Packages
 
