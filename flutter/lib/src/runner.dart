@@ -63,7 +63,16 @@ class Runner {
   /// `onStep` is called before each instruction that actually runs (not for
   /// skipped ones, nor for `done`/`fail`). An exception it throws is ignored:
   /// a progress callback never breaks a run.
-  Future<StepOutcome> run(Envelope env, String? job, int lastSeq, {void Function(Instruction ins)? onStep}) async {
+  ///
+  /// `allowLogin` false (a warm-up) refuses every `show_login` with
+  /// `not_allowed` without showing anything.
+  Future<StepOutcome> run(
+    Envelope env,
+    String? job,
+    int lastSeq, {
+    void Function(Instruction ins)? onStep,
+    bool allowLogin = true,
+  }) async {
     final payload = checkInstructions(await openEnvelope(env, _keys), job, lastSeq);
     final results = <InstructionResult>[];
     Terminal? terminal;
@@ -88,14 +97,14 @@ class Runner {
       } catch (_) {
         // A progress callback never breaks a run.
       }
-      final r = await _one(payload.store, ins);
+      final r = await _one(payload.store, ins, allowLogin: allowLogin);
       results.add(r);
       if (!r.ok) failed = true;
     }
     return StepOutcome(payload: payload, results: results, terminal: terminal);
   }
 
-  Future<InstructionResult> _one(String store, Instruction ins) async {
+  Future<InstructionResult> _one(String store, Instruction ins, {bool allowLogin = true}) async {
     final t0 = _now();
     switch (ins) {
       case final PageOpen i: {
@@ -132,6 +141,18 @@ class Runner {
         }
       }
       case final ShowLogin i: {
+        // A warm-up runs before the user has tapped anything: it may check
+        // who is signed in, never put a sign-in sheet in front of them.
+        if (!allowLogin) {
+          return ShowLoginResult(
+            id: i.id,
+            ok: false,
+            outcome: LoginOutcome.cancelled,
+            messages: const <JsonMessage>[],
+            error: 'not_allowed',
+            ms: 0,
+          );
+        }
         final v = allowlist.check(store, i.url, UrlUse.login);
         if (!v.ok) {
           return ShowLoginResult(
@@ -170,6 +191,9 @@ class Runner {
       case final FetchOp i: {
         final v = allowlist.check(store, i.request.url, UrlUse.fetch);
         if (!v.ok) return FetchResult(id: i.id, ok: false, error: 'blocked', ms: 0);
+        // The guard stops a page script naming an order or a payment; this op
+        // never passes through a page, so the same rule is applied here.
+        if (bodyBlocked(i.request.body)) return FetchResult(id: i.id, ok: false, error: 'blocked', ms: 0);
         if (_overRate(store)) return FetchResult(id: i.id, ok: false, error: 'rate', ms: 0);
         try {
           final r = await _host.fetch(store, i.request, i.timeoutMs, i.maxBytes);

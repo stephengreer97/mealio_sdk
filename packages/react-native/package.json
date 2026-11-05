@@ -17,7 +17,11 @@
   "peerDependencies": {
     "react": ">=18",
     "react-native": ">=0.74",
-    "react-native-webview": ">=13.6"
+    "react-native-webview": ">=13.6",
+    "@react-native-cookies/cookies": ">=6.2"
+  },
+  "peerDependenciesMeta": {
+    "@react-native-cookies/cookies": { "optional": true }
   },
   "optionalDependencies": {},
   "devDependencies": {

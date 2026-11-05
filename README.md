@@ -36,6 +36,9 @@ back what the store answered. See [PROTOCOL.md](PROTOCOL.md).
 ## Quickstart (React Native)
 
 1. Get keys at https://developers.mealio.co/dashboard.
+   To offer "sign out of stores", also install `@react-native-cookies/cookies`
+   (React Native cannot delete WebView cookies without it, and
+   `signOutOfAllStores()` throws `unsupported` rather than pretend).
 2. Add one endpoint to your server that calls `POST https://mealio.co/api/v1/sessions`
    with your secret key and your user id (see `examples/partner-server`).
 3. Wrap your app:

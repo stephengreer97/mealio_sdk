@@ -11,7 +11,7 @@ import React, { createContext, useCallback, useContext, useMemo, useRef, useStat
 import { Modal, Platform, Pressable, SafeAreaView, StyleSheet, Text, View } from 'react-native';
 import { WebView, type WebViewMessageEvent, type WebViewNavigation } from 'react-native-webview';
 import {
-  MealioClient, matchesAny, parseMessage,
+  MealioClient, MealioError, matchesAny, parseMessage,
   type CartSession, type Host, type JsonMessage, type Matcher, type PrepareCartInput, type StepListener, type StoreInfo,
 } from '@mealio/sdk-core';
 import { resolveTheme, type MealioTheme } from './theme';
@@ -80,9 +80,48 @@ export function useMealioInternal(): Internal {
   return v;
 }
 
-type Waiter = { until: Matcher[]; messages: JsonMessage[]; resolve: (timedOut: boolean) => void };
+type Waiter = { until: Matcher[]; messages: JsonMessage[]; resolve: (timedOut: boolean) => void; tag: Tagged };
+
+// ── which frame is talking ────────────────────────────────────────────────
+//
+// react-native-webview hands every frame's postMessage to onMessage with no
+// frame in it, so an ad iframe on a store page could post a SEARCH_RESULT or a
+// signed-in answer that ends a script early. Before each script the host
+// replaces the MAIN frame's ReactNativeWebView with a wrapper that stamps
+// every message with a one-run secret and says hello through it. A sub-frame
+// cannot read the main frame's secret, so once the hello arrives, unstamped or
+// wrongly stamped messages are dropped. If the wrapper cannot be installed (the
+// hello never comes) messages are accepted as before rather than lost.
+
+interface Tagged { nonce: string; strict: boolean }
+
+const newNonce = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+
+const tagScript = (nonce: string) => `(function(){try{
+  var cur = window.ReactNativeWebView; if (!cur) return;
+  var base = cur.__mealioBase || cur;
+  var w = { __mealioBase: base, postMessage: function (m) { base.postMessage(JSON.stringify({ __mealio: ${JSON.stringify(nonce)}, m: String(m) })); } };
+  window.ReactNativeWebView = w;
+  if (window.ReactNativeWebView === w) base.postMessage(JSON.stringify({ __mealio: ${JSON.stringify(nonce)}, hello: 1 }));
+}catch(e){}})(); true;`;
+
+/** The message a frame posted, or null if it must be dropped. Flips `tag.strict` on the hello. */
+function untag(data: string, tag: Tagged | null): string | null {
+  let o: any = null;
+  try { o = JSON.parse(data); } catch { /* a plain message */ }
+  if (o && typeof o === 'object' && typeof o.__mealio === 'string') {
+    if (!tag || o.__mealio !== tag.nonce) return null;
+    if (o.hello) { tag.strict = true; return null; }
+    return typeof o.m === 'string' ? o.m : null;
+  }
+  return tag && tag.strict ? null : data;
+}
+
+/** Response headers a store must never hand to Mealio: its session cookies. */
+const PRIVATE_HEADERS = new Set(['set-cookie', 'set-cookie2']);
 
 interface LoginState {
+  tag: Tagged;
   url: string;
   title: string;
   guard: string;
@@ -102,6 +141,9 @@ function memoryEpoch(): EpochStorage {
 export function MealioProvider(props: MealioProviderProps) {
   const theme = useMemo(() => resolveTheme({ ...(props.accentColor ? { accent: props.accentColor } : {}), ...(props.theme || {}) }), [props.theme, props.accentColor]);
   const hidden = useRef<WebView>(null);
+  /** The store the hidden page was last opened for, and the allowlist to hold it to. */
+  const hiddenStore = useRef<string | null>(null);
+  const allowRef = useRef<MealioClient['allowlist'] | null>(null);
   const loginView = useRef<WebView>(null);
   const [hiddenUri, setHiddenUri] = useState<{ uri: string; n: number }>({ uri: 'about:blank', n: 0 });
   const pageWaiter = useRef<{ resolve: (r: { ok: boolean; finalUrl?: string; error?: string }) => void } | null>(null);
@@ -121,6 +163,27 @@ export function MealioProvider(props: MealioProviderProps) {
     w.resolve({ ok: true, finalUrl: e.nativeEvent.url });
   }, []);
 
+  /**
+   * The hidden page stays on its store. Every top-frame navigation must pass
+   * the store's allowlist (its own hosts, or the identity hosts its sign-in
+   * bounces through). Anything else, a redirect or a script sending the page
+   * to another site, or a non-https scheme the OS would otherwise open, is
+   * refused, and a page_open waiting on it fails as blocked.
+   */
+  const onHiddenShouldStart = useCallback((req: { url: string; isTopFrame?: boolean }) => {
+    const url = req.url || '';
+    if (url.startsWith('about:')) return true;
+    if (req.isTopFrame === false) return true;
+    const store = hiddenStore.current;
+    const a = allowRef.current;
+    const ok = !!store && !!a && (a.check(store, url, 'page').ok || a.check(store, url, 'login').ok);
+    if (!ok) {
+      const w = pageWaiter.current;
+      if (w) { pageWaiter.current = null; w.resolve({ ok: false, finalUrl: url, error: 'blocked' }); }
+    }
+    return ok;
+  }, []);
+
   const onHiddenError = useCallback(() => {
     const w = pageWaiter.current;
     if (!w) return;
@@ -129,9 +192,11 @@ export function MealioProvider(props: MealioProviderProps) {
   }, []);
 
   const onHiddenMessage = useCallback((e: WebViewMessageEvent) => {
-    const msg = parseMessage(e.nativeEvent.data);
     const w = scriptWaiter.current;
-    if (!msg || !w) return;
+    if (!w) return;
+    const data = untag(e.nativeEvent.data, w.tag);
+    const msg = data == null ? null : parseMessage(data);
+    if (!msg) return;
     w.messages.push(msg);
     if (matchesAny(msg, w.until)) { scriptWaiter.current = null; w.resolve(false); }
   }, []);
@@ -150,14 +215,17 @@ export function MealioProvider(props: MealioProviderProps) {
   const injectCheck = useCallback(() => {
     const l = loginRef.current;
     if (!l || !l.check) return;
+    loginView.current?.injectJavaScript(tagScript(l.tag.nonce));
     loginView.current?.injectJavaScript(l.guard);
     loginView.current?.injectJavaScript(l.check.script);
   }, []);
 
   const onLoginMessage = useCallback((e: WebViewMessageEvent) => {
     const l = loginRef.current;
-    const msg = parseMessage(e.nativeEvent.data);
-    if (!l || !msg) return;
+    if (!l) return;
+    const data = untag(e.nativeEvent.data, l.tag);
+    const msg = data == null ? null : parseMessage(data);
+    if (!msg) return;
     l.messages.push(msg);
     if (matchesAny(msg, l.doneWhen)) endLogin('signed_in');
   }, [endLogin]);
@@ -171,7 +239,9 @@ export function MealioProvider(props: MealioProviderProps) {
     const l = loginRef.current;
     if (!l) return true;
     const top = req.isTopFrame ?? (Platform.OS === 'ios' ? (!req.mainDocumentURL || req.mainDocumentURL === req.url) : true);
-    if (!top || req.url.startsWith('about:') || req.url.startsWith('blob:') || req.url.startsWith('data:')) return true;
+    if (!top || req.url.startsWith('about:')) return true;
+    // A data: or blob: page in the TOP frame is a page with no address under
+    // the store's title: refused, as on iOS. allowNavigation refuses it below.
     if (l.doneWhenUrl && l.doneWhenUrl.test(req.url)) { setTimeout(() => endLogin('signed_in'), 0); return true; }
     return l.allowNavigation(req.url);
   }, [endLogin]);
@@ -184,6 +254,7 @@ export function MealioProvider(props: MealioProviderProps) {
       onMessage={onLoginMessage}
       onNavigationStateChange={onLoginNav}
       onShouldStartLoadWithRequest={onLoginShouldStart}
+      originWhitelist={['*']}
       javaScriptEnabled
       domStorageEnabled
       sharedCookiesEnabled
@@ -195,7 +266,8 @@ export function MealioProvider(props: MealioProviderProps) {
   // ── the Host the relay drives ───────────────────────────────────────
 
   const host: Host = useMemo(() => ({
-    openPage(_store, url, timeoutMs) {
+    openPage(store, url, timeoutMs) {
+      hiddenStore.current = store;
       return new Promise((resolve) => {
         const t = setTimeout(() => { if (pageWaiter.current) { pageWaiter.current = null; resolve({ ok: false, error: 'timeout' }); } }, timeoutMs);
         pageWaiter.current = { resolve: (r) => { clearTimeout(t); resolve(r); } };
@@ -204,11 +276,12 @@ export function MealioProvider(props: MealioProviderProps) {
     },
     runScript(_store, guard, script, until, timeoutMs) {
       return new Promise((resolve) => {
-        const waiter: Waiter = { until, messages: [], resolve: () => {} };
+        const waiter: Waiter = { until, messages: [], resolve: () => {}, tag: { nonce: newNonce(), strict: false } };
         const t = setTimeout(() => { if (scriptWaiter.current === waiter) { scriptWaiter.current = null; resolve({ messages: waiter.messages, timedOut: true }); } }, timeoutMs);
         waiter.resolve = (timedOut) => { clearTimeout(t); resolve({ messages: waiter.messages, timedOut }); };
         scriptWaiter.current = waiter;
         if (!hidden.current) { scriptWaiter.current = null; clearTimeout(t); resolve({ messages: [], timedOut: false, error: 'no_webview' }); return; }
+        hidden.current.injectJavaScript(tagScript(waiter.tag.nonce));
         hidden.current.injectJavaScript(guard);
         hidden.current.injectJavaScript(script);
       });
@@ -216,6 +289,7 @@ export function MealioProvider(props: MealioProviderProps) {
     showLogin(opts) {
       return new Promise((resolve) => {
         const state: LoginState = {
+          tag: { nonce: newNonce(), strict: false },
           url: opts.url, title: opts.title, guard: opts.guard, check: opts.check ?? null, doneWhen: opts.doneWhen,
           doneWhenUrl: opts.doneWhenUrl ? new RegExp(opts.doneWhenUrl) : null, allowNavigation: opts.allowNavigation,
           messages: [], finish: (outcome) => { clearTimeout(t); resolve({ outcome, messages: state.messages }); },
@@ -226,14 +300,21 @@ export function MealioProvider(props: MealioProviderProps) {
         if (state.check) checkTimer.current = setInterval(injectCheck, Math.max(1000, state.check.intervalMs));
       });
     },
-    async fetch(_store, req, timeoutMs, maxBytes) {
+    async fetch(store, req, timeoutMs, maxBytes) {
       const ctl = new AbortController();
       const t = setTimeout(() => ctl.abort(), timeoutMs);
       try {
         const res = await fetch(req.url, { method: req.method, headers: req.headers, body: req.body ?? undefined, credentials: 'include', signal: ctl.signal });
+        // React Native follows redirects itself and cannot be told not to. A
+        // response that ended up off the store's allowlist is not handed back.
+        const finalUrl = (res as { url?: string }).url;
+        const a = allowRef.current;
+        if (finalUrl && finalUrl !== req.url && (!a || !a.check(store, finalUrl, 'fetch').ok)) {
+          return { ok: false, error: 'redirect_blocked' };
+        }
         const text = await res.text();
         const headers: Record<string, string> = {};
-        res.headers.forEach((v: string, k: string) => { headers[k] = v; });
+        res.headers.forEach((v: string, k: string) => { if (!PRIVATE_HEADERS.has(k.toLowerCase())) headers[k] = v; });
         return { ok: true, status: res.status, headers, body: text.slice(0, maxBytes), truncated: text.length > maxBytes };
       } catch {
         return { ok: false, error: ctl.signal.aborted ? 'timeout' : 'no_response' };
@@ -251,6 +332,7 @@ export function MealioProvider(props: MealioProviderProps) {
     baseUrl: props.baseUrl,
     getEpoch: () => epochStore.get(),
   }, host), [props.publishableKey, props.getSessionToken, props.baseUrl, host, epochStore]);
+  allowRef.current = client.allowlist;
 
   const api: MealioApi = useMemo(() => ({
     theme,
@@ -260,15 +342,24 @@ export function MealioProvider(props: MealioProviderProps) {
     async signOutOfAllStores() {
       client.clearWarm();
       await epochStore.set((await epochStore.get()) + 1);
+      // Nothing may keep running in, or remember, the old session's page.
+      hiddenStore.current = null;
+      setHiddenUri((cur) => ({ uri: 'about:blank', n: cur.n + 1 }));
+      hidden.current?.clearCache?.(true);
+      let CookieManager: { clearAll(useWebKit?: boolean): Promise<unknown> } | null = null;
       try {
         // Optional peer: @react-native-cookies/cookies clears both jars.
         // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const CookieManager = require('@react-native-cookies/cookies').default;
-        await CookieManager.clearAll(true);
-        await CookieManager.clearAll(false);
-      } catch {
-        hidden.current?.clearCache?.(true);
+        CookieManager = require('@react-native-cookies/cookies').default;
+      } catch { /* not installed */ }
+      // Without it there is no way to delete a WebView cookie from React
+      // Native, so the stores' logins would survive. Saying so beats a sign-out
+      // that only looks like it worked.
+      if (!CookieManager) {
+        throw new MealioError('unsupported', 'Install @react-native-cookies/cookies to sign out of stores.');
       }
+      await CookieManager.clearAll(true);
+      await CookieManager.clearAll(false);
     },
   }), [client, epochStore, theme]);
 
@@ -293,7 +384,11 @@ export function MealioProvider(props: MealioProviderProps) {
             // launch. The page's baseUrl keeps its url about:blank. The html
             // must not be '' (the new architecture drops an empty string).
             source={Platform.OS === 'ios' && hiddenUri.uri === 'about:blank' ? IOS_IDLE : { uri: hiddenUri.uri }}
-            originWhitelist={['https://*', 'about:*']}
+            // Every URL reaches onShouldStartLoadWithRequest: one that missed
+            // originWhitelist would be handed to the OS (Linking.openURL)
+            // instead of refused.
+            originWhitelist={['*']}
+            onShouldStartLoadWithRequest={onHiddenShouldStart}
             onLoadEnd={onHiddenLoadEnd}
             onError={onHiddenError}
             onMessage={onHiddenMessage}

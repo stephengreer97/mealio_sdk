@@ -39,8 +39,10 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
     private let presenter: Presenter
 
     /// Main-frame navigations of the hidden WebView are checked with this.
-    /// MealioCart sets it to the same allowlist check `page_open` uses, so a
-    /// redirect inside the hidden page cannot leave the store's hosts.
+    /// MealioCart sets it to the allowlist check `page_open` uses, widened to
+    /// the store's sign-in hosts (a store sign-in can bounce the storefront
+    /// through its identity host), so a redirect inside the hidden page cannot
+    /// leave the store's own hosts or its sign-in hosts.
     var hiddenNavigationPolicy: ((_ store: String, _ url: String) -> Bool)?
 
     private var hidden: WKWebView?
@@ -678,6 +680,10 @@ final class ScriptHandler: NSObject, WKScriptMessageHandler {
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        // The handler is reachable from every frame, but only the top page
+        // speaks for the store: an ad or tracker iframe must not be able to
+        // post a message a `until` or `doneWhen` matcher would accept.
+        guard message.frameInfo.isMainFrame else { return }
         onMessage?(message.body)
     }
 }

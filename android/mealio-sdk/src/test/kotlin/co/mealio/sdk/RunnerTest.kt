@@ -265,4 +265,46 @@ class RunnerTest {
         assertEquals(listOf(0xfb, 0xff), std.map { it.toInt() and 0xff })
         assertEquals(std.toList(), url.toList())
     }
+
+    // Mirrors "security: request bodies and the runner fetch op" in core.test.ts.
+    private fun postFetch(id: String, body: String) = JSONObject().put("op", "fetch").put("id", id)
+        .put("request", JSONObject().put("method", "POST").put("url", "https://www.heb.com/graphql").put("body", body))
+        .put("timeoutMs", 1000).put("maxBytes", 1000)
+
+    @Test
+    fun refusesAFetchWhoseBodyNamesAnOrder(): Unit = runBlocking {
+        val host = FakeHost()
+        val runner = Runner(host, Allowlist(), keys)
+        // A literal backslash-u escape in the JSON text: "place\u004frder" is placeOrder.
+        val bad = runner.run(TestSigner.instructions(1, listOf(postFetch("f1", "{\"operationName\":\"place\\u004frder\"}"))), "job_test", 0)
+        val r = bad.results[0] as InstructionResult.FetchResult
+        assertFalse(r.ok)
+        assertEquals("blocked", r.error)
+        assertFalse(host.calls.contains("fetch"))
+        val good = runner.run(TestSigner.instructions(2, listOf(postFetch("f2", "{\"operationName\":\"cartItemsV2\"}"))), "job_test", 1)
+        assertTrue(good.results[0].ok)
+        assertTrue(host.calls.contains("fetch"))
+    }
+
+    @Test
+    fun refusesShowLoginWhenTheRunMayNotSignIn(): Unit = runBlocking {
+        val host = FakeHost()
+        val runner = Runner(host, Allowlist(), keys)
+        val no = runner.run(TestSigner.instructions(1, listOf(showLoginOp("l1", "https://www.heb.com/login"))), "job_test", 0, allowLogin = false)
+        val r = no.results[0] as InstructionResult.ShowLoginResult
+        assertFalse(r.ok)
+        assertEquals(LoginOutcome.CANCELLED, r.outcome)
+        assertEquals("not_allowed", r.error)
+        assertFalse(host.calls.contains("login"))
+        val yes = runner.run(TestSigner.instructions(2, listOf(showLoginOp("l2", "https://www.heb.com/login"))), "job_test", 1)
+        assertEquals(LoginOutcome.SIGNED_IN, (yes.results[0] as InstructionResult.ShowLoginResult).outcome)
+    }
+
+    @Test
+    fun parsesOnlyPlainHostNames() {
+        assertNull(parseUrl("https://www.heb.com:x@evil.com/"))
+        assertNull(parseUrl("https://evil.com\\.heb.com/"))
+        assertEquals(ParsedUrl("https", "www.heb.com", "/a?b=1"), parseUrl("https://www.heb.com:443/a?b=1#c"))
+        assertEquals(ParsedUrl("https", "www.heb.com", "/"), parseUrl("https://www.heb.com"))
+    }
 }

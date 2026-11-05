@@ -243,7 +243,7 @@ class MealioClient @JvmOverloads constructor(
             val start = post("/api/v1/sdk/warm", body)
             val job = start.opt("job") as? String
             if (job == null) { warmed = null; return }
-            val r = drive(start, null) as? JSONObject
+            val r = drive(start, null, allowLogin = false) as? JSONObject
             val s = r?.opt("store") as? String
             warmed = if (r?.opt("signedIn") == true && s != null) {
                 Warmed(job, s, System.currentTimeMillis(), runner.pageOpens, body.optInt("epoch"))
@@ -319,13 +319,17 @@ class MealioClient @JvmOverloads constructor(
         return body.put("sdk", sdk).put("epoch", epoch)
     }
 
-    private suspend fun drive(start: JSONObject, onStep: StepListener?): Any? {
+    /**
+     * `allowLogin` is false for a warm-up: it runs before the user has tapped
+     * anything, so it may check who is signed in but never show a sign-in sheet.
+     */
+    private suspend fun drive(start: JSONObject, onStep: StepListener?, allowLogin: Boolean = true): Any? {
         val job = start.opt("job") as? String
         var env = Envelope.fromJson(start.opt("envelope"))
         var seq = 0
         repeat(200) {
             val out = try {
-                runner.run(env, job, seq, onStep?.let { l -> { ins: Instruction -> l(stepOf(ins), ins) } })
+                runner.run(env, job, seq, allowLogin = allowLogin, onStep = onStep?.let { l -> { ins: Instruction -> l(stepOf(ins), ins) } })
             } catch (e: EnvelopeException) {
                 throw MealioException(if (e.why == "unsupported_op") "unsupported" else "bad_envelope", e.message ?: e.why, e)
             }

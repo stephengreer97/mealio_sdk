@@ -34,10 +34,18 @@ export const MEALIO_HOSTS = ['mealio.co'];
  * Only TOP-FRAME navigations in the login sheet are checked; captcha and
  * consent iframes inside a store page are not navigations of the sheet.
  */
-export const COMMON_AUTH_HOSTS = [
-  'b2clogin.com', 'ciamlogin.com', 'login.microsoftonline.com', 'okta.com', 'auth0.com',
-  'accounts.google.com', 'appleid.apple.com', 'facebook.com',
-];
+export const COMMON_AUTH_HOSTS = ['accounts.google.com', 'appleid.apple.com', 'facebook.com'];
+
+/**
+ * Multi-tenant identity providers, ONLY for the store that uses them. Anyone
+ * can register a tenant on okta.com or b2clogin.com, so allowing the whole
+ * provider for every store let any tenant's page into the sign-in sheet.
+ * Albertsons signs in through its own Okta tenant. Wegmans uses Azure AD B2C,
+ * whose tenant host the page reads at run time, so B2C stays provider-wide but
+ * for Wegmans alone.
+ */
+export const ALBERTSONS_AUTH_HOSTS = ['albertsons.com', 'albertsons.okta.com'];
+export const WEGMANS_AUTH_HOSTS = ['b2clogin.com', 'ciamlogin.com', 'login.microsoftonline.com'];
 
 // Store ids match mealio_app/src/constants/stores.ts and the server catalog.
 const ALBERTSONS_BANNERS: Record<string, string> = {
@@ -61,10 +69,10 @@ const KROGER_BANNERS = [
 function bundled(): Record<string, StoreHosts> {
   const out: Record<string, StoreHosts> = {
     heb: { hosts: ['heb.com'], authHosts: [] },
-    wegmans: { hosts: ['wegmans.com'], authHosts: [] },
+    wegmans: { hosts: ['wegmans.com'], authHosts: [...WEGMANS_AUTH_HOSTS] },
   };
   for (const [id, d] of Object.entries(ALBERTSONS_BANNERS)) {
-    out[id] = { hosts: [d], authHosts: ['albertsons.com'] };
+    out[id] = { hosts: [d], authHosts: [...ALBERTSONS_AUTH_HOSTS] };
   }
   for (const [id, d] of Object.entries(INSTACART_TENANTS)) {
     out[id] = { hosts: [d], authHosts: ['instacart.com'] };
@@ -126,11 +134,11 @@ export class Allowlist {
   check(store: string, url: string, use: UrlUse): UrlVerdict {
     const s = this.stores[store];
     if (!s) return { ok: false, reason: 'unknown_store' };
-    const m = /^([a-z][a-z0-9+.-]*):\/\/([^/?#:]+)(?::\d+)?([^#]*)/i.exec(url || '');
-    if (!m) return { ok: false, reason: 'bad_url' };
-    if (m[1].toLowerCase() !== 'https') return { ok: false, reason: 'not_https' };
-    const host = m[2];
-    const rest = m[3] || '/';
+    const p = parseUrl(url);
+    if (!p) return { ok: false, reason: 'bad_url' };
+    if (p.scheme !== 'https') return { ok: false, reason: 'not_https' };
+    const host = p.host;
+    const rest = p.rest;
     const own = s.hosts.some((a) => hostMatches(host, a));
     const auth = use === 'login' && [...s.authHosts, ...COMMON_AUTH_HOSTS, ...MEALIO_HOSTS].some((a) => hostMatches(host, a));
     if (!own && !auth) return { ok: false, reason: 'host' };
@@ -139,6 +147,64 @@ export class Allowlist {
   }
 }
 
+/**
+ * Split a URL into scheme, host and path + query, or null if it is not one we
+ * will reason about. STRICT on purpose: the authority must be a bare host name
+ * with an optional port. A browser reads `https://www.heb.com:x@evil.com/` as
+ * host evil.com, and `https://evil.com\\.heb.com/` as host evil.com too, while
+ * a looser pattern read both as heb.com. So userinfo (@), backslashes,
+ * whitespace and control characters anywhere are refused outright, as is any
+ * host that is not plain ASCII letters, digits, dots and hyphens.
+ */
+export function parseUrl(url: string | null | undefined): { scheme: string; host: string; rest: string } | null {
+  const raw = String(url ?? '');
+  if (/[\\\s\u0000-\u001f\u007f]/.test(raw)) return null;
+  const m = /^([a-z][a-z0-9+.-]*):\/\/([^/?#]*)([^#]*)/i.exec(raw);
+  if (!m) return null;
+  const a = /^([a-z0-9-]+(?:\.[a-z0-9-]+)*)(?::\d{1,5})?$/i.exec(m[2]);
+  if (!a) return null;
+  const rest = m[3] || '/';
+  return { scheme: m[1].toLowerCase(), host: a[1].toLowerCase(), rest: rest.startsWith('/') || rest.startsWith('?') ? rest : '/' + rest };
+}
+
+/** Percent-decoding, twice, of %XX only: a server decodes `%63heckout` to `checkout`. */
+export function decodePercent(s: string): string {
+  let out = s;
+  for (let i = 0; i < 2; i += 1) out = out.replace(/%([0-9a-f]{2})/gi, (_, h: string) => String.fromCharCode(parseInt(h, 16)));
+  return out;
+}
+
 export function isBlockedPath(pathAndQuery: string): boolean {
-  return BLOCKED_RE.test(pathAndQuery || '');
+  const s = pathAndQuery || '';
+  return BLOCKED_RE.test(s) || BLOCKED_RE.test(decodePercent(s));
+}
+
+/** GraphQL operation names no request may carry (case-insensitive regex source). */
+export const BLOCKED_GRAPHQL_OPERATION = 'checkout|placeorder|submitorder|payment';
+const OPS_RE = new RegExp(BLOCKED_GRAPHQL_OPERATION, 'i');
+
+/**
+ * Does a request body name a blocked operation? Reads `operationName` the way
+ * the server will (after JSON parsing, so `\\u004f` escapes do not hide it),
+ * for a single request or a batch, and the names of any mutations in `query`.
+ * The guard script applies the same rule to requests a page script makes; this
+ * applies it to the runner's own `fetch` op, which never passes through the page.
+ */
+export function bodyBlocked(body: string | null | undefined): boolean {
+  if (typeof body !== 'string' || !body) return false;
+  const names: string[] = [];
+  const raw = /"operationName"\s*:\s*"([^"]*)"/g;
+  for (let m = raw.exec(body); m; m = raw.exec(body)) names.push(m[1]);
+  try {
+    const j = JSON.parse(body);
+    for (const o of Array.isArray(j) ? j : [j]) {
+      if (!o || typeof o !== 'object') continue;
+      if (typeof o.operationName === 'string') names.push(o.operationName);
+      if (typeof o.query === 'string') {
+        const q = /\bmutation\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+        for (let m = q.exec(o.query); m; m = q.exec(o.query)) names.push(m[1]);
+      }
+    }
+  } catch { /* not JSON: the raw scan above stands */ }
+  return names.some((n) => OPS_RE.test(n));
 }

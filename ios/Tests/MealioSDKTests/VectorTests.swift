@@ -52,6 +52,30 @@ final class VectorTests: XCTestCase {
         }
     }
 
+    func testBlockedBodyCases() throws {
+        let v = try Fixtures.vectors()
+        let cases = try XCTUnwrap(v["blockedBodies"]?.arrayValue)
+        XCTAssertFalse(cases.isEmpty)
+        for c in cases {
+            let body = try XCTUnwrap(c["body"]?.stringValue)
+            let blocked = try XCTUnwrap(c["blocked"]?.boolValue)
+            XCTAssertEqual(Allowlist.bodyBlocked(body), blocked, body)
+        }
+        XCTAssertFalse(Allowlist.bodyBlocked(nil))
+    }
+
+    func testParseUrlTakesOnlyPlainHostNames() throws {
+        XCTAssertNil(Allowlist.parseUrl("https://www.heb.com:x@evil.com/"))
+        XCTAssertNil(Allowlist.parseUrl(#"https://evil.com\.heb.com/"#))
+        let a = try XCTUnwrap(Allowlist.parseUrl("https://www.heb.com:443/a?b=1#c"))
+        XCTAssertEqual(a.scheme, "https")
+        XCTAssertEqual(a.host, "www.heb.com")
+        XCTAssertEqual(a.rest, "/a?b=1")
+        let b = try XCTUnwrap(Allowlist.parseUrl("https://www.heb.com"))
+        XCTAssertEqual(b.host, "www.heb.com")
+        XCTAssertEqual(b.rest, "/")
+    }
+
     func testMatcherCases() throws {
         let v = try Fixtures.vectors()
         let cases = try XCTUnwrap(v["matchers"]?.arrayValue)

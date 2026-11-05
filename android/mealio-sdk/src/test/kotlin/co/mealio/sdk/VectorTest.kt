@@ -66,6 +66,16 @@ class VectorTest {
     }
 
     @Test
+    fun blockedBodyCases() {
+        val cases = Vectors.json.getJSONArray("blockedBodies").objects()
+        assertTrue(cases.isNotEmpty())
+        for (c in cases) {
+            val body = c.getString("body")
+            assertEquals(body, c.getBoolean("blocked"), bodyBlocked(body))
+        }
+    }
+
+    @Test
     fun matcherCases() {
         val cases = Vectors.json.getJSONArray("matchers").objects()
         assertTrue(cases.isNotEmpty())

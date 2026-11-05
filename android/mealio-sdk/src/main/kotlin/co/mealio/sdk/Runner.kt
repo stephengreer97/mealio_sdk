@@ -49,6 +49,19 @@ class Runner @JvmOverloads constructor(
         env: Envelope?,
         job: String?,
         lastSeq: Int,
+        onStep: ((Instruction) -> Unit)?,
+    ): StepOutcome = run(env, job, lastSeq, allowLogin = true, onStep = onStep)
+
+    /**
+     * As above. `allowLogin` false (a warm-up) refuses show_login with
+     * "not_allowed" without asking the host.
+     */
+    suspend fun run(
+        env: Envelope?,
+        job: String?,
+        lastSeq: Int,
+        /** False for a warm-up: show_login is refused without asking the host. */
+        allowLogin: Boolean = true,
         onStep: ((Instruction) -> Unit)? = null,
     ): StepOutcome {
         val payload = checkInstructions(openEnvelope(env, keys, clock()), job, lastSeq)
@@ -68,14 +81,14 @@ class Runner @JvmOverloads constructor(
                     // a progress callback never breaks a run
                 }
             }
-            val r = one(payload.store, ins)
+            val r = one(payload.store, ins, allowLogin)
             results.add(r)
             if (!r.ok) failed = true
         }
         return StepOutcome(payload, results, terminal)
     }
 
-    private suspend fun one(store: String, ins: Instruction): InstructionResult {
+    private suspend fun one(store: String, ins: Instruction, allowLogin: Boolean = true): InstructionResult {
         val t0 = clock()
         fun ms() = clock() - t0
         return when (ins) {
@@ -102,6 +115,11 @@ class Runner @JvmOverloads constructor(
                 }
             }
             is Instruction.ShowLogin -> {
+                // A warm-up runs before the user has tapped anything: it may check
+                // who is signed in, never put a sign-in sheet in front of them.
+                if (!allowLogin) {
+                    return InstructionResult.ShowLoginResult(ins.id, false, LoginOutcome.CANCELLED, emptyList(), "not_allowed", 0)
+                }
                 if (!allowlist.check(store, ins.url, UrlUse.LOGIN).ok) {
                     return InstructionResult.ShowLoginResult(ins.id, false, LoginOutcome.CANCELLED, emptyList(), "blocked", 0)
                 }
@@ -121,6 +139,11 @@ class Runner @JvmOverloads constructor(
             }
             is Instruction.Fetch -> {
                 if (!allowlist.check(store, ins.request.url, UrlUse.FETCH).ok) {
+                    return InstructionResult.FetchResult(ins.id, ok = false, error = "blocked", ms = 0)
+                }
+                // The guard stops a page script naming an order or a payment; this op
+                // never passes through a page, so the same rule is applied here.
+                if (bodyBlocked(ins.request.body)) {
                     return InstructionResult.FetchResult(ins.id, ok = false, error = "blocked", ms = 0)
                 }
                 if (overRate(store)) return InstructionResult.FetchResult(ins.id, ok = false, error = "rate", ms = 0)

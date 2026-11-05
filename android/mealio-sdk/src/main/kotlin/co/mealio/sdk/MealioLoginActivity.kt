@@ -85,6 +85,7 @@ internal class LoginWebController(
 ) {
     private val handler = Handler(Looper.getMainLooper())
     private var docStartScript = false
+    private var bootstrap = BOOTSTRAP_SCRIPT
     // doneWhenUrl is a JavaScript regex source. java.util.regex reads the
     // patterns the server uses (plain URL prefixes and escapes) the same way.
     private val doneUrl: Regex? = session.request.doneWhenUrl?.takeIf { it.isNotEmpty() }
@@ -103,7 +104,9 @@ internal class LoginWebController(
 
     init {
         val wv = WebView(context)
-        docStartScript = configureMealioWebView(wv, MealioNativeBridge { raw -> session.onMessage(raw) })
+        val setup = configureMealioWebView(wv, MealioNativeBridge { raw -> session.onMessage(raw) })
+        docStartScript = setup.docStartScript
+        bootstrap = setup.bootstrap
         wv.webViewClient = LoginClient()
         webView = wv
     }
@@ -138,7 +141,7 @@ internal class LoginWebController(
         val wv = webView ?: return
         val c = session.request.check ?: return
         if (session.result.isCompleted) return
-        wv.evaluateJavascript(BOOTSTRAP_SCRIPT, null)
+        wv.evaluateJavascript(bootstrap, null)
         wv.evaluateJavascript(session.request.guard, null)
         wv.evaluateJavascript(c.script, null)
     }
@@ -166,7 +169,7 @@ internal class LoginWebController(
         }
 
         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-            if (!docStartScript) view?.evaluateJavascript(BOOTSTRAP_SCRIPT, null)
+            if (!docStartScript) view?.evaluateJavascript(bootstrap, null)
             // Backstop for navigations shouldOverrideUrlLoading does not see
             // (POST form submissions).
             if (url != null && !admit(url)) view?.stopLoading()

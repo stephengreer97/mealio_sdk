@@ -155,6 +155,8 @@ public final class MealioClient {
     private var warmed: Warmed?
     private var warming: Task<Void, Never>?
     private var lastWarmAt: TimeInterval = 0
+    /// Cart jobs (prepare, search, add) driving the hidden page right now.
+    private var running = 0
 
     /// Max envelopes in one job before the SDK gives up on it.
     static let maxSteps = 200
@@ -222,6 +224,8 @@ public final class MealioClient {
         }
         struct One: Encodable { let store: String?; let recipe: Recipe; let zip: String?; let sdk: SDKInfo; let epoch: Int; let warm: String? }
         struct Many: Encodable { let store: String?; let recipes: [Recipe]; let zip: String?; let sdk: SDKInfo; let epoch: Int; let warm: String? }
+        enterJob()
+        defer { leaveJob() }
         await settleWarm()
         let a = about()
         let warm = takeWarm(store: store, epoch: a.epoch)
@@ -266,7 +270,11 @@ public final class MealioClient {
     private func beginWarm(store: String?) -> Task<Void, Never>? {
         warmLock.lock(); defer { warmLock.unlock() }
         let now = Date().timeIntervalSince1970
-        if warming != nil || now - lastWarmAt < MealioClient.warmFreshSeconds { return nil }
+        if warming != nil { return nil }
+        // A cart is already driving the one hidden page: a warm-up now would load
+        // over it mid-run. Nothing to gain either, the cart has the session.
+        if running > 0 { return nil }
+        if now - lastWarmAt < MealioClient.warmFreshSeconds { return nil }
         lastWarmAt = now
         let task = Task<Void, Never> { [weak self] in
             guard let self = self else { return }
@@ -294,7 +302,7 @@ public final class MealioClient {
         do {
             let start = try await post("/api/v1/sdk/warm", body: Body(store: store, sdk: a.sdk, epoch: a.epoch))
             if let job = start["job"]?.stringValue {
-                let r = try await drive(start, onStep: nil)
+                let r = try await drive(start, onStep: nil, warm: true)
                 if r["signedIn"]?.boolValue == true, let s = r["store"]?.stringValue {
                     result = Warmed(job: job, store: s, at: Date().timeIntervalSince1970, pageOpens: runner.pageOpens, epoch: a.epoch)
                 }
@@ -303,6 +311,19 @@ public final class MealioClient {
             // A warm-up that fails costs the user nothing: the cart runs as it always has.
         }
         finishWarm(result)
+    }
+
+    /// A cart call (prepare, search, add) counts as running from before it
+    /// settles any warm-up until it returns, so no warm-up starts during its
+    /// first POST or its drive. The warm-up's own drive does not count.
+    private func enterJob() {
+        warmLock.lock(); defer { warmLock.unlock() }
+        running += 1
+    }
+
+    private func leaveJob() {
+        warmLock.lock(); defer { warmLock.unlock() }
+        running -= 1
     }
 
     /// Every job drives the one hidden page: none may start while a warm-up is driving it.
@@ -325,6 +346,8 @@ public final class MealioClient {
     public func search(cartId: String, key: String, query: String,
                        onStep: StepListener? = nil) async throws -> SearchResult {
         struct Body: Encodable { let key: String; let query: String; let sdk: SDKInfo; let epoch: Int }
+        enterJob()
+        defer { leaveJob() }
         await settleWarm()
         let a = about()
         let start = try await post("/api/v1/sdk/carts/\(MealioClient.encodeComponent(cartId))/search",
@@ -341,6 +364,8 @@ public final class MealioClient {
     public func addToCart(cartId: String, selections: [Selection],
                           onStep: StepListener? = nil) async throws -> AddResult {
         struct Body: Encodable { let selections: [Selection]; let sdk: SDKInfo; let epoch: Int }
+        enterJob()
+        defer { leaveJob() }
         await settleWarm()
         let a = about()
         let start = try await post("/api/v1/sdk/carts/\(MealioClient.encodeComponent(cartId))/add",
@@ -366,7 +391,8 @@ public final class MealioClient {
     @available(*, deprecated, message: "No longer needed: the epoch rides on every call.")
     public func resetHello() {}
 
-    private func drive(_ start: JSONValue, onStep: StepListener?) async throws -> JSONValue {
+    /// Drive a job to its end. A warm-up job may never show sign-in.
+    private func drive(_ start: JSONValue, onStep: StepListener?, warm: Bool = false) async throws -> JSONValue {
         guard let job = start["job"]?.stringValue else {
             throw MealioError(code: MealioError.Code.server, message: "Mealio did not start a job")
         }
@@ -376,9 +402,9 @@ public final class MealioClient {
             let out: StepOutcome
             do {
                 if let onStep = onStep {
-                    out = try await runner.run(env, job: job, lastSeq: seq) { ins in onStep(stepOf(ins), ins) }
+                    out = try await runner.run(env, job: job, lastSeq: seq, allowLogin: !warm) { ins in onStep(stepOf(ins), ins) }
                 } else {
-                    out = try await runner.run(env, job: job, lastSeq: seq)
+                    out = try await runner.run(env, job: job, lastSeq: seq, allowLogin: !warm)
                 }
             } catch let e as EnvelopeError {
                 let code = e.reason == .unsupportedOp ? MealioError.Code.unsupported : MealioError.Code.badEnvelope

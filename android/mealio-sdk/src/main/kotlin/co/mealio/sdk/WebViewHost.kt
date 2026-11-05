@@ -36,6 +36,9 @@ import java.nio.charset.Charset
 /** The name the page sees for the JavascriptInterface. */
 internal const val NATIVE_BRIDGE_NAME = "__mealioNativeBridge"
 
+/** The name the page sees for the WebMessageListener object, where supported. */
+internal const val WEB_MESSAGE_NAME = "__mealioWebMessage"
+
 /**
  * Defines window.__mealioNativePost on top of the JavascriptInterface, then
  * BRIDGE_SHIM defines window.ReactNativeWebView.postMessage on top of that.
@@ -45,12 +48,26 @@ internal val BOOTSTRAP_SCRIPT: String =
     "window.__mealioNativePost = function(s){ $NATIVE_BRIDGE_NAME.post(String(s)); };\n" + BRIDGE_SHIM
 
 /**
+ * The same, on top of the WebMessageListener object instead. The page-side API
+ * (window.__mealioNativePost, window.ReactNativeWebView.postMessage) is unchanged.
+ */
+internal val LISTENER_BOOTSTRAP_SCRIPT: String =
+    "window.__mealioNativePost = function(s){ $WEB_MESSAGE_NAME.postMessage(String(s)); };\n" + BRIDGE_SHIM
+
+/**
+ * How a WebView was set up. `docStartScript` false means the caller must inject
+ * `bootstrap` from onPageStarted. `bootstrap` is the script to (re)inject.
+ */
+internal class MealioWebViewSetup(val docStartScript: Boolean, val bootstrap: String)
+
+/**
  * The object behind `window.__mealioNativeBridge`. `post` is called on a
  * WebView background thread (the JavaBridge thread), never the main thread.
  *
- * Note: addJavascriptInterface exposes the object to every frame of the page,
- * iframes included. A message can only change what the SDK reports back to the
- * server (which decides what it means); it can never make the SDK act.
+ * Only used where WebMessageListener is missing: addJavascriptInterface exposes
+ * the object to every frame of the page, iframes included, and cannot tell them
+ * apart. A message can only change what the SDK reports back to the server
+ * (which decides what it means); it can never make the SDK act.
  */
 class MealioNativeBridge internal constructor(private val onPost: (String) -> Unit) {
     @JavascriptInterface
@@ -60,12 +77,13 @@ class MealioNativeBridge internal constructor(private val onPost: (String) -> Un
 }
 
 /**
- * Shared setup for the hidden and the login WebView. Returns true when the
- * bootstrap is installed as a document-start script, false when the caller
- * must inject it from onPageStarted instead.
+ * Shared setup for the hidden and the login WebView. Messages come in through a
+ * WebMessageListener where the WebView has one, which says whether the sender
+ * is the main frame; sub-frame messages (ads, captcha and consent iframes) are
+ * dropped. Older WebViews fall back to the JavascriptInterface.
  */
 @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface", "RequiresFeature")
-internal fun configureMealioWebView(wv: WebView, bridge: MealioNativeBridge): Boolean {
+internal fun configureMealioWebView(wv: WebView, bridge: MealioNativeBridge): MealioWebViewSetup {
     val s = wv.settings
     s.javaScriptEnabled = true
     s.domStorageEnabled = true
@@ -81,16 +99,27 @@ internal fun configureMealioWebView(wv: WebView, bridge: MealioNativeBridge): Bo
     cm.setAcceptCookie(true)
     cm.setAcceptThirdPartyCookies(wv, true)
 
-    wv.addJavascriptInterface(bridge, NATIVE_BRIDGE_NAME)
-    return if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+    val bootstrap = if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
+        // Called on the main thread. The object is injected into every frame
+        // whose origin matches "*", so the main-frame flag is what filters.
+        WebViewCompat.addWebMessageListener(wv, WEB_MESSAGE_NAME, setOf("*")) { _, message, _, isMainFrame, _ ->
+            if (isMainFrame) bridge.post(message.data)
+        }
+        LISTENER_BOOTSTRAP_SCRIPT
+    } else {
+        wv.addJavascriptInterface(bridge, NATIVE_BRIDGE_NAME)
+        BOOTSTRAP_SCRIPT
+    }
+    val docStart = if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
         // VERIFY: "*" is accepted as an allowed-origin rule meaning every origin
         // (androidx.webkit docs say so); the returned ScriptHandler is not kept
         // because the script lives as long as the WebView.
-        WebViewCompat.addDocumentStartJavaScript(wv, BOOTSTRAP_SCRIPT, setOf("*"))
+        WebViewCompat.addDocumentStartJavaScript(wv, bootstrap, setOf("*"))
         true
     } else {
         false
     }
+    return MealioWebViewSetup(docStart, bootstrap)
 }
 
 private suspend fun <T> onMain(block: () -> T): T = withContext(Dispatchers.Main) { block() }
@@ -98,9 +127,19 @@ private suspend fun <T> onMain(block: () -> T): T = withContext(Dispatchers.Main
 class WebViewHost(context: Context) : Host {
     private val appContext: Context = context.applicationContext
 
+    /**
+     * The allowlist every hidden-page navigation and fetch redirect is checked
+     * against. MealioCart.configure points it at the client's, so a signed
+     * widening applies here too.
+     */
+    @Volatile internal var allowlist: Allowlist = Allowlist()
+
     // ── main-thread state ──
     private var webView: WebView? = null
     private var docStartScript = false
+    private var bootstrap = BOOTSTRAP_SCRIPT
+    /** The store whose page the hidden view was last told to open. */
+    private var currentStore: String? = null
     private var pendingLoad: CompletableDeferred<PageLoad>? = null
     private var loadStarted = false
 
@@ -123,16 +162,44 @@ class WebViewHost(context: Context) : Host {
     private fun ensureWebView(): WebView {
         webView?.let { return it }
         val wv = WebView(appContext)
-        docStartScript = configureMealioWebView(wv, MealioNativeBridge { raw -> sink?.trySend(raw) })
+        val setup = configureMealioWebView(wv, MealioNativeBridge { raw -> sink?.trySend(raw) })
+        docStartScript = setup.docStartScript
+        bootstrap = setup.bootstrap
         wv.webViewClient = HiddenClient()
         userAgent = wv.settings.userAgentString
         webView = wv
         return wv
     }
 
+    /**
+     * May the hidden view's main frame be at `url`? It must pass the allowlist
+     * for the current store as a page OR as a login URL: a store sign-in can
+     * bounce the hidden storefront through the store's identity host (the
+     * Albertsons banners through albertsons.com and its Okta tenant).
+     */
+    private fun hiddenMayGo(url: String): Boolean {
+        if (url == "about:blank") return true
+        val store = currentStore
+        if (store == null) {
+            // Nothing opened yet: the old rule, https and no blocked path.
+            val p = parseUrl(url) ?: return false
+            return p.scheme == "https" && !isBlockedPath(p.rest)
+        }
+        val a = allowlist
+        return a.check(store, url, UrlUse.PAGE).ok || a.check(store, url, UrlUse.LOGIN).ok
+    }
+
     private inner class HiddenClient : WebViewClient() {
         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-            if (!docStartScript) view?.evaluateJavascript(BOOTSTRAP_SCRIPT, null)
+            // Backstop for navigations shouldOverrideUrlLoading does not see
+            // (form POSTs): leave at once and report the load as blocked.
+            if (url != null && !hiddenMayGo(url)) {
+                view?.stopLoading()
+                view?.loadUrl("about:blank")
+                pendingLoad?.complete(PageLoad(ok = false, finalUrl = url, error = "blocked"))
+                return
+            }
+            if (!docStartScript) view?.evaluateJavascript(bootstrap, null)
             if (url != null && url != "about:blank") loadStarted = true
         }
 
@@ -149,14 +216,14 @@ class WebViewHost(context: Context) : Host {
         }
 
         // Defense in depth for redirects and page-driven navigations of the
-        // hidden view: never leave https, never land on a blocked path. The
-        // runner already checked the URL that page_open asked for.
+        // hidden view: stay on the store's allowlisted hosts, never leave https,
+        // never land on a blocked path. The runner already checked the URL that
+        // page_open asked for.
         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
             if (request == null || !request.isForMainFrame) return false
-            val u = request.url ?: return true
-            val pathAndQuery = (u.encodedPath ?: "/") + (u.encodedQuery?.let { "?$it" } ?: "")
-            if (!"https".equals(u.scheme, ignoreCase = true) || isBlockedPath(pathAndQuery)) {
-                pendingLoad?.complete(PageLoad(ok = false, finalUrl = u.toString(), error = "blocked"))
+            val u = request.url?.toString() ?: return true
+            if (!hiddenMayGo(u)) {
+                pendingLoad?.complete(PageLoad(ok = false, finalUrl = u, error = "blocked"))
                 return true
             }
             return false
@@ -179,6 +246,7 @@ class WebViewHost(context: Context) : Host {
             val wv = ensureWebView()
             pendingLoad?.complete(PageLoad(ok = false, error = "load_failed")) // superseded
             pendingLoad = load
+            currentStore = store
             loadStarted = false
             wv.stopLoading()
             wv.loadUrl(url)
@@ -212,7 +280,7 @@ class WebViewHost(context: Context) : Host {
                 // evaluateJavascript calls run in order. The bootstrap is repeated
                 // because the fallback path (no document-start script) may have
                 // raced the page; it does nothing when already installed.
-                wv.evaluateJavascript(BOOTSTRAP_SCRIPT, null)
+                wv.evaluateJavascript(bootstrap, null)
                 wv.evaluateJavascript(guard, null)
                 wv.evaluateJavascript(script, null)
             }
@@ -266,7 +334,9 @@ class WebViewHost(context: Context) : Host {
             ensureWebView()
             userAgent
         }
-        return withContext(Dispatchers.IO) { StoreFetch(request, timeoutMs, maxBytes, ua).run() }
+        val a = allowlist
+        val hopAllowed = { u: String -> a.check(store, u, UrlUse.FETCH).ok }
+        return withContext(Dispatchers.IO) { StoreFetch(request, timeoutMs, maxBytes, ua, hopAllowed).run() }
     }
 
     /** Leave the store page (after a sign-out). */
@@ -289,15 +359,18 @@ class WebViewHost(context: Context) : Host {
 
 /**
  * One `fetch` instruction over HttpURLConnection, with the store's cookies from
- * CookieManager and Set-Cookie written back. Redirects are followed by hand so
- * every hop stays on https, on the same registrable domain, and off blocked
- * paths. A redirect that would leave is returned to the server as-is.
+ * CookieManager and Set-Cookie written back (never returned to the server).
+ * Redirects are followed by hand so every hop passes the allowlist `fetch`
+ * check for the store. A redirect that would leave is returned to the server
+ * as-is.
  */
 private class StoreFetch(
     private val request: FetchRequest,
     private val timeoutMs: Long,
     private val maxBytes: Int,
     private val userAgent: String?,
+    /** The allowlist `fetch` check for the store, applied to every redirect hop. */
+    private val hopAllowed: (String) -> Boolean,
 ) {
     private val cookies = CookieManager.getInstance()
 
@@ -305,7 +378,6 @@ private class StoreFetch(
         var url = request.url
         var method = request.method.uppercase()
         var body = request.body
-        val home = registrableDomain(hostOf(url) ?: return FetchResponse(ok = false, error = "no_response"))
         val timeout = timeoutMs.coerceIn(1L, Int.MAX_VALUE.toLong()).toInt()
 
         try {
@@ -335,7 +407,7 @@ private class StoreFetch(
                         val next = conn.getHeaderField("Location")?.let { loc ->
                             try { URL(URL(url), loc).toString() } catch (e: Exception) { null }
                         }
-                        if (next != null && redirectAllowed(next, home)) {
+                        if (next != null && hopAllowed(next)) {
                             if (status == 303 || ((status == 301 || status == 302) && method == "POST")) {
                                 method = "GET"
                                 body = null
@@ -427,17 +499,6 @@ private class StoreFetch(
         val text = String(out.toByteArray(), charsetOf(conn.contentType))
         return FetchResponse(ok = true, status = status, headers = headers, body = text, truncated = truncated)
     }
-
-    private fun redirectAllowed(next: String, home: String): Boolean {
-        val u = try { URL(next) } catch (e: Exception) { return false }
-        if (!u.protocol.equals("https", ignoreCase = true)) return false
-        val host = u.host ?: return false
-        if (registrableDomain(host) != home) return false
-        val pathAndQuery = (u.path.ifEmpty { "/" }) + (u.query?.let { "?$it" } ?: "")
-        return !isBlockedPath(pathAndQuery)
-    }
-
-    private fun hostOf(url: String): String? = try { URL(url).host } catch (e: Exception) { null }
 
     private fun charsetOf(contentType: String?): Charset {
         val name = contentType?.split(';')?.map { it.trim() }

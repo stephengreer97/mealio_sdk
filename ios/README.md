@@ -301,9 +301,13 @@ their password into the store's page; neither your app nor Mealio sees it.
 
 - The login sheet and the SDK's hidden working `WKWebView` share the default
   persistent `WKWebsiteDataStore`, so the user stays signed in across launches.
-- Top-frame navigations in the sheet are limited to the store's hosts, its
-  identity providers and `mealio.co`. Checkout, payment, billing, gift card,
-  password and address pages are blocked everywhere, always.
+- Top-frame navigations in the sheet are limited to the store's hosts, that
+  store's own identity providers (multi-tenant providers such as Okta or Azure
+  AD B2C only for the store that uses them), Google, Apple and Facebook sign-in,
+  and `mealio.co`. Checkout, payment, billing, gift card, password and address
+  pages are blocked everywhere, always, including when percent-encoded.
+- Only the top page of either WebView can post messages to the SDK; messages
+  from iframes are ignored.
 - Closing the sign-in raises `login_cancelled` (via the server).
 
 To sign a user out of stores (for example from your app's settings):
