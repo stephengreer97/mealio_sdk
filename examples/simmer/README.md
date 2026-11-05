@@ -33,7 +33,7 @@ Simmer app ── pk_test (publishable) ──► Mealio SDK ──► mealio.co
   partner, made 2026-11-05. See developers.mealio.co/dashboard. The sandbox
   "Simmer demo" app still exists for experiments.
 - Simmer integrates exactly as a customer does: `@mealio/react-native-cart` and
-  `@react-native-cookies/cookies` come from npm at a pinned version, with no
+  `@preeternal/react-native-cookie-manager` come from npm at a pinned version, with no
   link to this repository's source. To try an unreleased SDK change, publish it
   (or `npm pack` it and install the tarball) first.
 
