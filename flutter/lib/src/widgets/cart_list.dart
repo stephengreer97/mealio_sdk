@@ -110,6 +110,23 @@ class _MealioCartListState extends State<MealioCartList> {
                     ],
                   ),
                 ),
+                // Said while any item has no saved product, which on a recipe's
+                // first cart is every item: the run where nothing on screen shows it yet.
+                if (s.items.any((CartItem i) => i.status == ItemStatus.choose))
+                  Container(
+                    key: const ValueKey<String>('mealio-remember-note'),
+                    margin: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: t.surface,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: t.border),
+                    ),
+                    child: Text(
+                      'Pick a product for each item and Mealio will remember your preferences.',
+                      style: t.style(size: 13, weight: FontWeight.w500, height: 18 / 13, color: t.text),
+                    ),
+                  ),
                 Expanded(
                   child: ListView(
                     keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.manual,
@@ -126,14 +143,6 @@ class _MealioCartListState extends State<MealioCartList> {
                           disabled: widget.busy,
                           onToggleOpen: () => setState(() => _open = _open == it.key ? null : it.key),
                         ),
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(4, 4, 4, 0),
-                        child: Text(
-                          'Unchecked items are left out this time only. Your usual picks stay saved for next time. '
-                          'Prices from $storeName.',
-                          style: t.style(size: 12, height: 17 / 12, color: t.muted),
-                        ),
-                      ),
                     ], 10),
                   ),
                 ),

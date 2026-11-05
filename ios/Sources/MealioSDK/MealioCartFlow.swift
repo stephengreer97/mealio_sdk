@@ -551,6 +551,21 @@ public struct MealioCartList: View {
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 10)
+            // Said while any item has no saved product, which on a recipe's first
+            // cart is every item: the run where nothing on screen shows it yet.
+            if cart.items.contains(where: { $0.status == .choose }) {
+                Text("Pick a product for each item and Mealio will remember your preferences.")
+                    .font(t.font(13, .medium))
+                    .foregroundColor(t.text)
+                    .lineSpacing(3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(t.surface))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(t.border, lineWidth: 1))
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 10)
+                    .accessibilityIdentifier("mealio-remember-note")
+            }
             ScrollView {
                 VStack(spacing: 10) {
                     ForEach(cart.items) { item in
@@ -562,13 +577,6 @@ public struct MealioCartList: View {
                                           }
                                       })
                     }
-                    Text("Unchecked items are left out this time only. Your usual picks stay saved for next time. Prices from \(storeName).")
-                        .font(t.font(12))
-                        .foregroundColor(t.muted)
-                        .lineSpacing(3)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 4)
-                        .padding(.top, 4)
                 }
                 .padding(.horizontal, 16)
                 .padding(.bottom, 24)

@@ -242,6 +242,9 @@ void main() {
       expect(find.text(r'$1.25'), findsWidgets);
       expect(s.selections()[1].productId, isNull);
 
+      // The remember note sits above the list, so the options can start below the fold.
+      await tester.ensureVisible(find.bySemanticsLabel('Peeled'));
+      await tester.pump();
       await tester.tap(find.bySemanticsLabel('Peeled'));
       await tester.pump();
       expect(find.textContaining('Choose one'), findsNothing);
@@ -266,9 +269,10 @@ void main() {
       expect(find.textContaining('You check out'), findsNothing);
       await tester.scrollUntilVisible(find.text('Not found at H-E-B'), 200, scrollable: find.byType(Scrollable).first);
       expect(find.text('Not found at H-E-B'), findsOneWidget);
-      await tester.scrollUntilVisible(find.textContaining('Your usual picks stay saved for next time'), 200,
-          scrollable: find.byType(Scrollable).first);
-      expect(find.textContaining('Your usual picks stay saved for next time'), findsOneWidget);
+      // Two items have no saved product, so the list says picks are remembered,
+      // above the list rather than in a footnote under it.
+      expect(find.text('Pick a product for each item and Mealio will remember your preferences.'), findsOneWidget);
+      expect(find.textContaining('Your usual picks stay saved for next time'), findsNothing);
       await tester.drag(find.byType(Scrollable).first, const Offset(0, 2000));
       await tester.pumpAndSettle();
       // The first item needing a choice starts expanded.

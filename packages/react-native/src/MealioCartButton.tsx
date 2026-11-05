@@ -2,7 +2,7 @@
 // or recipes={[...]} to fill one cart from several meals.
 // It draws a themed button and runs the whole flow in one sheet.
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Pressable, StyleSheet, Text, type StyleProp, type ViewStyle } from 'react-native';
 import type { AddResult, MealioError, Recipe } from '@mealio/sdk-core';
 import { useMealio } from './MealioProvider';
@@ -26,8 +26,16 @@ export interface MealioCartButtonProps {
 }
 
 export function MealioCartButton(props: MealioCartButtonProps) {
-  const { theme: t } = useMealio();
+  const mealio = useMealio();
+  const t = mealio.theme;
   const [open, setOpen] = useState(false);
+  // WARM THE LOGIN CHECK while the user reads the recipe. Only for a known user
+  // with a store on file: the server answers "nothing to warm" otherwise. The
+  // client runs it at most once every few minutes however many buttons mount.
+  useEffect(() => {
+    if (!props.disabled) void mealio.warm({ store: props.store ?? null });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.store, props.disabled]);
   return (
     <>
       <Pressable

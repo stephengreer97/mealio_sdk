@@ -424,3 +424,99 @@ describe('several recipes', () => {
     expect(old.recipesFor('onion')).toEqual([]);
   });
 });
+
+describe('warm-up', () => {
+  // Signs with the same deterministic TEST key as protocol/make-vectors.mjs.
+  const crypto = require('node:crypto') as typeof import('node:crypto');
+  const pkcs8 = Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), Buffer.alloc(32, 7)]);
+  const priv = crypto.createPrivateKey({ key: pkcs8, format: 'der', type: 'pkcs8' });
+  const env = (job: string, seq: number, instructions: unknown[]): Envelope => {
+    const payload = JSON.stringify({ v: 1, kind: 'instructions', job, seq, exp: 4102444800, store: 'heb', instructions });
+    return { payload, sig: crypto.sign(null, Buffer.from(payload, 'utf8'), priv).toString('base64'), kid: vectors.kid } as Envelope;
+  };
+  const cartDone = (job: string) => env(job, 1, [{ op: 'done', id: 'd', result: { cartId: 'c', store: 'heb', items: [], ready: [], needsChoice: [], unavailable: [] } }]);
+  const warmDone = (signedIn: boolean | null) => env('job_warm', 1, [{ op: 'done', id: 'd', result: { store: 'heb', signedIn } }]);
+
+  function setup(warmAnswer: () => unknown) {
+    const sent: Array<{ path: string; body: any }> = [];
+    const fetchImpl = (async (url: string, init: any) => {
+      const path = url.replace('https://mealio.test', '');
+      const body = JSON.parse(init.body);
+      sent.push({ path, body });
+      const ok = (o: unknown) => ({ ok: true, status: 200, json: async () => o });
+      if (path === '/api/v1/sdk/warm') return ok(warmAnswer());
+      if (path === '/api/v1/sdk/carts') return ok({ job: 'job_cart', envelope: cartDone('job_cart') });
+      throw new Error('unexpected ' + path);
+    }) as any;
+    const host = fakeHost();
+    const client = new MealioClient({
+      publishableKey: 'pk', getSessionToken: async () => 'tok', platform: 'web-test', sdkVersion: '0',
+      baseUrl: 'https://mealio.test', fetchImpl, keys: KEYS,
+    }, host);
+    const cartBody = () => sent.find((s) => s.path === '/api/v1/sdk/carts')?.body;
+    return { client, sent, cartBody, host };
+  }
+  const recipe = { id: 'r1', ingredients: [{ name: 'milk' }] };
+
+  it('hands a signed-in warm-up to the next prepare, once', async () => {
+    const { client, cartBody, sent } = setup(() => ({ job: 'job_warm', envelope: warmDone(true) }));
+    await client.warm();
+    await client.prepareCart({ recipe });
+    expect(cartBody().warm).toBe('job_warm');
+    sent.length = 0;
+    await client.prepareCart({ recipe });
+    expect(cartBody().warm).toBeUndefined();
+  });
+
+  it('sends no hint when the warm-up found the user signed out, or nothing to warm', async () => {
+    for (const answer of [() => ({ job: 'job_warm', envelope: warmDone(false) }), () => ({ warm: null })]) {
+      const { client, cartBody } = setup(answer);
+      await client.warm();
+      await client.prepareCart({ recipe });
+      expect(cartBody().warm).toBeUndefined();
+    }
+  });
+
+  it('sends no hint for another store, or once the hidden page has loaded something else', async () => {
+    const a = setup(() => ({ job: 'job_warm', envelope: warmDone(true) }));
+    await a.client.warm();
+    await a.client.prepareCart({ store: 'walmart', recipe });
+    expect(a.cartBody().warm).toBeUndefined();
+
+    const b = setup(() => ({ job: 'job_warm', envelope: warmDone(true) }));
+    await b.client.warm();
+    (b.client as any).runner.pageOpens += 1;
+    await b.client.prepareCart({ recipe });
+    expect(b.cartBody().warm).toBeUndefined();
+  });
+
+  it('a prepare waits for a warm-up in flight rather than sharing the page with it', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const order: string[] = [];
+    const { client } = setup(() => ({ job: 'job_warm', envelope: warmDone(true) }));
+    const f = (client as any).f;
+    (client as any).f = async (url: string, init: any) => {
+      if (url.endsWith('/warm')) { await gate; order.push('warm'); }
+      if (url.endsWith('/carts')) order.push('cart');
+      return f(url, init);
+    };
+    const w = client.warm();
+    const p = client.prepareCart({ recipe });
+    await new Promise((r) => setTimeout(r, 10));
+    release();
+    await Promise.all([w, p]);
+    expect(order).toEqual(['warm', 'cart']);
+  });
+
+  it('runs at most once every few minutes, and never throws', async () => {
+    let calls = 0;
+    const { client } = setup(() => { calls += 1; throw new Error('boom'); });
+    await client.warm();
+    await client.warm();
+    expect(calls).toBe(1);
+    client.clearWarm();
+    await expect(client.warm()).resolves.toBeUndefined();
+    expect(calls).toBe(2);
+  });
+});

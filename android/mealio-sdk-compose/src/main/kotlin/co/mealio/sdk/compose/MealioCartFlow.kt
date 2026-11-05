@@ -531,6 +531,25 @@ fun MealioCartList(
             }
             Text("${est.count} of $selectable selected", style = t.ts(14, color = t.muted))
         }
+        // Said while any item has no saved product, which on a recipe's first
+        // cart is every item: the run where nothing on screen shows it yet.
+        if (cart.items.any { it.status == ItemStatus.CHOOSE }) {
+            val shape = RoundedCornerShape(10.dp)
+            Box(
+                Modifier
+                    .padding(start = 12.dp, end = 12.dp, bottom = 10.dp)
+                    .fillMaxWidth()
+                    .clip(shape)
+                    .background(t.surface)
+                    .border(1.dp, t.border, shape)
+                    .padding(12.dp),
+            ) {
+                Text(
+                    "Pick a product for each item and Mealio will remember your preferences.",
+                    style = t.ts(13, FontWeight.Medium, t.text, lineHeight = 18),
+                )
+            }
+        }
         Column(
             Modifier
                 .weight(1f)
@@ -550,11 +569,6 @@ fun MealioCartList(
                     )
                 }
             }
-            Text(
-                "Unchecked items are left out this time only. Your usual picks stay saved for next time. Prices from $storeName.",
-                style = t.ts(12, color = t.muted, lineHeight = 17),
-                modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 4.dp),
-            )
         }
         TopRule(t)
         Column(
