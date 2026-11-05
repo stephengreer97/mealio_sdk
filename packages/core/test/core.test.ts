@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import vm from 'node:vm';
 import vectors from '../../../protocol/test-vectors.json';
 import {
-  Allowlist, GUARD_SCRIPT, Runner, matches, openEnvelope, checkInstructions, EnvelopeError, MealioClient, CartSession, addedPrice,
+  Allowlist, GUARD_SCRIPT, Runner, matches, bodyBlocked, parseUrl, openEnvelope, checkInstructions, EnvelopeError, MealioClient, CartSession, addedPrice,
   type AddResult, type Host, type Envelope, type Matcher,
 } from '../src';
 
@@ -518,5 +518,58 @@ describe('warm-up', () => {
     client.clearWarm();
     await expect(client.warm()).resolves.toBeUndefined();
     expect(calls).toBe(2);
+  });
+});
+
+describe('security: request bodies and the runner fetch op', () => {
+  it('flags every blocked body in the shared vectors', () => {
+    for (const v of (vectors as any).blockedBodies) expect(bodyBlocked(v.body)).toBe(v.blocked);
+  });
+
+  it('refuses a signed fetch whose body names an order, before it leaves the device', async () => {
+    const host = fakeHost();
+    const runner = new Runner(host, new Allowlist(), KEYS);
+    const r = await (runner as any).one('heb', { op: 'fetch', id: 'f1', request: { method: 'POST', url: 'https://www.heb.com/graphql', body: '{"operationName":"place\\u004frder"}' }, timeoutMs: 1000, maxBytes: 1000 });
+    expect(r).toMatchObject({ ok: false, error: 'blocked' });
+    expect(host.calls).not.toContain('fetch');
+    const ok = await (runner as any).one('heb', { op: 'fetch', id: 'f2', request: { method: 'POST', url: 'https://www.heb.com/graphql', body: '{"operationName":"cartItemsV2"}' }, timeoutMs: 1000, maxBytes: 1000 });
+    expect(ok.ok).toBe(true);
+  });
+
+  it('refuses show_login when the run may not sign in (a warm-up)', async () => {
+    const host = fakeHost();
+    const runner = new Runner(host, new Allowlist(), KEYS);
+    const ins = { op: 'show_login', id: 'l1', url: 'https://www.heb.com/login', title: 'Sign in', doneWhen: [], timeoutMs: 1000 };
+    expect(await (runner as any).one('heb', ins, false)).toMatchObject({ ok: false, outcome: 'cancelled', error: 'not_allowed' });
+    expect(host.calls).not.toContain('login');
+    expect((await (runner as any).one('heb', ins, true)).outcome).toBe('signed_in');
+  });
+
+  it('parses only plain host names: no userinfo, backslash or spaces', () => {
+    expect(parseUrl('https://www.heb.com:x@evil.com/')).toBeNull();
+    expect(parseUrl('https://evil.com\\.heb.com/')).toBeNull();
+    expect(parseUrl('https://www.heb.com:443/a?b=1#c')).toEqual({ scheme: 'https', host: 'www.heb.com', rest: '/a?b=1' });
+    expect(parseUrl('https://www.heb.com')).toEqual({ scheme: 'https', host: 'www.heb.com', rest: '/' });
+  });
+});
+
+describe('warm-up never shares the page with a cart', () => {
+  it('does not start while a cart call is waiting on its first request', async () => {
+    const paths: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const fetchImpl = (async (url: string) => {
+      const path = url.replace('https://mealio.test', '');
+      paths.push(path);
+      if (path === '/api/v1/sdk/carts') { await gate; return { ok: false, status: 503, json: async () => ({ error: { code: 'store_unavailable', message: 'down' } }) }; }
+      return { ok: true, status: 200, json: async () => ({ warm: null }) };
+    }) as any;
+    const client = new MealioClient({ publishableKey: 'pk', getSessionToken: async () => 't', platform: 'web-test', sdkVersion: '0', baseUrl: 'https://mealio.test', fetchImpl, keys: KEYS }, fakeHost());
+    const p = client.prepareCart({ recipe: { id: 'r', ingredients: [] } }).catch(() => null);
+    await new Promise((r) => setTimeout(r, 5));
+    await client.warm();
+    release();
+    await p;
+    expect(paths).toEqual(['/api/v1/sdk/carts']);
   });
 });

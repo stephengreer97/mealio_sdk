@@ -12,6 +12,7 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
@@ -19,6 +20,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:webview_flutter_wkwebview/webview_flutter_wkwebview.dart';
 
+import 'allowlist.dart';
 import 'guard.dart';
 import 'host.dart';
 import 'matcher.dart';
@@ -32,8 +34,38 @@ const String bridgeChannelName = '__mealioNativeBridge';
 /// `window.ReactNativeWebView.postMessage` (BRIDGE_SHIM). Both halves are
 /// idempotent, so it is safe to inject on every page start and before every
 /// script.
-const String bridgeInjection =
-    'window.__mealioNativePost = function(s){ __mealioNativeBridge.postMessage(s) };$bridgeShim';
+///
+/// The channel is reachable from every frame, and its messages carry no frame
+/// info. So `__mealioNativePost`, which only our top-frame injection defines,
+/// wraps each message as `{"n": nonce, "m": message}` with a random nonce the
+/// Dart side holds, and [bridgeUnwrap] drops anything without it. A sub-frame
+/// calling the channel directly cannot forge a result.
+String bridgeInjection(String nonce) =>
+    'window.__mealioNativePost = function(s){ __mealioNativeBridge.postMessage(JSON.stringify({ n: '
+    '${jsonEncode(nonce)}, m: String(s) })) };$bridgeShim';
+
+/// The original message posted through [bridgeInjection] with `nonce`, or
+/// null when `raw` was not posted that way.
+String? bridgeUnwrap(String raw, String nonce) {
+  Object? j;
+  try {
+    j = jsonDecode(raw);
+  } on FormatException {
+    return null;
+  }
+  if (j is! Map<String, Object?>) return null;
+  final m = j['m'];
+  if (j['n'] != nonce || m is! String) return null;
+  return m;
+}
+
+final Random _random = Random.secure();
+
+/// A fresh bridge nonce: 128 random bits, hex.
+String _newNonce() =>
+    List<String>.generate(16, (_) => _random.nextInt(256).toRadixString(16).padLeft(2, '0')).join();
+
+bool _isBlank(String url) => url.startsWith('about:blank');
 
 /// Message type the in-page fetch posts back. Never collected by `runScript`.
 const String fetchResultType = 'MEALIO_FETCH_RESULT';
@@ -43,6 +75,7 @@ const int _maxLoginMessages = 200;
 
 /// A WebViewController set up the way every Mealio WebView needs it.
 WebViewController _newController({
+  required String nonce,
   required void Function(String message) onMessage,
   required NavigationDelegate delegate,
 }) {
@@ -53,7 +86,10 @@ WebViewController _newController({
   unawaited(c.setJavaScriptMode(JavaScriptMode.unrestricted));
   unawaited(c.addJavaScriptChannel(
     bridgeChannelName,
-    onMessageReceived: (JavaScriptMessage m) => onMessage(m.message),
+    onMessageReceived: (JavaScriptMessage m) {
+      final s = bridgeUnwrap(m.message, nonce);
+      if (s != null) onMessage(s);
+    },
   ));
   unawaited(c.setNavigationDelegate(delegate));
   _applyPlatformSettings(c);
@@ -79,12 +115,21 @@ void _applyPlatformSettings(WebViewController c) {
   }
 }
 
-Future<void> _injectBridge(WebViewController c) async {
+Future<void> _injectBridge(WebViewController c, String nonce) async {
   try {
-    await c.runJavaScript(bridgeInjection);
+    await c.runJavaScript(bridgeInjection(nonce));
   } catch (_) {
     // No document yet (about:blank on some platforms); the next page start
     // or the next script injects again.
+  }
+}
+
+/// Replaces whatever the WebView shows with a blank page.
+Future<void> _loadBlank(WebViewController c) async {
+  try {
+    await c.loadRequest(Uri.parse('about:blank'));
+  } catch (_) {
+    // No WebView platform (tests); nothing showing.
   }
 }
 
@@ -135,15 +180,32 @@ class MealioLoginView {
 class WebViewHost implements MealioHost {
   WebViewHost() {
     hidden = _newController(
+      nonce: _hiddenNonce,
       onMessage: _hiddenMessages.add,
       delegate: NavigationDelegate(
+        // The runner checks every page_open, but a page can navigate itself
+        // (a script, a redirect, a form). Main-frame navigations stay on the
+        // current store's own pages or its sign-in hosts (a store sign-in can
+        // bounce the storefront through its identity host). Sub-frames are not
+        // navigations of the page.
+        onNavigationRequest: (NavigationRequest r) {
+          if (!r.isMainFrame || _isBlank(r.url)) return NavigationDecision.navigate;
+          final store = _pageStore;
+          if (store != null &&
+              (_allowlist.check(store, r.url, UrlUse.page).ok || _allowlist.check(store, r.url, UrlUse.login).ok)) {
+            return NavigationDecision.navigate;
+          }
+          final l = _load;
+          if (l != null && !l.isCompleted) l.complete(const _LoadEnd(error: 'blocked'));
+          return NavigationDecision.prevent;
+        },
         // webview_flutter has no universal document-start script API, so the
         // bridge goes in at page start and again before every script. On iOS
         // onPageStarted can still see the previous document; the second
         // injection is the one that counts.
-        onPageStarted: (String url) => unawaited(_injectBridge(hidden)),
+        onPageStarted: (String url) => unawaited(_injectBridge(hidden, _hiddenNonce)),
         onPageFinished: (String url) {
-          unawaited(_injectBridge(hidden));
+          unawaited(_injectBridge(hidden, _hiddenNonce));
           final l = _load;
           if (l != null && !l.isCompleted) l.complete(_LoadEnd(url: url));
         },
@@ -172,6 +234,18 @@ class WebViewHost implements MealioHost {
 
   /// The hidden WebView's controller. `MealioScope` draws it.
   late final WebViewController hidden;
+
+  /// The allowlist the hidden page's own navigations and fetch redirects are
+  /// checked against. `MealioCart.configure` sets it to the client's (so a
+  /// signed widening applies here too); the bundled list stands otherwise.
+  static Allowlist? sharedAllowlist;
+  static final Allowlist _bundledAllowlist = Allowlist();
+  Allowlist get _allowlist => sharedAllowlist ?? _bundledAllowlist;
+
+  final String _hiddenNonce = _newNonce();
+
+  /// The store whose page the hidden WebView was last asked to open.
+  String? _pageStore;
 
   /// Where the login sheet is pushed. Set by `MealioScope`.
   NavigatorState? Function()? navigatorProvider;
@@ -218,6 +292,7 @@ class WebViewHost implements MealioHost {
     return _serial(() async {
       final done = Completer<_LoadEnd>();
       _load = done;
+      _pageStore = store;
       try {
         await hidden.loadRequest(Uri.parse(url));
       } catch (_) {
@@ -263,7 +338,7 @@ class WebViewHost implements MealioHost {
         if (!matched.isCompleted && messageMatchesAny(m, until)) matched.complete();
       });
       try {
-        await _injectBridge(hidden);
+        await _injectBridge(hidden, _hiddenNonce);
         await _runQuietly(hidden, guard);
         await _runQuietly(hidden, script);
         final left = timeoutMs - DateTime.now().difference(started).inMilliseconds;
@@ -306,10 +381,21 @@ class WebViewHost implements MealioHost {
       final sub = _hiddenMessages.stream.listen((String raw) {
         final m = parseMessage(raw);
         if (m == null || m['type'] != fetchResultType || m['id'] != id || result.isCompleted) return;
+        // A redirect off the store's allowed hosts: the body is not the
+        // store's, and must not reach the server as if it were.
+        final finalUrl = m['url'];
+        if (m['ok'] == true &&
+            finalUrl is String &&
+            finalUrl.isNotEmpty &&
+            finalUrl != request.url &&
+            !_allowlist.check(store, finalUrl, UrlUse.fetch).ok) {
+          result.complete(const HttpResult(ok: false, error: 'redirect_blocked'));
+          return;
+        }
         result.complete(_httpResultFrom(m));
       });
       try {
-        await _injectBridge(hidden);
+        await _injectBridge(hidden, _hiddenNonce);
         try {
           await hidden.runJavaScript(_fetchScript(id, request, timeoutMs, maxBytes));
         } catch (_) {
@@ -384,7 +470,7 @@ class WebViewHost implements MealioHost {
       try { res.headers.forEach(function (v, k) { headers[k] = v; }); } catch (e) {}
       return res.text().then(function (text) {
         var c = cut(text);
-        post({ type: '$fetchResultType', id: a.id, ok: true, status: res.status, headers: headers, body: c.body, truncated: c.truncated });
+        post({ type: '$fetchResultType', id: a.id, ok: true, status: res.status, url: String(res.url || ''), headers: headers, body: c.body, truncated: c.truncated });
       });
     }).catch(function (e) {
       post({ type: '$fetchResultType', id: a.id, ok: false, error: (e && e.name === 'AbortError') ? 'timeout' : 'no_response' });
@@ -437,14 +523,16 @@ class WebViewHost implements MealioHost {
     Timer? returnTimer;
 
     late final WebViewController c;
+    final nonce = _newNonce();
     Future<void> inject() async {
-      await _injectBridge(c);
+      await _injectBridge(c, nonce);
       await _runQuietly(c, req.guard);
       final check = req.check;
       if (check != null && check.script.isNotEmpty) await _runQuietly(c, check.script);
     }
 
     c = _newController(
+      nonce: nonce,
       onMessage: (String raw) {
         final m = parseMessage(raw);
         if (m == null) return;
@@ -454,7 +542,7 @@ class WebViewHost implements MealioHost {
       },
       delegate: NavigationDelegate(
         onNavigationRequest: (NavigationRequest r) {
-          if (!r.isMainFrame) return NavigationDecision.navigate;
+          if (!r.isMainFrame || _isBlank(r.url)) return NavigationDecision.navigate;
           final allowed = req.allowNavigation(r.url);
           if (urlDone(r.url)) {
             if (!allowed) {
@@ -466,7 +554,17 @@ class WebViewHost implements MealioHost {
           }
           return allowed ? NavigationDecision.navigate : NavigationDecision.prevent;
         },
-        onPageStarted: (String url) => unawaited(_injectBridge(c)),
+        // The backstop: some navigations (a form POST on iOS, for one) never
+        // reach onNavigationRequest. A top-frame page we would have refused
+        // is replaced with a blank one and ends the sign-in.
+        onPageStarted: (String url) {
+          if (_isBlank(url) || req.allowNavigation(url)) {
+            unawaited(_injectBridge(c, nonce));
+            return;
+          }
+          unawaited(_loadBlank(c));
+          finish(urlDone(url) ? LoginOutcome.signedIn : LoginOutcome.cancelled);
+        },
         onPageFinished: (String url) {
           if (urlDone(url)) {
             finish(LoginOutcome.signedIn);
@@ -586,6 +684,9 @@ class WebViewHost implements MealioHost {
     } catch (_) {
       // Best effort.
     }
+    // The signed-out store page must not stay up in the hidden WebView.
+    _pageStore = null;
+    await _loadBlank(hidden);
   }
 }
 

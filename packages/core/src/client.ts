@@ -66,6 +66,8 @@ export class MealioClient {
   private base: string;
   private f: typeof fetch;
   private warmed: Warmed | null = null;
+  /** Cart jobs (prepare, search, add) driving the hidden page right now. */
+  private running = 0;
   private warming: Promise<void> | null = null;
   private lastWarmAt = 0;
 
@@ -100,12 +102,14 @@ export class MealioClient {
     const body = recipes.length === 1
       ? { store: input.store, zip: input.zip, recipe: recipes[0] }
       : { store: input.store, zip: input.zip, recipes };
-    await this.settleWarm();
-    const about = await this.about();
-    const warm = this.takeWarm(input.store ?? null, about.epoch);
-    const start = await this.post<JobStart>('/api/v1/sdk/carts', { ...body, ...about, ...(warm ? { warm } : {}) });
-    const result = await this.drive(start, opts.onStep) as unknown as PreparedCart;
-    return new CartSession(this, result);
+    return this.cartJob(async () => {
+      await this.settleWarm();
+      const about = await this.about();
+      const warm = this.takeWarm(input.store ?? null, about.epoch);
+      const start = await this.post<JobStart>('/api/v1/sdk/carts', { ...body, ...about, ...(warm ? { warm } : {}) });
+      const result = await this.drive(start, opts.onStep) as unknown as PreparedCart;
+      return new CartSession(this, result);
+    });
   }
 
   /**
@@ -117,6 +121,9 @@ export class MealioClient {
    */
   warm(opts: { store?: string | null } = {}): Promise<void> {
     if (this.warming) return this.warming;
+    // A cart is already driving the one hidden page: a warm-up now would load
+    // over it mid-run. Nothing to gain either, the cart has the session.
+    if (this.running > 0) return Promise.resolve();
     if (Date.now() - this.lastWarmAt < WARM_FRESH_MS) return Promise.resolve();
     this.lastWarmAt = Date.now();
     this.warming = (async () => {
@@ -124,7 +131,7 @@ export class MealioClient {
         const about = await this.about();
         const start = await this.post<JobStart | { warm: null }>('/api/v1/sdk/warm', { store: opts.store ?? undefined, ...about });
         if (!('job' in start)) return;
-        const r = await this.drive(start) as { store?: string; signedIn?: boolean | null };
+        const r = await this.drive(start, undefined, { warm: true }) as { store?: string; signedIn?: boolean | null };
         this.warmed = r && r.signedIn === true && typeof r.store === 'string'
           ? { job: start.job, store: r.store, at: Date.now(), pageOpens: this.runner.pageOpens, epoch: about.epoch }
           : null;
@@ -162,22 +169,31 @@ export class MealioClient {
 
   /** Search the store again for one item ("minced garlic jar"). */
   async search(cartId: string, key: string, query: string, opts: { onStep?: StepListener } = {}): Promise<SearchResult> {
-    await this.settleWarm();
-    const start = await this.post<JobStart>(`/api/v1/sdk/carts/${encodeURIComponent(cartId)}/search`, { key, query, ...(await this.about()) });
-    return await this.drive(start, opts.onStep) as unknown as SearchResult;
+    return this.cartJob(async () => {
+      await this.settleWarm();
+      const start = await this.post<JobStart>(`/api/v1/sdk/carts/${encodeURIComponent(cartId)}/search`, { key, query, ...(await this.about()) });
+      return await this.drive(start, opts.onStep) as unknown as SearchResult;
+    });
   }
 
   /** Fill the store cart with the user's choices. */
   async addToCart(cartId: string, selections: Selection[], opts: { onStep?: StepListener } = {}): Promise<AddResult> {
-    await this.settleWarm();
-    const start = await this.post<JobStart>(`/api/v1/sdk/carts/${encodeURIComponent(cartId)}/add`, { selections, ...(await this.about()) });
-    return await this.drive(start, opts.onStep) as unknown as AddResult;
+    return this.cartJob(async () => {
+      await this.settleWarm();
+      const start = await this.post<JobStart>(`/api/v1/sdk/carts/${encodeURIComponent(cartId)}/add`, { selections, ...(await this.about()) });
+      return await this.drive(start, opts.onStep) as unknown as AddResult;
+    });
   }
 
   /** Who is calling, carried on every job-starting call (this used to be a separate hello round trip). */
   private async about(): Promise<{ sdk: Record<string, unknown>; epoch: number }> {
     const epoch = this.cfg.getEpoch ? await this.cfg.getEpoch() : 0;
     return { sdk: { platform: this.cfg.platform, version: this.cfg.sdkVersion, core: SDK_CORE_VERSION, ops: SUPPORTED_OPS }, epoch };
+  }
+
+  /** The allowlist in force. Hosts use it to check where their pages go. */
+  get allowlist(): Allowlist {
+    return this.runner.allowlist;
   }
 
   /** Apply a signed allowlist widening, if the server ever sends one. */
@@ -188,13 +204,31 @@ export class MealioClient {
     } catch { /* an allowlist we cannot verify is ignored, the bundled one stands */ }
   }
 
-  private async drive(start: JobStart, onStep?: StepListener): Promise<unknown> {
+  /**
+   * A cart call, from before it waits on a warm-up until its job is done. The
+   * whole call counts as running, not just its drive: a warm-up started while
+   * the first request was in flight would otherwise load over the page.
+   */
+  private async cartJob<T>(fn: () => Promise<T>): Promise<T> {
+    this.running += 1;
+    try {
+      return await fn();
+    } finally {
+      this.running -= 1;
+    }
+  }
+
+  private async drive(start: JobStart, onStep?: StepListener, opts: { warm?: boolean } = {}): Promise<unknown> {
+    return this.driveLoop(start, onStep, !opts.warm);
+  }
+
+  private async driveLoop(start: JobStart, onStep: StepListener | undefined, allowLogin: boolean): Promise<unknown> {
     let env = start.envelope;
     let seq = 0;
     for (let guard = 0; guard < 200; guard += 1) {
       let out;
       try {
-        out = await this.runner.run(env, start.job, seq, onStep ? (ins) => onStep(stepOf(ins), ins) : undefined);
+        out = await this.runner.run(env, start.job, seq, onStep ? (ins) => onStep(stepOf(ins), ins) : undefined, { allowLogin });
       } catch (e) {
         if (e instanceof EnvelopeError) throw new MealioError(e.why === 'unsupported_op' ? 'unsupported' : 'bad_envelope', e.message);
         throw e;

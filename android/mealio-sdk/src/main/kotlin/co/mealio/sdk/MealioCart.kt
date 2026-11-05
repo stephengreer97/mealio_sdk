@@ -54,7 +54,11 @@ object MealioCart {
             epochProvider = { sessions.epoch() },
         )
         val old = state
-        state = State(MealioClient(config, host), host, sessions)
+        val client = MealioClient(config, host)
+        // The hidden page and fetch redirects are checked against the same
+        // allowlist the runner uses, widenings included.
+        host.allowlist = client.allowlist
+        state = State(client, host, sessions)
         old?.host?.destroy()
     }
 

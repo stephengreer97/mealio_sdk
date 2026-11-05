@@ -29,7 +29,7 @@ export 'src/protocol.dart';
 export 'src/runner.dart';
 export 'src/theme.dart';
 export 'src/verify.dart';
-export 'src/webview_host.dart' show MealioLoginView, WebViewHost, bridgeChannelName, bridgeInjection, fetchResultType;
+export 'src/webview_host.dart' show MealioLoginView, WebViewHost, bridgeChannelName, bridgeInjection, bridgeUnwrap, fetchResultType;
 export 'src/widgets/cart_flow.dart';
 export 'src/widgets/cart_list.dart';
 export 'src/widgets/cart_sheet.dart';

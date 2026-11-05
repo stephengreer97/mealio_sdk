@@ -172,6 +172,58 @@ void main() {
       });
     });
 
+    test('refuses a fetch whose body names an order, before it leaves the device', () async {
+      Map<String, Object?> post(String id, String body) => <String, Object?>{
+            'op': 'fetch',
+            'id': id,
+            'request': <String, Object?>{'method': 'POST', 'url': 'https://www.heb.com/graphql', 'body': body},
+            'timeoutMs': 1000,
+            'maxBytes': 1000,
+          };
+      // The JSON text carries a literal backslash-u escape: the server reads
+      // "placeOrder" once it parses the body.
+      final host = FakeHost();
+      final out = await Runner(host, keys: testKeys)
+          .run(await signInstructions(<Map<String, Object?>>[post('f1', r'{"operationName":"placeOrder"}')]), 'job_test', 0);
+      expect(out.results.single.ok, isFalse);
+      expect(out.results.single.error, 'blocked');
+      expect(host.calls, isNot(contains('fetch')));
+
+      final host2 = FakeHost();
+      final ok = await Runner(host2, keys: testKeys)
+          .run(await signInstructions(<Map<String, Object?>>[post('f2', '{"operationName":"cartItemsV2"}')]), 'job_test', 0);
+      expect(ok.results.single.ok, isTrue);
+      expect(host2.calls, contains('fetch'));
+    });
+
+    test('refuses show_login when the run may not sign in (a warm-up)', () async {
+      final env = await signInstructions(<Map<String, Object?>>[
+        <String, Object?>{
+          'op': 'show_login',
+          'id': 'l1',
+          'url': 'https://www.heb.com/login',
+          'title': 'Sign in',
+          'doneWhen': <Object?>[],
+          'timeoutMs': 1000,
+        },
+      ]);
+      final host = FakeHost();
+      final out = await Runner(host, keys: testKeys).run(env, 'job_test', 0, allowLogin: false);
+      expect(out.results.single.toJson(), <String, Object?>{
+        'id': 'l1',
+        'ok': false,
+        'outcome': 'cancelled',
+        'messages': <Object?>[],
+        'error': 'not_allowed',
+        'ms': 0,
+      });
+      expect(host.calls, isNot(contains('login')));
+
+      final out2 = await Runner(host, keys: testKeys).run(env, 'job_test', 0);
+      expect(out2.results.single.toJson()['outcome'], 'signed_in');
+      expect(host.calls, contains('login'));
+    });
+
     test('caps fetch at 120 a minute per store', () async {
       final runner = Runner(FakeHost(), keys: testKeys);
       final first = await signInstructions(

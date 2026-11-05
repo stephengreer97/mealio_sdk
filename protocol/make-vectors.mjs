@@ -51,6 +51,36 @@ const vectors = {
     { store: 'kroger', url: 'https://api.kroger.com/v1/connect/oauth2/authorize', use: 'login', ok: true },
     { store: 'kroger', url: 'https://api.kroger.com/v1/cart', use: 'fetch', ok: false },
     { store: 'nostore', url: 'https://www.heb.com/', use: 'page', ok: false },
+    // A URL is read the way a browser reads it, or refused. Each of these went
+    // to evil.com while a looser pattern read the host as heb.com.
+    { store: 'heb', url: 'https://www.heb.com:x@evil.com/', use: 'page', ok: false },
+    { store: 'heb', url: 'https://www.heb.com:443@evil.com/a', use: 'login', ok: false },
+    { store: 'heb', url: 'https://evil.com\\.heb.com/', use: 'page', ok: false },
+    { store: 'heb', url: 'https://www.heb.com@evil.com/', use: 'fetch', ok: false },
+    { store: 'heb', url: 'https://www.heb.com/ robots.txt', use: 'page', ok: false },
+    { store: 'heb', url: 'https://www.heb.com:443/robots.txt', use: 'page', ok: true },
+    { store: 'heb', url: 'https://WWW.HEB.COM/robots.txt', use: 'page', ok: true },
+    // A blocked path is blocked percent-encoded too.
+    { store: 'heb', url: 'https://www.heb.com/%63heckout', use: 'page', ok: false },
+    { store: 'heb', url: 'https://www.heb.com/search?q=%2525', use: 'page', ok: true },
+    // Multi-tenant identity providers: only the store's own tenant, or only the store that uses one.
+    { store: 'safeway', url: 'https://albertsons.okta.com/oauth2/v1/authorize', use: 'login', ok: true },
+    { store: 'safeway', url: 'https://evil.okta.com/login', use: 'login', ok: false },
+    { store: 'heb', url: 'https://albertsons.okta.com/oauth2/v1/authorize', use: 'login', ok: false },
+    { store: 'safeway', url: 'https://evil.us.auth0.com/login', use: 'login', ok: false },
+    { store: 'wegmans', url: 'https://wegmansb2c.b2clogin.com/x/oauth2', use: 'login', ok: true },
+    { store: 'heb', url: 'https://evil.b2clogin.com/x', use: 'login', ok: false },
+  ],
+  // Request bodies the runner's fetch op and the guard refuse.
+  blockedBodies: [
+    { body: '{"operationName":"cartItemsV2","variables":{}}', blocked: false },
+    { body: '{"operationName":"PlaceOrder","variables":{}}', blocked: true },
+    { body: '{"operationName":"place\\u004frder"}', blocked: true },
+    { body: '[{"operationName":"cartItemsV2"},{"operationName":"submitOrder"}]', blocked: true },
+    { body: '{"query":"mutation PlaceOrder { placeOrder { id } }"}', blocked: true },
+    { body: '{"query":"query Search { products { id } }"}', blocked: false },
+    { body: 'q=checkout+guide', blocked: false },
+    { body: '', blocked: false },
   ],
   matchers: [
     { msg: { type: 'ALB_SESSION', loggedIn: true, early: true }, m: { type: 'ALB_SESSION', ne: { early: true } }, ok: false },

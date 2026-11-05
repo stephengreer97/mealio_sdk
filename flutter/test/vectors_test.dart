@@ -44,6 +44,22 @@ void main() {
       }
     });
 
+    test('blocked body cases', () {
+      for (final Map<String, Object?> c in vectorList('blockedBodies')) {
+        final body = c['body']! as String;
+        expect(bodyBlocked(body), c['blocked'], reason: body);
+      }
+    });
+
+    test('parses only plain host names: no userinfo, backslash or spaces', () {
+      expect(parseUrl('https://www.heb.com:x@evil.com/'), isNull);
+      expect(parseUrl(r'https://evil.com\.heb.com/'), isNull);
+      expect(parseUrl('https://www.heb.com /'), isNull);
+      final p = parseUrl('https://www.heb.com:443/a?b=1#c')!;
+      expect(<String>[p.scheme, p.host, p.rest], <String>['https', 'www.heb.com', '/a?b=1']);
+      expect(parseUrl('https://www.heb.com')!.rest, '/');
+    });
+
     test('matcher cases', () {
       for (final Map<String, Object?> c in vectorList('matchers')) {
         final msg = parseMessage(c['msg'])!;
@@ -83,8 +99,18 @@ void main() {
     });
 
     test('the bridge injection defines the native post and then the shim', () {
-      expect(bridgeInjection, startsWith('window.__mealioNativePost = function(s){ __mealioNativeBridge.postMessage(s) };'));
-      expect(bridgeInjection, endsWith(bridgeShim));
+      final js = bridgeInjection('abc123');
+      expect(js, startsWith('window.__mealioNativePost = function(s){ __mealioNativeBridge.postMessage('));
+      expect(js, contains('"abc123"'));
+      expect(js, endsWith(bridgeShim));
+    });
+
+    test('bridge messages without the nonce are dropped', () {
+      const msg = '{"type":"X","loggedIn":true}';
+      expect(bridgeUnwrap(jsonEncode(<String, Object?>{'n': 'abc123', 'm': msg}), 'abc123'), msg);
+      expect(bridgeUnwrap(jsonEncode(<String, Object?>{'n': 'nope', 'm': msg}), 'abc123'), isNull);
+      expect(bridgeUnwrap(msg, 'abc123'), isNull);
+      expect(bridgeUnwrap('not json', 'abc123'), isNull);
     });
   });
 }

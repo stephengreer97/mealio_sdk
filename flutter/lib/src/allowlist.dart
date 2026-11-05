@@ -2,6 +2,8 @@
 // off. PROTOCOL.md "Allowlist" is the spec; packages/core/src/allowlist.ts is
 // the reference this mirrors.
 
+import 'dart:convert';
+
 import 'protocol.dart';
 
 /// Never relaxed remotely. Case-insensitive, tested against path + query.
@@ -41,16 +43,16 @@ const List<String> mealioHosts = <String>['mealio.co'];
 /// Identity providers a store's login page may hand off to, for every store.
 /// Only TOP-FRAME navigations in the login sheet are checked; captcha and
 /// consent iframes inside a store page are not navigations of the sheet.
-const List<String> commonAuthHosts = <String>[
-  'b2clogin.com',
-  'ciamlogin.com',
-  'login.microsoftonline.com',
-  'okta.com',
-  'auth0.com',
-  'accounts.google.com',
-  'appleid.apple.com',
-  'facebook.com',
-];
+const List<String> commonAuthHosts = <String>['accounts.google.com', 'appleid.apple.com', 'facebook.com'];
+
+/// Multi-tenant identity providers, ONLY for the store that uses them. Anyone
+/// can register a tenant on okta.com or b2clogin.com, so allowing the whole
+/// provider for every store let any tenant's page into the sign-in sheet.
+/// Albertsons signs in through its own Okta tenant. Wegmans uses Azure AD B2C,
+/// whose tenant host the page reads at run time, so B2C stays provider-wide but
+/// for Wegmans alone.
+const List<String> albertsonsAuthHosts = <String>['albertsons.com', 'albertsons.okta.com'];
+const List<String> wegmansAuthHosts = <String>['b2clogin.com', 'ciamlogin.com', 'login.microsoftonline.com'];
 
 // Store ids match mealio_app/src/constants/stores.ts and the server catalog.
 const Map<String, String> _albertsonsBanners = <String, String>{
@@ -104,10 +106,10 @@ const List<String> _krogerBanners = <String>[
 Map<String, StoreHosts> _bundled() {
   final out = <String, StoreHosts>{
     'heb': StoreHosts(hosts: <String>['heb.com'], authHosts: <String>[]),
-    'wegmans': StoreHosts(hosts: <String>['wegmans.com'], authHosts: <String>[]),
+    'wegmans': StoreHosts(hosts: <String>['wegmans.com'], authHosts: wegmansAuthHosts),
   };
   for (final MapEntry<String, String> e in _albertsonsBanners.entries) {
-    out[e.key] = StoreHosts(hosts: <String>[e.value], authHosts: <String>['albertsons.com']);
+    out[e.key] = StoreHosts(hosts: <String>[e.value], authHosts: albertsonsAuthHosts);
   }
   for (final MapEntry<String, String> e in _instacartTenants.entries) {
     out[e.key] = StoreHosts(hosts: <String>[e.value], authHosts: <String>['instacart.com']);
@@ -156,8 +158,6 @@ class UrlVerdict {
   final String? reason;
 }
 
-final RegExp _urlRe = RegExp(r'^([a-z][a-z0-9+.-]*)://([^/?#:]+)(?::\d+)?([^#]*)', caseSensitive: false);
-
 class Allowlist {
   Allowlist([Map<String, StoreHosts>? base]) {
     for (final MapEntry<String, StoreHosts> e in (base ?? bundledStores).entries) {
@@ -191,11 +191,11 @@ class Allowlist {
   UrlVerdict check(String store, String url, UrlUse use) {
     final s = _stores[store];
     if (s == null) return const UrlVerdict.refused('unknown_store');
-    final m = _urlRe.firstMatch(url);
-    if (m == null) return const UrlVerdict.refused('bad_url');
-    if (m.group(1)!.toLowerCase() != 'https') return const UrlVerdict.refused('not_https');
-    final host = m.group(2)!;
-    final rest = (m.group(3) == null || m.group(3)!.isEmpty) ? '/' : m.group(3)!;
+    final p = parseUrl(url);
+    if (p == null) return const UrlVerdict.refused('bad_url');
+    if (p.scheme != 'https') return const UrlVerdict.refused('not_https');
+    final host = p.host;
+    final rest = p.rest;
     final own = s.hosts.any((String a) => _hostMatches(host, a));
     final auth = use == UrlUse.login &&
         <String>[...s.authHosts, ...commonAuthHosts, ...mealioHosts].any((String a) => _hostMatches(host, a));
@@ -205,4 +205,92 @@ class Allowlist {
   }
 }
 
-bool isBlockedPath(String pathAndQuery) => _blockedRe.hasMatch(pathAndQuery);
+/// A URL split into scheme, host and path + query (no fragment).
+class ParsedUrl {
+  const ParsedUrl({required this.scheme, required this.host, required this.rest});
+
+  /// Lower-cased.
+  final String scheme;
+
+  /// Lower-cased, without the port.
+  final String host;
+
+  /// Path and query, `/` when empty.
+  final String rest;
+}
+
+final RegExp _badUrlCharRe = RegExp(r'[\\\s\u0000-\u001f\u007f]');
+final RegExp _urlRe = RegExp(r'^([a-z][a-z0-9+.-]*)://([^/?#]*)([^#]*)', caseSensitive: false);
+final RegExp _authorityRe = RegExp(r'^([a-z0-9-]+(?:\.[a-z0-9-]+)*)(?::\d{1,5})?$', caseSensitive: false);
+
+/// Split a URL into scheme, host and path + query, or null if it is not one we
+/// will reason about. STRICT on purpose: the authority must be a bare host name
+/// with an optional port. A browser reads `https://www.heb.com:x@evil.com/` as
+/// host evil.com, and `https://evil.com\.heb.com/` as host evil.com too, while
+/// a looser pattern read both as heb.com. So userinfo (@), backslashes,
+/// whitespace and control characters anywhere are refused outright, as is any
+/// host that is not plain ASCII letters, digits, dots and hyphens.
+ParsedUrl? parseUrl(String? url) {
+  final raw = url ?? '';
+  if (_badUrlCharRe.hasMatch(raw)) return null;
+  final m = _urlRe.firstMatch(raw);
+  if (m == null) return null;
+  final a = _authorityRe.firstMatch(m.group(2) ?? '');
+  if (a == null) return null;
+  var rest = m.group(3) ?? '';
+  if (rest.isEmpty) rest = '/';
+  if (!rest.startsWith('/') && !rest.startsWith('?')) rest = '/$rest';
+  return ParsedUrl(scheme: m.group(1)!.toLowerCase(), host: a.group(1)!.toLowerCase(), rest: rest);
+}
+
+final RegExp _percentRe = RegExp('%([0-9a-f]{2})', caseSensitive: false);
+
+/// Percent-decoding, twice, of %XX only: a server decodes `%63heckout` to `checkout`.
+String decodePercent(String s) {
+  var out = s;
+  for (var i = 0; i < 2; i += 1) {
+    out = out.replaceAllMapped(_percentRe, (Match m) => String.fromCharCode(int.parse(m.group(1)!, radix: 16)));
+  }
+  return out;
+}
+
+bool isBlockedPath(String pathAndQuery) =>
+    _blockedRe.hasMatch(pathAndQuery) || _blockedRe.hasMatch(decodePercent(pathAndQuery));
+
+/// GraphQL operation names no request may carry (case-insensitive regex source).
+const String blockedGraphqlOperation = 'checkout|placeorder|submitorder|payment';
+
+final RegExp _opsRe = RegExp(blockedGraphqlOperation, caseSensitive: false);
+final RegExp _rawOperationRe = RegExp(r'"operationName"\s*:\s*"([^"]*)"');
+final RegExp _mutationRe = RegExp(r'\bmutation\s+([A-Za-z_][A-Za-z0-9_]*)');
+
+/// Does a request body name a blocked operation? Reads `operationName` the way
+/// the server will (after JSON parsing, so `O` escapes do not hide it),
+/// for a single request or a batch, and the names of any mutations in `query`.
+/// The guard script applies the same rule to requests a page script makes; this
+/// applies it to the runner's own `fetch` op, which never passes through the page.
+bool bodyBlocked(String? body) {
+  if (body == null || body.isEmpty) return false;
+  final names = <String>[
+    for (final Match m in _rawOperationRe.allMatches(body)) m.group(1)!,
+  ];
+  Object? j;
+  try {
+    j = jsonDecode(body);
+  } on FormatException {
+    j = null; // not JSON: the raw scan above stands
+  }
+  final List<Object?> list = j is List<Object?> ? j : <Object?>[j];
+  for (final Object? o in list) {
+    if (o is! Map<String, Object?>) continue;
+    final op = o['operationName'];
+    if (op is String) names.add(op);
+    final q = o['query'];
+    if (q is String) {
+      for (final Match m in _mutationRe.allMatches(q)) {
+        names.add(m.group(1)!);
+      }
+    }
+  }
+  return names.any(_opsRe.hasMatch);
+}

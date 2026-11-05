@@ -44,7 +44,11 @@ public enum MealioCart {
                                         attestationProvider: attestationProvider)
         let client = MealioClient(config: config, host: host)
         host.hiddenNavigationPolicy = { [weak client] store, url in
-            client?.allowlist.check(store, url, .page).ok ?? false
+            // The storefront, or the store's own sign-in hosts: a session check
+            // can bounce the hidden page through the identity host (Albertsons'
+            // Okta tenant) and back.
+            guard let allowlist = client?.allowlist else { return false }
+            return allowlist.check(store, url, .page).ok || allowlist.check(store, url, .login).ok
         }
         MealioCart.host = host
         MealioCart.client = client

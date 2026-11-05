@@ -76,6 +76,26 @@ final class WarmTests: XCTestCase {
     }
 
     @MainActor
+    func testAWarmUpNeverShowsSignIn() async throws {
+        let env = TestSigner.envelope(TestSigner.payload(seq: 1, instructions: [
+            ["op": "show_login", "id": "login-1", "url": "https://www.heb.com/login", "title": "Sign in",
+             "doneWhen": [], "timeoutMs": 1000],
+            ["op": "done", "id": "d1", "result": ["store": "heb", "signedIn": true]],
+        ], job: "job_warm"))
+        let rec = Recorder()
+        serve(warm: ["job": "job_warm", "envelope": try! JSONValue(encoding: env)], rec: rec)
+        let host = FakeHost()
+        let config = MealioClientConfig(publishableKey: "pk_test", sessionTokenProvider: { "tok" },
+                                        baseURL: URL(string: "https://mealio.test/")!,
+                                        epochProvider: { 0 }, keys: TestSigner.keys,
+                                        urlSession: StubURLProtocol.session(), sdkVersion: "0")
+        let client = MealioClient(config: config, host: host)
+        await client.warm()
+        XCTAssertFalse(host.calls.contains("login"))
+        XCTAssertEqual(rec.paths.filter { $0 == "/api/v1/sdk/warm" }.count, 1)
+    }
+
+    @MainActor
     func testRunsAtMostOnceEveryFewMinutesAndNeverThrows() async throws {
         let rec = Recorder()
         StubURLProtocol.handler = { req, body in

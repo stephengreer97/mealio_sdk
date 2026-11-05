@@ -163,6 +163,49 @@ final class RunnerTests: XCTestCase {
         XCTAssertFalse(request.allowNavigation("https://evil.io/"))
     }
 
+    // MARK: security (same as the TS "security: request bodies and the runner fetch op" tests)
+
+    @MainActor
+    func testRefusesAFetchWhoseBodyNamesAnOrderBeforeItLeavesTheDevice() async throws {
+        func post(_ id: String, _ body: String) -> JSONValue {
+            ["op": "fetch", "id": .string(id),
+             "request": ["method": "POST", "url": "https://www.heb.com/graphql", "body": .string(body)],
+             "timeoutMs": 1000, "maxBytes": 1000]
+        }
+        let host = FakeHost()
+        let runner = Runner(host: host, allowlist: Allowlist(), keys: TestSigner.keys)
+        // A literal backslash-u escape: the server's JSON parser reads placeOrder.
+        let blocked = TestSigner.payload(seq: 1, instructions: [post("f1", #"{"operationName":"place\u004frder"}"#)])
+        let out1 = try await runner.run(TestSigner.envelope(blocked), job: "job_test", lastSeq: 0)
+        XCTAssertEqual(out1.results[0].ok, false)
+        XCTAssertEqual(out1.results[0].error, "blocked")
+        XCTAssertEqual(host.calls, [])
+
+        let ok = TestSigner.payload(seq: 2, instructions: [post("f2", #"{"operationName":"cartItemsV2"}"#)])
+        let out2 = try await runner.run(TestSigner.envelope(ok), job: "job_test", lastSeq: 1)
+        XCTAssertEqual(out2.results[0].ok, true)
+        XCTAssertEqual(host.calls, ["fetch"])
+    }
+
+    @MainActor
+    func testRefusesShowLoginWhenTheRunMayNotSignIn() async throws {
+        let login: JSONValue = ["op": "show_login", "id": "l1", "url": "https://www.heb.com/login", "title": "Sign in",
+                                "doneWhen": [], "timeoutMs": 1000]
+        let host = FakeHost()
+        let runner = Runner(host: host, allowlist: Allowlist(), keys: TestSigner.keys)
+        let out1 = try await runner.run(TestSigner.envelope(TestSigner.payload(seq: 1, instructions: [login])),
+                                        job: "job_test", lastSeq: 0, allowLogin: false)
+        XCTAssertEqual(out1.results[0].ok, false)
+        XCTAssertEqual(out1.results[0].outcome, .cancelled)
+        XCTAssertEqual(out1.results[0].error, "not_allowed")
+        XCTAssertEqual(host.calls, [])
+
+        let out2 = try await runner.run(TestSigner.envelope(TestSigner.payload(seq: 2, instructions: [login])),
+                                        job: "job_test", lastSeq: 1)
+        XCTAssertEqual(out2.results[0].outcome, .signedIn)
+        XCTAssertEqual(host.calls, ["login"])
+    }
+
     // MARK: refusals not in the shared vectors, in verify.ts order
 
     @MainActor

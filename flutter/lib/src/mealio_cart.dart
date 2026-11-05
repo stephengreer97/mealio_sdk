@@ -90,6 +90,8 @@ class MealioCart {
       ),
       _ScopedHost(),
     );
+    // The hidden page checks its own navigations against the same list.
+    WebViewHost.sharedAllowlist = client.allowlist;
     return _instance = MealioCart._(client);
   }
 

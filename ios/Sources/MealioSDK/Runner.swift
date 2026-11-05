@@ -38,8 +38,9 @@ public final class Runner {
 
     /// Verify and run one envelope. Throws `EnvelopeError` when it must be refused.
     /// `onStep` is called before each instruction that actually runs (not for
-    /// `done`, `fail` or skipped ones), for a progress screen.
-    public func run(_ env: Envelope?, job: String?, lastSeq: Int,
+    /// `done`, `fail` or skipped ones), for a progress screen. With
+    /// `allowLogin` false (a warm-up) every `show_login` is refused.
+    public func run(_ env: Envelope?, job: String?, lastSeq: Int, allowLogin: Bool = true,
                     onStep: (@MainActor (Instruction) -> Void)? = nil) async throws -> StepOutcome {
         let payload = try checkInstructions(try openEnvelope(env, keys: keys), job: job, lastSeq: lastSeq)
         var results: [InstructionResult] = []
@@ -51,14 +52,14 @@ public final class Runner {
             if case .fail(let f) = ins { terminal = .fail(code: f.code, message: f.message); break }
             if failed { results.append(Runner.skipped(ins)); continue }
             onStep?(ins)
-            let r = try await one(payload.store, ins)
+            let r = try await one(payload.store, ins, allowLogin: allowLogin)
             results.append(r)
             if !r.ok { failed = true }
         }
         return StepOutcome(payload: payload, results: results, terminal: terminal)
     }
 
-    private func one(_ store: String, _ ins: Instruction) async throws -> InstructionResult {
+    private func one(_ store: String, _ ins: Instruction, allowLogin: Bool) async throws -> InstructionResult {
         let t0 = Runner.now()
         func ms() -> Int { Int((Runner.now() - t0) * 1000) }
 
@@ -87,6 +88,11 @@ public final class Runner {
             }
 
         case .showLogin(let op):
+            // A warm-up runs before the user has tapped anything: it may check
+            // who is signed in, never put a sign-in sheet in front of them.
+            guard allowLogin else {
+                return InstructionResult(id: op.id, ok: false, ms: 0, error: "not_allowed", messages: [], outcome: .cancelled)
+            }
             guard allowlist.check(store, op.url, .login).ok else {
                 return InstructionResult(id: op.id, ok: false, ms: 0, error: "blocked", messages: [], outcome: .cancelled)
             }
@@ -105,6 +111,11 @@ public final class Runner {
 
         case .fetch(let op):
             guard allowlist.check(store, op.request.url, .fetch).ok else {
+                return InstructionResult(id: op.id, ok: false, ms: 0, error: "blocked")
+            }
+            // The guard stops a page script naming an order or a payment; this op
+            // never passes through a page, so the same rule is applied here.
+            if Allowlist.bodyBlocked(op.request.body) {
                 return InstructionResult(id: op.id, ok: false, ms: 0, error: "blocked")
             }
             if overRate(store) {

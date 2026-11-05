@@ -121,6 +121,9 @@ class MealioClient {
   Future<void>? _warming;
   int _lastWarmAt = 0;
 
+  /// Cart jobs (prepare, search, add) driving the hidden page right now.
+  int _running = 0;
+
   /// The allowlist in force, after any widening.
   Allowlist get allowlist => _runner.allowlist;
 
@@ -166,13 +169,15 @@ class MealioClient {
         : <String, Object?>{'recipes': list.map((Recipe r) => r.toJson()).toList()};
     if (store != null) input['store'] = store;
     if (zip != null) input['zip'] = zip;
-    await _settleWarm();
-    input.addAll(await _about());
-    final warm = _takeWarm(store, input['epoch']);
-    if (warm != null) input['warm'] = warm;
-    final start = _jobStart(await _post('/api/v1/sdk/carts', input));
-    final result = await _drive(start, onStep);
-    return CartSession(this, PreparedCart.fromJson(result));
+    return _cartJob(() async {
+      await _settleWarm();
+      input.addAll(await _about());
+      final warm = _takeWarm(store, input['epoch']);
+      if (warm != null) input['warm'] = warm;
+      final start = _jobStart(await _post('/api/v1/sdk/carts', input));
+      final result = await _drive(start, onStep);
+      return CartSession(this, PreparedCart.fromJson(result));
+    });
   }
 
   /// Run the login check for the user's store now, before they tap, so the
@@ -184,6 +189,9 @@ class MealioClient {
   Future<void> warm({String? store}) {
     final inFlight = _warming;
     if (inFlight != null) return inFlight;
+    // A cart is already driving the one hidden page: a warm-up now would load
+    // over it mid-run. Nothing to gain either, the cart has the session.
+    if (_running > 0) return Future<void>.value();
     final now = DateTime.now().millisecondsSinceEpoch;
     if (now - _lastWarmAt < warmFresh.inMilliseconds) return Future<void>.value();
     _lastWarmAt = now;
@@ -207,7 +215,7 @@ class MealioClient {
         return;
       }
       final start = _jobStart(res);
-      final r = await _drive(start, null);
+      final r = await _drive(start, null, warm: true);
       _warmed = r is Map && r['signedIn'] == true && r['store'] is String
           ? _Warmed(start.job, r['store']! as String, DateTime.now().millisecondsSinceEpoch, _runner.pageOpens, about['epoch'])
           : null;
@@ -235,26 +243,30 @@ class MealioClient {
   }
 
   /// Search the store again for one item ("minced garlic jar").
-  Future<SearchResult> search(String cartId, String key, String query, {StepListener? onStep}) async {
-    await _settleWarm();
-    final start = _jobStart(await _post(
-      '/api/v1/sdk/carts/${Uri.encodeComponent(cartId)}/search',
-      <String, Object?>{'key': key, 'query': query, ...await _about()},
-    ));
-    return SearchResult.fromJson(await _drive(start, onStep));
+  Future<SearchResult> search(String cartId, String key, String query, {StepListener? onStep}) {
+    return _cartJob(() async {
+      await _settleWarm();
+      final start = _jobStart(await _post(
+        '/api/v1/sdk/carts/${Uri.encodeComponent(cartId)}/search',
+        <String, Object?>{'key': key, 'query': query, ...await _about()},
+      ));
+      return SearchResult.fromJson(await _drive(start, onStep));
+    });
   }
 
   /// Fill the store cart with the user's choices.
-  Future<AddResult> addToCart(String cartId, List<Selection> selections, {StepListener? onStep}) async {
-    await _settleWarm();
-    final start = _jobStart(await _post(
-      '/api/v1/sdk/carts/${Uri.encodeComponent(cartId)}/add',
-      <String, Object?>{
-        'selections': selections.map((Selection s) => s.toJson()).toList(),
-        ...await _about(),
-      },
-    ));
-    return AddResult.fromJson(await _drive(start, onStep));
+  Future<AddResult> addToCart(String cartId, List<Selection> selections, {StepListener? onStep}) {
+    return _cartJob(() async {
+      await _settleWarm();
+      final start = _jobStart(await _post(
+        '/api/v1/sdk/carts/${Uri.encodeComponent(cartId)}/add',
+        <String, Object?>{
+          'selections': selections.map((Selection s) => s.toJson()).toList(),
+          ...await _about(),
+        },
+      ));
+      return AddResult.fromJson(await _drive(start, onStep));
+    });
   }
 
   /// Who is calling, carried on every job-starting call (this used to be a
@@ -290,7 +302,22 @@ class MealioClient {
     return _JobStart(json['job']! as String, Envelope.fromJson(json['envelope']));
   }
 
-  Future<Object?> _drive(_JobStart start, StepListener? onStep) async {
+  /// A cart call, from before it waits on a warm-up until its job is done. The
+  /// whole call counts as running, not just its drive: a warm-up started while
+  /// the first request was in flight would otherwise load over the page.
+  Future<T> _cartJob<T>(Future<T> Function() fn) async {
+    _running += 1;
+    try {
+      return await fn();
+    } finally {
+      _running -= 1;
+    }
+  }
+
+  Future<Object?> _drive(_JobStart start, StepListener? onStep, {bool warm = false}) =>
+      _driveLoop(start, onStep, allowLogin: !warm);
+
+  Future<Object?> _driveLoop(_JobStart start, StepListener? onStep, {required bool allowLogin}) async {
     var env = start.envelope;
     var seq = 0;
     for (var guard = 0; guard < 200; guard += 1) {
@@ -301,6 +328,7 @@ class MealioClient {
           start.job,
           seq,
           onStep: onStep == null ? null : (Instruction ins) => onStep(stepOf(ins), ins),
+          allowLogin: allowLogin,
         );
       } on EnvelopeError catch (e) {
         throw MealioException(

@@ -2,7 +2,7 @@
 // run each instruction on the platform's Host, and return the results. The
 // Host is the only platform-specific part (WebViews, HTTP, UI).
 
-import { Allowlist } from './allowlist';
+import { Allowlist, bodyBlocked } from './allowlist';
 import { GUARD_SCRIPT } from './guard';
 import { checkInstructions, openEnvelope, EnvelopeError } from './verify';
 import type {
@@ -62,7 +62,8 @@ export class Runner {
   constructor(private host: Host, public allowlist: Allowlist = new Allowlist(), private keys?: Record<string, string>) {}
 
   /** Verify and run one envelope. Throws EnvelopeError when it must be refused. */
-  async run(env: Envelope, job: string | null, lastSeq: number, onStep?: (ins: Instruction) => void): Promise<StepOutcome> {
+  async run(env: Envelope, job: string | null, lastSeq: number, onStep?: (ins: Instruction) => void,
+    opts: { allowLogin?: boolean } = {}): Promise<StepOutcome> {
     const payload = checkInstructions(openEnvelope(env, this.keys), job, lastSeq);
     const results: InstructionResult[] = [];
     let terminal: Terminal | null = null;
@@ -73,14 +74,14 @@ export class Runner {
       if (ins.op === 'fail') { terminal = { kind: 'fail', code: ins.code, message: ins.message }; break; }
       if (failed) { results.push(skipped(ins)); continue; }
       try { onStep?.(ins); } catch { /* a progress callback never breaks a run */ }
-      const r = await this.one(payload.store, ins);
+      const r = await this.one(payload.store, ins, opts.allowLogin !== false);
       results.push(r);
       if (!r.ok) failed = true;
     }
     return { payload, results, terminal };
   }
 
-  private async one(store: string, ins: Instruction): Promise<InstructionResult> {
+  private async one(store: string, ins: Instruction, allowLogin = true): Promise<InstructionResult> {
     const t0 = now();
     switch (ins.op) {
       case 'page_open': {
@@ -103,6 +104,9 @@ export class Runner {
         }
       }
       case 'show_login': {
+        // A warm-up runs before the user has tapped anything: it may check
+        // who is signed in, never put a sign-in sheet in front of them.
+        if (!allowLogin) return { id: ins.id, ok: false, outcome: 'cancelled', messages: [], error: 'not_allowed', ms: 0 } as ShowLoginResult;
         const v = this.allowlist.check(store, ins.url, 'login');
         if (!v.ok) return { id: ins.id, ok: false, outcome: 'cancelled', messages: [], error: 'blocked', ms: 0 } as ShowLoginResult;
         try {
@@ -119,6 +123,9 @@ export class Runner {
       case 'fetch': {
         const v = this.allowlist.check(store, ins.request.url, 'fetch');
         if (!v.ok) return { id: ins.id, ok: false, error: 'blocked', ms: 0 } as FetchResult;
+        // The guard stops a page script naming an order or a payment; this op
+        // never passes through a page, so the same rule is applied here.
+        if (bodyBlocked(ins.request.body)) return { id: ins.id, ok: false, error: 'blocked', ms: 0 } as FetchResult;
         if (this.overRate(store)) return { id: ins.id, ok: false, error: 'rate', ms: 0 } as FetchResult;
         try {
           const r = await this.host.fetch(store, ins.request, ins.timeoutMs, ins.maxBytes);
