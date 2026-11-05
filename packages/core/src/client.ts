@@ -54,11 +54,20 @@ export interface ClientConfig {
 
 interface JobStart { job: string; envelope: Envelope }
 
+/** How long a warm-up is offered to the next prepare. The server holds the same line (WARM_TTL_MS). */
+export const WARM_FRESH_MS = 4 * 60_000;
+
+/** A finished warm-up the next prepare may start from. */
+interface Warmed { job: string; store: string; at: number; pageOpens: number; epoch: number }
+
 export class MealioClient {
   private runner: Runner;
   private token: string | null = null;
   private base: string;
   private f: typeof fetch;
+  private warmed: Warmed | null = null;
+  private warming: Promise<void> | null = null;
+  private lastWarmAt = 0;
 
   constructor(private cfg: ClientConfig, host: Host) {
     this.runner = new Runner(host, new Allowlist(), cfg.keys);
@@ -91,19 +100,76 @@ export class MealioClient {
     const body = recipes.length === 1
       ? { store: input.store, zip: input.zip, recipe: recipes[0] }
       : { store: input.store, zip: input.zip, recipes };
-    const start = await this.post<JobStart>('/api/v1/sdk/carts', { ...body, ...(await this.about()) });
+    await this.settleWarm();
+    const about = await this.about();
+    const warm = this.takeWarm(input.store ?? null, about.epoch);
+    const start = await this.post<JobStart>('/api/v1/sdk/carts', { ...body, ...about, ...(warm ? { warm } : {}) });
     const result = await this.drive(start, opts.onStep) as unknown as PreparedCart;
     return new CartSession(this, result);
   }
 
+  /**
+   * Run the login check for the user's store now, before they tap, so the cart
+   * that follows can start at search. Mealio picks the store: the user's
+   * default, or none, in which case nothing happens (a new user has no store
+   * to check yet). Never shows sign-in, never throws, and does nothing if it
+   * ran in the last few minutes. MealioCartButton calls it when it appears.
+   */
+  warm(opts: { store?: string | null } = {}): Promise<void> {
+    if (this.warming) return this.warming;
+    if (Date.now() - this.lastWarmAt < WARM_FRESH_MS) return Promise.resolve();
+    this.lastWarmAt = Date.now();
+    this.warming = (async () => {
+      try {
+        const about = await this.about();
+        const start = await this.post<JobStart | { warm: null }>('/api/v1/sdk/warm', { store: opts.store ?? undefined, ...about });
+        if (!('job' in start)) return;
+        const r = await this.drive(start) as { store?: string; signedIn?: boolean | null };
+        this.warmed = r && r.signedIn === true && typeof r.store === 'string'
+          ? { job: start.job, store: r.store, at: Date.now(), pageOpens: this.runner.pageOpens, epoch: about.epoch }
+          : null;
+      } catch {
+        // A warm-up that fails costs the user nothing: the cart runs as it always has.
+        this.warmed = null;
+      } finally {
+        this.warming = null;
+      }
+    })();
+    return this.warming;
+  }
+
+  /** Forget any warm-up, e.g. after signing out of the stores. */
+  clearWarm(): void {
+    this.warmed = null;
+    this.lastWarmAt = 0;
+  }
+
+  /** Every job drives the one hidden page: none may start while a warm-up is driving it. */
+  private async settleWarm(): Promise<void> {
+    if (this.warming) await this.warming;
+  }
+
+  /** The warm job id, once, if the page it left is still showing and it is still fresh. */
+  private takeWarm(store: string | null, epoch: number): string | null {
+    const w = this.warmed;
+    this.warmed = null;
+    if (!w) return null;
+    if (store && store !== w.store) return null;
+    if (w.pageOpens !== this.runner.pageOpens || w.epoch !== epoch) return null;
+    if (Date.now() - w.at > WARM_FRESH_MS) return null;
+    return w.job;
+  }
+
   /** Search the store again for one item ("minced garlic jar"). */
   async search(cartId: string, key: string, query: string, opts: { onStep?: StepListener } = {}): Promise<SearchResult> {
+    await this.settleWarm();
     const start = await this.post<JobStart>(`/api/v1/sdk/carts/${encodeURIComponent(cartId)}/search`, { key, query, ...(await this.about()) });
     return await this.drive(start, opts.onStep) as unknown as SearchResult;
   }
 
   /** Fill the store cart with the user's choices. */
   async addToCart(cartId: string, selections: Selection[], opts: { onStep?: StepListener } = {}): Promise<AddResult> {
+    await this.settleWarm();
     const start = await this.post<JobStart>(`/api/v1/sdk/carts/${encodeURIComponent(cartId)}/add`, { selections, ...(await this.about()) });
     return await this.drive(start, opts.onStep) as unknown as AddResult;
   }

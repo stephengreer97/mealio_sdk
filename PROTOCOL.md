@@ -21,6 +21,7 @@ All calls are HTTPS to `https://mealio.co` (overridable for testing).
 | `POST /api/v1/sdk/carts` | SDK | Start a cart for one recipe or several. Returns the first signed envelope |
 | `POST /api/v1/sdk/jobs/{job}/step` | SDK | Return results for one envelope. Returns the next envelope |
 | `POST /api/v1/sdk/carts/{cart}/add` | SDK | Send the user's choices and start filling the cart |
+| `POST /api/v1/sdk/warm` | SDK | Run the login check for the user's store before they tap. Optional |
 
 Every SDK call carries:
 
@@ -196,6 +197,31 @@ products for the same ingredient, the more recently saved one is pre-selected.
 SDKs send a single recipe as `recipe`, so they keep working against a server
 from before multi-recipe. The `cart.completed` webhook adds `recipeIds`
 (`recipeId` is the first).
+
+## Warm-up
+
+`POST /api/v1/sdk/warm` with `{ "store"?: string }` runs the login check ahead
+of the cart, while the user is still reading the recipe. Without `store` it
+uses the user's default store. It answers `{ "warm": null }` when there is
+nothing to warm (no store on file yet, or Kroger, which signs in through its
+API), and otherwise `{ job, envelope }`, driven like any other job. The job
+opens the store, runs the session check, parks on the quiet page, and ends
+`done` with `{ store, signedIn: true | false | null }`. It never shows sign-in.
+
+The SDK keeps the job id when `signedIn` is true and passes it once, as
+`"warm": "<job id>"`, on the next `POST /api/v1/sdk/carts`, but only if:
+
+- the hidden page has not been told to load anything since (`page_open` count unchanged),
+- the storage epoch is the same (no sign-out of stores in between),
+- the cart is for the same store, or names none, and
+- it finished less than 4 minutes ago (the server allows 5).
+
+The server checks the same things it can see: the job is this SDK session's,
+for this store, signed in and fresh. Then the prepare's first envelope is the
+search alone. If that search gets no answer at all, the prepare starts over
+from the session check, so a stale hint costs one search and never a wrong
+cart. Any other hint is ignored. While a warm-up runs, every other job waits
+for it, because both would drive the same hidden page.
 
 ## Products, items and selections
 

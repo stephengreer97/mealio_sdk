@@ -52,6 +52,12 @@ const now = () => Date.now();
 
 export class Runner {
   private fetchStamps: Record<string, number[]> = {};
+  /**
+   * How many times the hidden page has been told to load. A warm-up is only
+   * worth anything while the page it left behind is still the one showing, and
+   * this is how the client knows nothing has loaded over it since.
+   */
+  pageOpens = 0;
 
   constructor(private host: Host, public allowlist: Allowlist = new Allowlist(), private keys?: Record<string, string>) {}
 
@@ -80,6 +86,7 @@ export class Runner {
       case 'page_open': {
         const v = this.allowlist.check(store, ins.url, 'page');
         if (!v.ok) return { id: ins.id, ok: false, error: 'blocked', ms: 0 } as PageOpenResult;
+        this.pageOpens += 1;
         try {
           const r = await this.host.openPage(store, ins.url, ins.timeoutMs);
           return { id: ins.id, ok: r.ok, finalUrl: r.finalUrl, error: r.error, ms: now() - t0 } as PageOpenResult;

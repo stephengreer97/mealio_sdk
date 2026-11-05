@@ -42,6 +42,12 @@ export interface MealioApi {
   prepareCart(input: PrepareCartInput, opts?: { onStep?: StepListener }): Promise<CartSession>;
   stores(): Promise<StoreInfo[]>;
   signOutOfAllStores(): Promise<void>;
+  /**
+   * Run the login check for the user's store ahead of time, so the next cart
+   * starts at search. MealioCartButton does this when it appears. Call it
+   * yourself if you start carts another way. Never shows sign-in, never throws.
+   */
+  warm(opts?: { store?: string | null }): Promise<void>;
   theme: MealioTheme;
 }
 
@@ -250,7 +256,9 @@ export function MealioProvider(props: MealioProviderProps) {
     theme,
     prepareCart: (input, opts) => client.prepareCart(input, opts),
     stores: () => client.stores(),
+    warm: (opts) => client.warm(opts),
     async signOutOfAllStores() {
+      client.clearWarm();
       await epochStore.set((await epochStore.get()) + 1);
       try {
         // Optional peer: @react-native-cookies/cookies clears both jars.

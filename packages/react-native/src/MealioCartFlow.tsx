@@ -233,12 +233,18 @@ export function CartList({ t, cart, storeName, busy, onChange, onAdd, onChangeSt
         ) : null}
         <Text style={s.muted}>{est.count} of {selectable.length} selected</Text>
       </View>
+      {/* Said while any item has no saved product, which on a recipe's first
+          cart is every item: the run where nothing on screen shows it yet. */}
+      {cart.items.some((i) => i.status === 'choose') ? (
+        <View style={s.info} testID="mealio-remember-note">
+          <Text style={s.infoText}>Pick a product for each item and Mealio will remember your preferences.</Text>
+        </View>
+      ) : null}
       <ScrollView style={s.flex} contentContainerStyle={s.list} keyboardShouldPersistTaps="handled">
         {cart.items.map((it) => (
           <ItemRow key={it.key} t={t} cart={cart} item={it} storeName={storeName} open={open === it.key}
             onToggleOpen={() => setOpen(open === it.key ? null : it.key)} onChange={onChange} disabled={busy} />
         ))}
-        <Text style={[s.small, s.footnote]}>Unchecked items are left out this time only. Your usual picks stay saved for next time. Prices from {storeName}.</Text>
       </ScrollView>
       <View style={s.footer}>
         {cart.pendingPreferences().length ? (
@@ -737,7 +743,8 @@ function make(t: MealioTheme) {
     searchInput: { ...f, flex: 1, minHeight: 44, paddingHorizontal: 12, borderRadius: t.radius - 2, backgroundColor: t.surface, color: t.text, fontSize: 14 },
     searchBtn: { minHeight: 44, minWidth: 76, paddingHorizontal: 14, borderRadius: t.radius - 2, backgroundColor: t.text, alignItems: 'center', justifyContent: 'center' },
     searchBtnText: { ...f, color: '#FFFFFF', fontSize: 14, fontWeight: '600' },
-    footnote: { paddingHorizontal: 4, paddingTop: 4 },
+    info: { marginHorizontal: 12, marginBottom: 10, padding: 12, borderRadius: 10, backgroundColor: t.surface, borderWidth: 1, borderColor: t.border },
+    infoText: { ...f, fontSize: 13, lineHeight: 18, color: t.text },
     footer: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 28, gap: 8, borderTopWidth: 1, borderTopColor: t.border, backgroundColor: t.background },
     totalRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline' },
     totalLabel: { ...f, fontSize: 14, color: t.muted },
