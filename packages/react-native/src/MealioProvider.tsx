@@ -287,7 +287,12 @@ export function MealioProvider(props: MealioProviderProps) {
             // A new key per navigation remounts the WebView, so re-opening the
             // same URL really reloads it. Cookies and storage are shared.
             key={`mealio-hidden-${hiddenUri.n}`}
-            source={{ uri: hiddenUri.uri }}
+            // On iOS, idle is a tiny page, not the address about:blank.
+            // react-native-webview sends any address with no host to
+            // loadFileURL, which throws on about:blank and kills the app at
+            // launch. The page's baseUrl keeps its url about:blank. The html
+            // must not be '' (the new architecture drops an empty string).
+            source={Platform.OS === 'ios' && hiddenUri.uri === 'about:blank' ? IOS_IDLE : { uri: hiddenUri.uri }}
             originWhitelist={['https://*', 'about:*']}
             onLoadEnd={onHiddenLoadEnd}
             onError={onHiddenError}
@@ -315,6 +320,8 @@ export function MealioProvider(props: MealioProviderProps) {
     </ApiCtx.Provider>
   );
 }
+
+const IOS_IDLE = { html: '<html><body></body></html>', baseUrl: 'about:blank' };
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
