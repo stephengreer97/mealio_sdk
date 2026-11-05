@@ -3,7 +3,10 @@ name: release
 # Push a tag `vX.Y.Z` to publish every SDK at that version:
 #   npm         @mealio/sdk-core, @mealio/react-native-cart
 #   Maven       co.mealio:mealio-sdk, co.mealio:mealio-sdk-compose (Central Portal)
-#   CocoaPods   MealioSDK (Swift Package Manager reads the tag itself)
+#   SwiftPM     MealioSDK reads the tag itself, as does CocoaPods from git:
+#               pod 'MealioSDK', :git => '<repo>', :tag => 'vX.Y.Z'
+#               (CocoaPods Trunk goes read-only for good on 2026-12-02, so
+#               nothing is pushed there: a Trunk install would be frozen.)
 #   pub.dev     mealio_sdk
 #
 # Every version in the repo must equal the tag (scripts/check-versions.mjs),
@@ -11,7 +14,6 @@ name: release
 #   (npm needs no secret: Trusted Publishing, configured on npmjs.com)
 #   MAVEN_CENTRAL_USERNAME / _PASSWORD Central Portal user token
 #   SIGNING_KEY / SIGNING_KEY_PASSWORD ASCII-armored GPG private key + passphrase
-#   COCOAPODS_TRUNK_TOKEN              from `pod trunk me --verbose` after registering
 # pub.dev needs no secret: it trusts this workflow through GitHub OIDC once
 # "Automated publishing" is enabled for the package on pub.dev (after the
 # first version is published by hand).
@@ -82,19 +84,6 @@ jobs:
           ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
           ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
           ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
-
-  cocoapods:
-    needs: tests
-    runs-on: macos-14
-    # CocoaPods Trunk is closing to new releases. A refusal there must not fail
-    # a release that npm, Maven, pub.dev and SwiftPM have already taken; Swift
-    # Package Manager is the iOS route.
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - run: pod trunk push MealioSDK.podspec --allow-warnings
-        env:
-          COCOAPODS_TRUNK_TOKEN: ${{ secrets.COCOAPODS_TRUNK_TOKEN }}
 
   pub:
     needs: tests

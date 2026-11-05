@@ -16,8 +16,9 @@ Pod::Spec.new do |s|
   s.ios.deployment_target = '15.0'
   s.swift_version    = '5.9'
 
-  # Published from the repository root (`pod trunk push MealioSDK.podspec`), so
-  # paths are relative to the root.
+  # Not pushed to CocoaPods Trunk (read-only from 2026-12-02). Apps install it
+  # from this repository: pod 'MealioSDK', :git => '<repo>', :tag => 'vX.Y.Z'.
+  # It lives at the root, so paths are relative to the root.
   s.source_files     = 'ios/Sources/MealioSDK/**/*.swift'
   s.frameworks       = 'Foundation', 'UIKit', 'WebKit', 'CryptoKit', 'SwiftUI', 'Combine'
 end
