@@ -4,8 +4,9 @@ Add a recipe's ingredients to your user's own grocery store cart, from your Reac
 
 ```sh
 npm install @mealio/react-native-cart react-native-webview
-# optional, for "sign out of stores":
-npm install @react-native-cookies/cookies
+# optional, for "sign out of stores" (New Architecture):
+npm install @preeternal/react-native-cookie-manager
+# apps still on the old architecture can use @react-native-cookies/cookies instead
 ```
 
 ```tsx

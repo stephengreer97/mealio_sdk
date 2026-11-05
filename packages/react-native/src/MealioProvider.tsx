@@ -16,7 +16,7 @@ import {
 } from '@mealio/sdk-core';
 import { resolveTheme, type MealioTheme } from './theme';
 
-export const SDK_VERSION = '0.4.1';
+export const SDK_VERSION = '0.4.2';
 
 export interface EpochStorage {
   get(): Promise<number>;
@@ -115,6 +115,38 @@ function untag(data: string, tag: Tagged | null): string | null {
     return typeof o.m === 'string' ? o.m : null;
   }
   return tag && tag.strict ? null : data;
+}
+
+// ── signing out of the stores ─────────────────────────────────────────────
+
+/** The cookie manager the docs recommend: maintained, New Architecture. */
+export const COOKIE_MANAGER = '@preeternal/react-native-cookie-manager';
+
+interface CookieManagerLike {
+  clearAllStores?: () => Promise<unknown>;
+  clearAll?: (useWebKit?: boolean) => Promise<unknown>;
+}
+
+/**
+ * The app's cookie manager, or null. An optional peer: an app that never signs
+ * out of stores need not install one. The maintained package first (its
+ * clearAllStores clears the Foundation and WebKit stores in one call), then
+ * @react-native-cookies/cookies, which it succeeded, for apps still on the old
+ * architecture. Each require sits in its own try: Metro treats a require inside
+ * try/catch as optional, so a missing package is not a bundling error.
+ */
+function loadCookieManager(): CookieManagerLike | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const m = require('@preeternal/react-native-cookie-manager');
+    if (m) return (m.default ?? m) as CookieManagerLike;
+  } catch { /* not installed */ }
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const m = require('@react-native-cookies/cookies');
+    if (m) return (m.default ?? m) as CookieManagerLike;
+  } catch { /* not installed */ }
+  return null;
 }
 
 /** Response headers a store must never hand to Mealio: its session cookies. */
@@ -346,20 +378,19 @@ export function MealioProvider(props: MealioProviderProps) {
       hiddenStore.current = null;
       setHiddenUri((cur) => ({ uri: 'about:blank', n: cur.n + 1 }));
       hidden.current?.clearCache?.(true);
-      let CookieManager: { clearAll(useWebKit?: boolean): Promise<unknown> } | null = null;
-      try {
-        // Optional peer: @react-native-cookies/cookies clears both jars.
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        CookieManager = require('@react-native-cookies/cookies').default;
-      } catch { /* not installed */ }
-      // Without it there is no way to delete a WebView cookie from React
-      // Native, so the stores' logins would survive. Saying so beats a sign-out
-      // that only looks like it worked.
-      if (!CookieManager) {
-        throw new MealioError('unsupported', 'Install @react-native-cookies/cookies to sign out of stores.');
+      // Without a cookie manager there is no way to delete a WebView cookie
+      // from React Native, so the stores' logins would survive. Saying so beats
+      // a sign-out that only looks like it worked.
+      const cookies = loadCookieManager();
+      if (!cookies) {
+        throw new MealioError('unsupported', `Install ${COOKIE_MANAGER} to sign out of stores.`);
       }
-      await CookieManager.clearAll(true);
-      await CookieManager.clearAll(false);
+      if (typeof cookies.clearAllStores === 'function') {
+        await cookies.clearAllStores();
+      } else {
+        await cookies.clearAll?.(true);
+        await cookies.clearAll?.(false);
+      }
     },
   }), [client, epochStore, theme]);
 

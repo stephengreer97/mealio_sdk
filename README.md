@@ -27,7 +27,7 @@ back what the store answered. See [PROTOCOL.md](PROTOCOL.md).
 | --- | --- |
 | React Native | `npm install @mealio/react-native-cart react-native-webview` |
 | iOS (Swift Package Manager) | `.package(url: "https://github.com/stephengreer97/mealio_sdk.git", from: "0.4.0")` |
-| iOS (CocoaPods) | `pod 'MealioSDK', :git => 'https://github.com/stephengreer97/mealio_sdk.git', :tag => 'v0.4.1'` (installed from GitHub: CocoaPods Trunk stops taking releases on 2026-12-02) |
+| iOS (CocoaPods) | `pod 'MealioSDK', :git => 'https://github.com/stephengreer97/mealio_sdk.git', :tag => 'v0.4.2'` (installed from GitHub: CocoaPods Trunk stops taking releases on 2026-12-02) |
 | Android | `implementation("co.mealio:mealio-sdk:0.4.0")`, plus `co.mealio:mealio-sdk-compose:0.4.0` for the Compose sheet |
 | Flutter | `flutter pub add mealio_sdk` |
 
@@ -55,9 +55,10 @@ CocoaPods (from git) read the tag directly.
 ## Quickstart (React Native)
 
 1. Get keys at https://developers.mealio.co/dashboard.
-   To offer "sign out of stores", also install `@react-native-cookies/cookies`
-   (React Native cannot delete WebView cookies without it, and
-   `signOutOfAllStores()` throws `unsupported` rather than pretend).
+   To offer "sign out of stores", also install
+   `@preeternal/react-native-cookie-manager` (or, on the old architecture,
+   `@react-native-cookies/cookies`). React Native cannot delete WebView cookies
+   without one, and `signOutOfAllStores()` throws `unsupported` rather than pretend.
 2. Add one endpoint to your server that calls `POST https://mealio.co/api/v1/sessions`
    with your secret key and your user id (see `examples/partner-server`).
 3. Wrap your app:

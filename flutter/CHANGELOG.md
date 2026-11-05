@@ -1,3 +1,9 @@
+## 0.4.2
+
+- No Flutter changes. React Native's sign-out now uses the maintained
+  `@preeternal/react-native-cookie-manager`, falling back to the deprecated
+  `@react-native-cookies/cookies`.
+
 ## 0.4.1
 
 - No code changes. The release pipeline now publishes npm through Trusted
