@@ -3,7 +3,7 @@
   "version": "0.4.0",
   "description": "Platform-neutral core of the Mealio Cart SDK: protocol types, signature checks, allowlist and the relay loop.",
   "license": "SEE LICENSE IN LICENSE",
-  "author": "Mealio <support@mealio.co>",
+  "author": "Mealio <contact@mealio.co>",
   "homepage": "https://developers.mealio.co",
   "repository": {
     "type": "git",

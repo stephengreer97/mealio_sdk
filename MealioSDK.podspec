@@ -9,7 +9,7 @@ Pod::Spec.new do |s|
   DESC
   s.homepage         = 'https://developers.mealio.co'
   s.license          = { :type => 'Proprietary', :file => 'LICENSE' }
-  s.author           = { 'Mealio' => 'support@mealio.co' }
+  s.author           = { 'Mealio' => 'contact@mealio.co' }
   # One tag releases all four SDKs: v0.4.0.
   s.source           = { :git => 'https://github.com/stephengreer97/mealio_sdk.git', :tag => "v#{s.version}" }
 

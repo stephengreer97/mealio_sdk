@@ -73,7 +73,7 @@ mavenPublishing {
             developer {
                 id.set("mealio")
                 name.set("Mealio")
-                email.set("support@mealio.co")
+                email.set("contact@mealio.co")
             }
         }
         scm {
