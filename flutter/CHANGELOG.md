@@ -1,3 +1,8 @@
+## 0.4.1
+
+- No code changes. The release pipeline now publishes npm through Trusted
+  Publishing and first ships the iOS SDK to CocoaPods.
+
 ## 0.4.0
 
 First public release.
