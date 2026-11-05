@@ -8,7 +8,7 @@ name: release
 #
 # Every version in the repo must equal the tag (scripts/check-versions.mjs),
 # and the full test suite runs first. Secrets this needs, once:
-#   NPM_TOKEN                          npm granular token, publish to @mealio
+#   NPM_TOKEN                          npm granular token, "Read and write (stage only)" on @mealio
 #   MAVEN_CENTRAL_USERNAME / _PASSWORD Central Portal user token
 #   SIGNING_KEY / SIGNING_KEY_PASSWORD ASCII-armored GPG private key + passphrase
 #   COCOAPODS_TRUNK_TOKEN              from `pod trunk me --verbose` after registering
@@ -42,19 +42,26 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write   # npm provenance
     steps:
       - uses: actions/checkout@v4
+      # npm stage publish needs npm 11.15+ on Node 22.14+.
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@^11.15.0
       - run: npm install --no-audit --no-fund
-      # Core first: the React Native package depends on this exact version.
-      - run: npm publish -w @mealio/sdk-core --provenance --access public
+      - run: npm run build -w @mealio/sdk-core -w @mealio/react-native-cart
+      # STAGED, not published: each version waits in npm's review queue until a
+      # maintainer approves it with 2FA (npmjs.com, or `npm stage approve`).
+      # NPM_TOKEN is a stage-only granular token. Core first: the React Native
+      # package depends on this exact version.
+      - run: npm stage publish --access public
+        working-directory: packages/core
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: npm publish -w @mealio/react-native-cart --provenance --access public
+      - run: npm stage publish --access public
+        working-directory: packages/react-native
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
