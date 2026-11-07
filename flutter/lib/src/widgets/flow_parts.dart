@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 
 import '../cart_session.dart';
 import '../client.dart';
+import '../errors.dart';
 import '../protocol.dart';
 import '../theme.dart';
 import '../ui.dart';
@@ -1019,6 +1020,10 @@ class ErrorView extends StatelessWidget {
     final ui = MealioUi.of(context);
     final msg = code == 'login_cancelled'
         ? ui.tr('signInClosed')
+        : code == MealioErrorCode.cartCapReached
+        ? ui.tr('capReached')
+        : code == MealioErrorCode.tooManyCarts
+        ? ui.tr('tooManyCarts')
         : (message == null || message!.isEmpty ? ui.tr('somethingWrongSentence') : message!);
     return Padding(
       padding: const EdgeInsets.all(20),

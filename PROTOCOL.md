@@ -416,6 +416,8 @@ then switching the server's `kid`.
 | `session_expired` | The SDK session token expired; get a new one from your server |
 | `network` | Could not reach Mealio |
 | `unsupported` | An instruction `op` this SDK does not know |
+| `cart_cap_reached` | The app reached the monthly cap set in its dashboard. The drop-in shows `capReached` |
+| `too_many_carts` | This user started too many carts. The drop-in shows `tooManyCarts` |
 | `store_not_allowed` | The app's dashboard limit leaves out that store. The drop-in shows the picker |
 | `location_required` | A Kroger family store with no store chosen yet. The drop-in asks the user |
 | `bad_weight` | A selection's `weightLb` was not a number above 0 and at most 20 |
