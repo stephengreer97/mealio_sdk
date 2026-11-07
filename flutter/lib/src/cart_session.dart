@@ -159,6 +159,10 @@ class CartSession extends ChangeNotifier {
   /// Display name of the store, when the server sent one.
   String? get storeName => cart.storeName;
 
+  /// The exact store, on a Kroger family cart. Null otherwise and from older
+  /// servers.
+  StoreLocation? get location => cart.location;
+
   /// Every item in recipe order.
   List<CartItem> get items => cart.items;
 

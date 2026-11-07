@@ -1,6 +1,6 @@
 // The drop-in: ONE sheet that runs the whole add-to-cart flow over the
-// partner's app. Loading, store sign-in, choosing a store, the list, adding,
-// done.
+// partner's app. Loading, store sign-in, choosing a store and a Kroger family
+// location, the list, adding, done.
 // Mirrors packages/react-native/src/MealioCartFlow.tsx.
 //
 // The list shows EVERY item, every time. Remembered products come back
@@ -78,7 +78,9 @@ public struct MealioCartFlow: View {
     ///   - recipe: The recipe to cart.
     ///   - store: Store id from GET /api/v1/stores, e.g. "heb". Optional:
     ///     without it the user's default store is used, or they pick one.
-    ///   - zip: 5-digit zip. Needed for Kroger family stores.
+    ///   - zip: 5-digit zip, if you know it. Fills the zip box when a Kroger
+    ///     family store asks the user which store they shop at. Without it,
+    ///     they type it in.
     ///   - onAdded: Called after the cart is filled, before the user taps Done.
     ///   - onError: Called when preparing or adding fails. The sheet shows it too.
     ///   - onClose: Called once when the sheet goes away; the result when
@@ -149,8 +151,16 @@ public struct MealioCartFlow: View {
         case .loading: return storeName == "your store" ? "Getting your cart ready" : "Getting your \(storeName) cart ready"
         case .error: return "Something went wrong"
         case .stores: return "Choose your store"
+        case .location: return "Find your \(storeName)"
         case .list, .adding: return "Your \(storeName) list"
         }
+    }
+
+    private var locationBack: MealioLocationPicker.Back {
+        if model.canGoBackToList {
+            return MealioLocationPicker.Back(label: "Back to your list", action: { model.backToList() })
+        }
+        return MealioLocationPicker.Back(label: "Choose a different store", action: { model.openStores(from: .error) })
     }
 
     @ViewBuilder
@@ -176,10 +186,20 @@ public struct MealioCartFlow: View {
                 MealioStorePicker(t: t, stores: model.stores, current: model.store,
                                   onPick: { model.pick($0) },
                                   onBack: model.canGoBackToList ? { model.backToList() } : nil)
+            case .location:
+                if let store = model.store {
+                    MealioLocationPicker(t: t, store: store, storeName: storeName,
+                                         zip: model.locationZip, current: model.cart?.location?.id,
+                                         onPicked: { _ in model.locationPicked() },
+                                         back: locationBack)
+                } else {
+                    MealioErrorView(t: t, error: model.error, onRetry: { model.start() }, onClose: { dismiss() })
+                }
             case .list, .adding:
                 if let cart = model.cart {
                     MealioCartList(cart: cart, storeName: storeName, theme: t, busy: model.phase == .adding,
                                    onChangeStore: { model.openStores(from: .list) },
+                                   onChangeLocation: { model.openLocation(from: .list) },
                                    onAdd: { model.add() })
                 } else {
                     MealioLoadingView(t: t, step: model.step, storeName: storeName, count: lineCount)
@@ -201,7 +221,7 @@ public struct MealioCartFlow: View {
 
 @MainActor
 final class MealioFlowModel: ObservableObject {
-    enum Phase: Equatable { case loading, list, adding, done, error, stores }
+    enum Phase: Equatable { case loading, list, adding, done, error, stores, location }
 
     @Published var phase: Phase = .loading
     @Published var step: Step = .connecting
@@ -258,10 +278,12 @@ final class MealioFlowModel: ObservableObject {
         cart = nil
         result = nil
         error = nil
-        let store = self.store, recipes = self.recipes, zip = self.zip
+        let store = self.store, recipes = self.recipes
         Task { [weak self] in
             do {
-                let c = try await MealioCart.prepareCart(store: store, recipes: recipes, zip: zip, onStep: { s, _ in
+                // No zip: which store the user shops at is theirs to say, so the
+                // partner's zip only fills the box on the location step.
+                let c = try await MealioCart.prepareCart(store: store, recipes: recipes, onStep: { s, _ in
                     guard let self = self, self.run == id else { return }
                     self.step = s
                 })
@@ -271,9 +293,16 @@ final class MealioFlowModel: ObservableObject {
                 self.phase = .list
             } catch {
                 guard let self = self, self.run == id else { return }
-                if (error as? MealioError)?.code == MealioError.Code.storeRequired {
+                let code = (error as? MealioError)?.code
+                if code == MealioError.Code.storeRequired {
                     // No store given and no default yet: let the user pick.
                     self.openStores(from: .error)
+                    return
+                }
+                if code == MealioError.Code.locationRequired {
+                    // Which store the user shops at is theirs to say. With no store
+                    // named there is nothing to look up, so they pick the chain first.
+                    if store != nil { self.openLocation(from: .error) } else { self.openStores(from: .error) }
                     return
                 }
                 self.fail(error)
@@ -291,6 +320,22 @@ final class MealioFlowModel: ObservableObject {
             do { list = try await MealioCart.stores() } catch { list = [] }
             self?.stores = list
         }
+    }
+
+    /// Show the zip and location step for `store`.
+    func openLocation(from: Phase) {
+        backTo = from
+        phase = .location
+    }
+
+    /// The zip the location step starts with.
+    var locationZip: String? { cart?.location?.zip ?? zip }
+
+    /// The user chose a store and it is saved: restart the cart there. Nothing
+    /// to restart if the sheet closed while the choice was saving.
+    func locationPicked() {
+        guard hosting else { return }
+        start()
     }
 
     /// Prepare the cart again at another store.
@@ -349,7 +394,7 @@ final class MealioFlowModel: ObservableObject {
 
 /// "heb" -> "H-E-B" until the server's storeName arrives.
 func mealioStoreLabel(_ id: String) -> String {
-    let known = ["heb": "H-E-B", "aldi": "ALDI", "kroger": "Kroger", "safeway": "Safeway", "wegmans": "Wegmans"]
+    let known = ["heb": "H-E-B", "aldi": "ALDI", "kroger": "Kroger", "safeway": "Safeway", "wegmans": "Wegmans", "qfc": "QFC", "frys": "Fry's", "smiths": "Smith's", "bakers": "Baker's", "marianos": "Mariano's", "pick_n_save": "Pick 'n Save", "pay_less": "Pay-Less"]
     if let k = known[id] { return k }
     return id.replacingOccurrences(of: "_", with: " ")
         .split(separator: " ")
@@ -491,6 +536,7 @@ public struct MealioCartList: View {
     private let themeOverride: MealioTheme?
     private let busy: Bool
     private let onChangeStore: (() -> Void)?
+    private let onChangeLocation: (() -> Void)?
     private let onAdd: () -> Void
     @State private var open: String?
 
@@ -500,14 +546,18 @@ public struct MealioCartList: View {
     ///   - theme: Defaults to `MealioCart.theme`.
     ///   - busy: Adding is in progress (spinner on the button, list locked).
     ///   - onChangeStore: When set, a tappable store chip sits above the list.
+    ///   - onChangeLocation: When set, a Change link sits beside the exact
+    ///     store, on a Kroger family cart.
     ///   - onAdd: The Add button was tapped. Call `cart.addToCart()`.
     public init(cart: CartSession, storeName: String? = nil, theme: MealioTheme? = nil,
-                busy: Bool = false, onChangeStore: (() -> Void)? = nil, onAdd: @escaping () -> Void) {
+                busy: Bool = false, onChangeStore: (() -> Void)? = nil,
+                onChangeLocation: (() -> Void)? = nil, onAdd: @escaping () -> Void) {
         self._cart = ObservedObject(wrappedValue: cart)
         self.storeNameOverride = storeName
         self.themeOverride = theme
         self.busy = busy
         self.onChangeStore = onChangeStore
+        self.onChangeLocation = onChangeLocation
         self.onAdd = onAdd
         // The first item needing a choice starts expanded.
         self._open = State(initialValue: cart.items.first {
@@ -522,6 +572,9 @@ public struct MealioCartList: View {
         let est = cart.estimate()
         let selectable = cart.items.filter { $0.status != .unavailable }.count
         return VStack(spacing: 0) {
+            if let location = cart.location {
+                locationRow(location)
+            }
             HStack(spacing: 10) {
                 if let change = onChangeStore {
                     Button(action: change) {
@@ -583,6 +636,32 @@ public struct MealioCartList: View {
             }
             footer(est)
         }
+    }
+
+    private func locationRow(_ location: StoreLocation) -> some View {
+        HStack(spacing: 10) {
+            Text("\(location.name), \(location.address)")
+                .font(t.font(12))
+                .foregroundColor(t.muted)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if let change = onChangeLocation {
+                Button(action: change) {
+                    Text("Change")
+                        .font(t.font(12))
+                        .foregroundColor(t.accent)
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(busy)
+                .accessibilityLabel("Store location: \(location.name). Change location")
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.bottom, 8)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("mealio-location")
     }
 
     private func footer(_ est: CartEstimate) -> some View {
@@ -1444,6 +1523,239 @@ func mealioPriceText(_ p: Product) -> String {
 func mealioListOr(_ xs: [String]) -> String {
     guard xs.count > 1, let last = xs.last else { return xs.first ?? "" }
     return "\(xs.dropLast().joined(separator: ", ")) or \(last)"
+}
+
+// MARK: - Location picker
+
+/// One choosable store or location, with a selected ring: name, a detail line,
+/// and a spinner or a word on the right. The location step and store settings
+/// draw these.
+@MainActor
+struct MealioStoreOption: View {
+    let t: MealioTheme
+    let title: String
+    var detail: String?
+    var selected = false
+    var saving = false
+    /// "Current" or "Change".
+    var trailing: String?
+    var disabled = false
+    let action: () -> Void
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: t.radius)
+        return Button(action: action) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(t.font(15, .semibold))
+                        .foregroundColor(t.text)
+                        .multilineTextAlignment(.leading)
+                    if let detail = detail {
+                        Text(detail)
+                            .font(t.font(12))
+                            .foregroundColor(t.muted)
+                            .multilineTextAlignment(.leading)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                if saving {
+                    ProgressView().progressViewStyle(.circular).tint(t.accent)
+                } else if let trailing = trailing {
+                    Text(trailing)
+                        .font(t.font(12))
+                        .foregroundColor(t.accent)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, minHeight: 56)
+            .background(shape.fill(t.background))
+            .overlay(shape.strokeBorder(selected ? t.accent : t.border, lineWidth: selected ? 2 : 1))
+            .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+    }
+}
+
+/// Which Kroger family store the user shops at: a zip box, then that chain's
+/// nearby stores. A zip the partner or an earlier pick supplied fills the box
+/// and searches at once, and the user still taps the store they want. Used in
+/// the cart sheet and in store settings.
+@MainActor
+struct MealioLocationPicker: View {
+    struct Back {
+        let label: String
+        let action: () -> Void
+    }
+
+    private struct Found {
+        let zip: String
+        let locations: [StoreLocation]
+    }
+
+    private let t: MealioTheme
+    private let store: String
+    private let storeName: String
+    private let startZip: String?
+    private let current: String?
+    private let onPicked: (StoreLocation) -> Void
+    private let back: Back
+
+    @State private var zip: String
+    @State private var found: Found?
+    @State private var busy = false
+    @State private var saving: String?
+    @State private var problem: String?
+    /// Only the latest lookup may answer.
+    @State private var ask = 0
+    @State private var searchedStartZip = false
+
+    init(t: MealioTheme, store: String, storeName: String, zip: String?, current: String?,
+         onPicked: @escaping (StoreLocation) -> Void, back: Back) {
+        self.t = t
+        self.store = store
+        self.storeName = storeName
+        self.startZip = zip
+        self.current = current
+        self.onPicked = onPicked
+        self.back = back
+        self._zip = State(initialValue: zip ?? "")
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Enter your zip code to see \(storeName) stores near you.")
+                        .font(t.font(14))
+                        .foregroundColor(t.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                    zipRow
+                    if busy {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .tint(t.accent)
+                            .frame(maxWidth: .infinity)
+                    }
+                    if let problem = problem {
+                        Text(problem)
+                            .font(t.font(15))
+                            .foregroundColor(t.text)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if let found = found {
+                        if found.locations.isEmpty {
+                            Text("No \(storeName) stores near \(found.zip). Try another zip code.")
+                                .font(t.font(14))
+                                .foregroundColor(t.muted)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        ForEach(found.locations) { l in
+                            MealioStoreOption(t: t, title: l.name, detail: l.address, selected: l.id == current,
+                                              saving: saving == l.id, trailing: l.id == current ? "Current" : nil,
+                                              disabled: saving != nil, action: { pick(l) })
+                                .accessibilityIdentifier("mealio-location-\(l.id)")
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 2)
+                .padding(.bottom, 24)
+            }
+            MealioCTA(t: t, title: back.label, quiet: true, action: back.action)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .overlay(alignment: .top) { Rectangle().fill(t.border).frame(height: 1) }
+        }
+        .onAppear {
+            guard !searchedStartZip else { return }
+            searchedStartZip = true
+            if let z = startZip, mealioIsZip(z) { find(z) }
+        }
+    }
+
+    private var zipRow: some View {
+        let shape = RoundedRectangle(cornerRadius: max(0, t.radius - 2))
+        let ready = mealioIsZip(zip) && !busy
+        return HStack(spacing: 8) {
+            ZStack(alignment: .leading) {
+                if zip.isEmpty {
+                    Text("Zip code")
+                        .font(t.font(16))
+                        .foregroundColor(t.muted)
+                        .accessibilityHidden(true)
+                }
+                TextField("", text: $zip)
+                    .font(t.font(16))
+                    .foregroundColor(t.text)
+                    .keyboardType(.numberPad)
+                    .submitLabel(.search)
+                    .onSubmit { if mealioIsZip(zip) { find(zip) } }
+                    .disableAutocorrection(true)
+                    .accessibilityLabel("Zip code")
+                    .accessibilityIdentifier("mealio-zip")
+            }
+            .padding(.horizontal, 12)
+            .frame(minHeight: 48)
+            .background(shape.fill(t.surface))
+            // Set here, not in a Binding: a Binding that drops a typed letter
+            // leaves the state unchanged and the text field keeps showing it.
+            .onChange(of: zip) { value in
+                let clean = mealioCleanZip(value)
+                if clean != value { zip = clean }
+            }
+
+            Button(action: { find(zip) }) {
+                Text("Find stores")
+                    .font(t.font(16, .bold))
+                    .foregroundColor(t.onAccent)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(.horizontal, 16)
+                    .frame(minHeight: 48)
+                    .background(shape.fill(t.accent))
+                    .opacity(ready ? 1 : 0.5)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!ready)
+            .accessibilityIdentifier("mealio-find-stores")
+        }
+    }
+
+    private func find(_ z: String) {
+        ask += 1
+        let id = ask
+        busy = true
+        problem = nil
+        found = nil
+        Task { @MainActor in
+            do {
+                let locations = try await MealioCart.storeLocations(store: store, zip: z)
+                if ask == id { found = Found(zip: z, locations: locations) }
+            } catch {
+                if ask == id { problem = (error as? MealioError)?.message ?? "Could not look up stores. Try again." }
+            }
+            if ask == id { busy = false }
+        }
+    }
+
+    private func pick(_ l: StoreLocation) {
+        saving = l.id
+        problem = nil
+        Task { @MainActor in
+            do {
+                try await MealioCart.setStore(store, locationId: l.id)
+                onPicked(l)
+            } catch {
+                problem = (error as? MealioError)?.message ?? "Could not save that store. Try again."
+                saving = nil
+            }
+        }
+    }
 }
 
 // MARK: - Store picker

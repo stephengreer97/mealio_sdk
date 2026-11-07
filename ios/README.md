@@ -58,7 +58,9 @@ That is the whole integration.
 - `store` is optional. Without it Mealio uses the user's default store, and when
   they have none yet the sheet asks them to choose one. The list also has a
   store chip ("H-E-B  Change") to switch stores.
-- `zip` is needed for Kroger family stores.
+- `zip` is optional. A Kroger family store asks the user which store they shop
+  at, and `zip` fills the zip box on that screen. Without it, they type it in.
+  The list shows the store with a Change link.
 - `label:` changes the button text (default "Add to my grocery cart");
   `disabled:` fades it.
 
@@ -116,6 +118,9 @@ Close, Done, or swipes the sheet away.
 - **Store sign-in**, inside the same sheet, when the store needs it: the store's
   own page in a visible `WKWebView` with "Sign in on H-E-B's own page. Mealio
   never sees your password."
+- **Your store**, inside the same sheet, the first time a Kroger family store is
+  used: a zip box, then that chain's nearby stores. The user taps theirs and the
+  cart starts there.
 - **The list:** every ingredient, every time. Products the user picked before
   ("Your usual") come back checked. Each card expands to show other options,
   a search box ("Search H-E-B for something else") and, for products like deli
@@ -127,6 +132,21 @@ Close, Done, or swipes the sheet away.
   (or "Prices at checkout"), one row per added item (image, product, the recipe
   line, amount, price), a collapsed "Left out this time" that opens on its own
   when something failed (with the reason in plain words), and a Done button.
+
+### Store settings
+
+Put this on your settings screen so the user can change their store or zip
+outside a cart. It is the same store list and location screens as the cart sheet:
+
+```swift
+@State private var showStore = false
+
+Button("Grocery store") { showStore = true }
+    .mealioStoreSettings(isPresented: $showStore,
+                         onChange: { preferences in /* called each time the store changes */ })
+```
+
+Or put `MealioStoreSettings(onChange:)` in a `.sheet` of your own.
 
 ### Theme
 
@@ -230,6 +250,19 @@ let session = try await MealioCart.prepareCart(store: "heb", recipe: recipe, zip
                                                onStep: { step, _ in progress = step })
 ```
 
+`prepareCart` fails with `location_required`, before any sign-in, when a Kroger
+family store has no saved location for the user. Ask them, or pass `zip` to use
+the nearest store instead of asking. The drop-in always asks. The same calls
+build your own store screen:
+
+```swift
+let nearby = try await MealioCart.storeLocations(store: "kroger", zip: "75202")   // [StoreLocation], nearest first
+try await MealioCart.setStore("kroger", locationId: nearby[0].id)                 // needed the first time
+try await MealioCart.setStore("heb")                                              // not a Kroger family store
+let saved = try await MealioCart.storePreferences()                               // defaultStore, location
+session.location                                                                  // the exact store on a Kroger family cart
+```
+
 `onStep` reports a `Step`: `.connecting`, `.checkingSignIn`, `.signingIn`,
 `.searching`, `.adding`. While no cart flow sheet is open, a store sign-in is
 presented in a sheet of its own.
@@ -268,7 +301,7 @@ chosen is held out of `selections()` and `estimate()` until one is.
 `select` throws `unknown_item` / `unknown_product` if the key or product was not
 part of the cart.
 
-`MealioCartList(cart:storeName:theme:busy:onChangeStore:onAdd:)` is the list
+`MealioCartList(cart:storeName:theme:busy:onChangeStore:onChangeLocation:onAdd:)` is the list
 screen on its own, for hosting in a sheet of yours. `MealioCartSheet` (the 0.1
 sheet) still works and now draws that list.
 
@@ -335,6 +368,7 @@ All errors are `MealioError` with a `code` and a readable `message`:
 | `unsupported` | An instruction this SDK version does not know (update the SDK) |
 | `server` | Mealio answered with an error, or something the SDK could not read |
 | `store_required` | No store was given and the user has no default store yet (the drop-in shows its store picker) |
+| `location_required` | A Kroger family store has no saved location for the user (the drop-in shows its location step) |
 | `not_configured` | `MealioCart.configure` was not called |
 | `bad_recipe` | `prepareCart` was given an empty `recipes` list |
 | `too_many_recipes` | `prepareCart` was given more than 10 recipes |

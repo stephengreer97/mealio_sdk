@@ -198,6 +198,25 @@ SDKs send a single recipe as `recipe`, so they keep working against a server
 from before multi-recipe. The `cart.completed` webhook adds `recipeIds`
 (`recipeId` is the first).
 
+## Kroger family locations
+
+A Kroger family chain has many stores, and prices and stock differ by store, so
+the user says which one they shop at. One is saved per chain.
+
+| Call | Body | Answer |
+|---|---|---|
+| `POST /api/v1/sdk/locations` | `{ store, zip }` | `{ locations: [{ id, name, address, zip }] }`, that chain's stores, nearest first, at most 10 |
+| `POST /api/v1/sdk/preferences` | `{}` | `{ defaultStore, location }` |
+| `POST /api/v1/sdk/preferences` | `{ store, locationId? }` | The same, after changing it. `locationId` moves the user to that store |
+
+`POST /api/v1/sdk/carts` for a chain with no saved store answers 409
+`location_required`. It writes nothing, and it comes before Kroger's sign-in, so
+nobody signs in only to be asked a question. A prepared cart then carries
+`cart.location`, and the list shows it with a way to change it.
+
+The drop-in sends no `zip` to prepare. Sent there, it skips the question and
+saves the nearest store of that chain, for partners with their own screens.
+
 ## Warm-up
 
 `POST /api/v1/sdk/warm` with `{ "store"?: string }` runs the login check ahead
@@ -376,4 +395,5 @@ then switching the server's `kid`.
 | `session_expired` | The SDK session token expired; get a new one from your server |
 | `network` | Could not reach Mealio |
 | `unsupported` | An instruction `op` this SDK does not know |
+| `location_required` | A Kroger family store with no store chosen yet. The drop-in asks the user |
 | `bad_weight` | A selection's `weightLb` was not a number above 0 and at most 20 |

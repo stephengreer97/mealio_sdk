@@ -193,6 +193,7 @@ Every failure is a `MealioException(code, message)`.
 | `blocked` | An instruction broke the allowlist |
 | `store_unavailable` | The server says the store cannot be reached now |
 | `login_cancelled` | The user closed the login sheet |
+| `location_required` | A Kroger family store with no store chosen yet. The drop-in asks the user |
 | `store_required` | No store was given and the user has no default store yet (the sheet shows the store picker) |
 | `session_expired` | The SDK session token expired; get a new one from your server |
 | `network` | Could not reach Mealio |
@@ -239,3 +240,19 @@ copy it again after running `node protocol/make-vectors.mjs`.
 `test/fixtures/guard_script.js` and `bridge_shim.js` are the exact text
 `packages/core/src/guard.ts` produces; the tests check the Dart strings
 against them byte for byte.
+
+## Kroger family stores
+
+Each user chooses their own store. The drop-in asks for a zip, shows nearby
+stores for that chain and saves the pick, one per chain. The list has a Change
+link. Passing `zip` only fills in the zip box.
+
+To change it outside a cart, for example from your settings screen:
+
+```dart
+await MealioCart.instance.openStoreSettings(context);
+```
+
+On your own screens, a cart with no store chosen fails with `location_required`
+before any sign-in. Use `storeLocations(store, zip)`, then
+`setStore(store, locationId: id)`, and prepare again.

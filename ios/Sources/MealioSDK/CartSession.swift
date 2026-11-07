@@ -102,6 +102,16 @@ func mealioListAnd(_ xs: [String]) -> String {
     return "\(xs.dropLast().joined(separator: ", ")) and \(last)"
 }
 
+/// True for a 5-digit US zip, the only thing the store lookup takes.
+func mealioIsZip(_ z: String) -> Bool {
+    z.utf8.count == 5 && z.utf8.allSatisfy { (48...57).contains($0) }
+}
+
+/// What the zip box keeps of what was typed: digits, at most five.
+func mealioCleanZip(_ z: String) -> String {
+    String(z.filter { $0.isASCII && $0.isNumber }.prefix(5))
+}
+
 @MainActor
 public final class CartSession: ObservableObject {
     struct Pick: Equatable {
@@ -135,6 +145,8 @@ public final class CartSession: ObservableObject {
     public var store: String { cart.store }
     /// Display name, e.g. "H-E-B", when the server sent one.
     public var storeName: String? { cart.storeName }
+    /// The exact store, on a Kroger family cart. The user can change it.
+    public var location: StoreLocation? { cart.location }
     /// Every item, in recipe order (older servers: rebuilt from the 0.1 groupings).
     public var items: [CartItem] { cart.items }
     /// The recipes this cart was made from. Older servers: none listed.

@@ -231,6 +231,120 @@ final class ClientTests: XCTestCase {
         XCTAssertEqual(other.allowlist.hostsFor("heb")?.hosts, ["heb.com"])
     }
 
+    // MARK: store locations
+
+    private static let oak: JSONValue = ["id": "k2", "name": "Kroger Oak", "address": "3 Oak St, Dallas, TX 75202", "zip": "75202"]
+
+    // Same as the TS "lists stores near a zip" test.
+    @MainActor
+    func testStoreLocationsListsStoresNearAZip() async throws {
+        let rec = Recorder()
+        StubURLProtocol.handler = { req, body in
+            rec.record(req, body: body)
+            return (200, jsonData(["locations": [ClientTests.oak, ["id": "k3", "name": "Kroger Elm", "address": "4 Elm St", "zip": nil]]]))
+        }
+        let client = makeClient(keys: TestSigner.keys)
+        let found = try await client.storeLocations(store: "kroger", zip: "75202")
+        XCTAssertEqual(found, [
+            StoreLocation(id: "k2", name: "Kroger Oak", address: "3 Oak St, Dallas, TX 75202", zip: "75202"),
+            StoreLocation(id: "k3", name: "Kroger Elm", address: "4 Elm St"),
+        ])
+        XCTAssertEqual(rec.paths, ["/api/v1/sdk/locations"])
+        XCTAssertEqual(rec.requests.first?.httpMethod, "POST")
+        XCTAssertEqual(rec.requests.first?.value(forHTTPHeaderField: "Authorization"), "Bearer tok")
+        XCTAssertEqual(rec.body("/api/v1/sdk/locations"), ["store": "kroger", "zip": "75202"])
+    }
+
+    @MainActor
+    func testStoreLocationsWithNoListIsEmpty() async throws {
+        StubURLProtocol.handler = { _, _ in (200, jsonData([:])) }
+        let client = makeClient(keys: TestSigner.keys)
+        let found = try await client.storeLocations(store: "kroger", zip: "75202")
+        XCTAssertEqual(found, [])
+    }
+
+    // Same as the TS test: {} reads, {store, locationId?} writes.
+    @MainActor
+    func testPreferencesReadsAndWrites() async throws {
+        let rec = Recorder()
+        var seen: [JSONValue] = []
+        StubURLProtocol.handler = { req, body in
+            rec.record(req, body: body)
+            return (200, jsonData(["defaultStore": "kroger", "location": ClientTests.oak]))
+        }
+        let client = makeClient(keys: TestSigner.keys)
+        let path = "/api/v1/sdk/preferences"
+
+        let read = try await client.storePreferences()
+        XCTAssertEqual(read.defaultStore, "kroger")
+        XCTAssertEqual(read.location?.id, "k2")
+        seen.append(try XCTUnwrap(rec.body(path)))
+
+        try await client.setStore("kroger", locationId: "k2")
+        seen.append(try XCTUnwrap(rec.body(path)))
+
+        try await client.setStore("heb")
+        seen.append(try XCTUnwrap(rec.body(path)))
+
+        XCTAssertEqual(seen, [[:], ["store": "kroger", "locationId": "k2"], ["store": "heb"]])
+    }
+
+    @MainActor
+    func testPreferencesWithNoStoreYet() async throws {
+        StubURLProtocol.handler = { _, _ in (200, jsonData(["defaultStore": nil, "location": nil])) }
+        let client = makeClient(keys: TestSigner.keys)
+        let read = try await client.storePreferences()
+        XCTAssertEqual(read, StorePreferences())
+    }
+
+    // Same as the TS "a cart with no store chosen fails with location_required" test.
+    @MainActor
+    func testLocationRequiredComesBackAsItsCode() async throws {
+        StubURLProtocol.handler = { _, _ in
+            (409, jsonData(["error": ["code": "location_required", "message": "Choose"]]))
+        }
+        let client = makeClient(keys: TestSigner.keys)
+        do {
+            _ = try await client.prepareCart(store: "kroger", recipe: Recipe(id: "r1", ingredients: []))
+            XCTFail("expected location_required")
+        } catch let e as MealioError {
+            XCTAssertEqual(e.code, MealioError.Code.locationRequired)
+        }
+    }
+
+    func testPreparedCartLocationIsOptional() throws {
+        // A server from before store locations leaves it out.
+        let old = try JSONDecoder().decode(PreparedCart.self, from: Data(ClientTests.newCartJSON.utf8))
+        XCTAssertNil(old.location)
+
+        let plain = try JSONDecoder().decode(PreparedCart.self, from: Data(#"{"cartId":"c","store":"heb","location":null,"items":[]}"#.utf8))
+        XCTAssertNil(plain.location)
+
+        let kroger = try JSONDecoder().decode(PreparedCart.self, from: Data(#"{"cartId":"c","store":"kroger","location":{"id":"k2","name":"Kroger Oak","address":"3 Oak St","zip":null},"items":[]}"#.utf8))
+        XCTAssertEqual(kroger.location, StoreLocation(id: "k2", name: "Kroger Oak", address: "3 Oak St"))
+    }
+
+    @MainActor
+    func testCartSessionCarriesTheLocation() async throws {
+        var cart = try XCTUnwrap(JSONValue.parse(ClientTests.newCartJSON)?.objectValue)
+        cart["location"] = ClientTests.oak
+        serveDone(.object(cart), rec: Recorder())
+        let client = makeClient(keys: TestSigner.keys)
+        let session = try await client.prepareCart(recipe: Recipe(id: "r1", ingredients: []))
+        XCTAssertEqual(session.location?.name, "Kroger Oak")
+    }
+
+    func testZipBox() {
+        XCTAssertTrue(mealioIsZip("75202"))
+        XCTAssertFalse(mealioIsZip("7520"))
+        XCTAssertFalse(mealioIsZip("752021"))
+        XCTAssertFalse(mealioIsZip("7520a"))
+        XCTAssertFalse(mealioIsZip(""))
+        XCTAssertEqual(mealioCleanZip("75-202 9"), "75202")
+        XCTAssertEqual(mealioCleanZip("abc"), "")
+        XCTAssertEqual(mealioCleanZip("\u{0663}12"), "12")
+    }
+
     // MARK: stepOf
 
     func testStepOfMapsInstructionIdsToProgressSteps() {

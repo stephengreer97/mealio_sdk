@@ -33,4 +33,6 @@ export 'src/webview_host.dart' show MealioLoginView, WebViewHost, bridgeChannelN
 export 'src/widgets/cart_flow.dart';
 export 'src/widgets/cart_list.dart';
 export 'src/widgets/cart_sheet.dart';
+export 'src/widgets/location_picker.dart' show LoadLocations, SaveStore;
 export 'src/widgets/mealio_scope.dart';
+export 'src/widgets/store_settings.dart';

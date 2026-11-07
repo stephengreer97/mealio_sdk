@@ -1,3 +1,20 @@
+## Unreleased
+
+- Kroger family stores: the user chooses their exact store. When a cart answers
+  `location_required`, the sheet asks for a zip and lists that chain's stores
+  (the store picker comes first if no store is known). The list shows the
+  chosen store with a Change link.
+- `MealioStoreSettings.show(context)`, also
+  `MealioCart.instance.openStoreSettings(context)`: a sheet where the user
+  changes their store or zip. Put it on your settings screen.
+- New: `MealioCart.storeLocations`, `storePreferences` and `setStore`, the same
+  on `MealioClient`; `StoreLocation`, `StorePreferences`,
+  `PreparedCart.location`, `CartSession.location`,
+  `MealioCartList.onChangeLocation` and
+  `MealioErrorCode.locationRequired`.
+- `MealioCartFlow` and `MealioCartButton` no longer send `zip` to
+  `prepareCart`. The parameter stays and fills the zip box.
+
 ## 0.4.2
 
 - No Flutter changes. React Native's sign-out now uses the maintained

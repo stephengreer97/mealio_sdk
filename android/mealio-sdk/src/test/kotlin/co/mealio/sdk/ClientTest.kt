@@ -317,6 +317,71 @@ class ClientTest {
         assertTrue(body!!.isNull("store"))
     }
 
+    private val oak = JSONObject().put("id", "k2").put("name", "Kroger Oak")
+        .put("address", "3 Oak St, Dallas, TX 75202").put("zip", "75202")
+    private val oakLocation = StoreLocation("k2", "Kroger Oak", "3 Oak St, Dallas, TX 75202", "75202")
+
+    @Test
+    fun listsStoresNearAZip(): Unit = runBlocking {
+        var body: JSONObject? = null
+        val transport = FakeTransport { _, _, b -> body = b; ok(JSONObject().put("locations", JSONArray().put(oak))) }
+        assertEquals(listOf(oakLocation), MealioClient(config(), FakeHost(), transport).storeLocations("kroger", "75202"))
+        assertEquals(listOf("/api/v1/sdk/locations"), transport.seen)
+        assertEquals(2, body!!.length())
+        assertEquals("kroger", body!!.getString("store"))
+        assertEquals("75202", body!!.getString("zip"))
+
+        val none = MealioClient(config(), FakeHost(), FakeTransport { _, _, _ -> ok(JSONObject()) })
+        assertTrue(none.storeLocations("kroger", "75202").isEmpty())
+    }
+
+    @Test
+    fun readsAndSetsTheStore(): Unit = runBlocking {
+        val bodies = mutableListOf<JSONObject>()
+        val transport = FakeTransport { _, _, b ->
+            bodies.add(b)
+            ok(JSONObject().put("defaultStore", "kroger").put("location", oak))
+        }
+        val client = MealioClient(config(), FakeHost(), transport)
+        assertEquals(StorePreferences("kroger", oakLocation), client.storePreferences())
+        client.setStore("kroger", "k2")
+        client.setStore("heb")
+        assertEquals(List(3) { "/api/v1/sdk/preferences" }, transport.seen)
+        assertEquals(0, bodies[0].length())
+        assertEquals("k2", bodies[1].getString("locationId"))
+        assertEquals("kroger", bodies[1].getString("store"))
+        assertEquals("heb", bodies[2].getString("store"))
+        assertFalse(bodies[2].has("locationId"))
+    }
+
+    @Test
+    fun noDefaultStoreReadsAsNulls(): Unit = runBlocking {
+        val transport = FakeTransport { _, _, _ -> ok(JSONObject().put("defaultStore", JSONObject.NULL).put("location", JSONObject.NULL)) }
+        assertEquals(StorePreferences(null, null), MealioClient(config(), FakeHost(), transport).storePreferences())
+    }
+
+    @Test
+    fun locationRequiredFailsBeforeAnySignIn(): Unit = runBlocking {
+        val transport = FakeTransport { _, _, _ ->
+            HttpResponse(409, JSONObject().put("error", JSONObject().put("code", "location_required").put("message", "Choose")).toString())
+        }
+        val host = FakeHost()
+        val client = MealioClient(config(), host, transport)
+        assertEquals("location_required", code { client.prepareCart("kroger", Recipe("r", listOf(RecipeIngredient("garlic")))) })
+        assertEquals(listOf("/api/v1/sdk/carts"), transport.seen)
+        assertTrue(host.calls.isEmpty())
+    }
+
+    @Test
+    fun cartCarriesItsLocationWhenTheServerSendsOne() {
+        val base = JSONObject().put("cartId", "c").put("store", "kroger")
+        assertEquals(null, PreparedCart.fromJson(base).location)
+        assertEquals(null, PreparedCart.fromJson(JSONObject(base.toString()).put("location", JSONObject.NULL)).location)
+        assertEquals(oakLocation, PreparedCart.fromJson(JSONObject(base.toString()).put("location", oak)).location)
+        val noZip = JSONObject(oak.toString()).put("zip", JSONObject.NULL)
+        assertEquals(null, StoreLocation.fromJson(noZip).zip)
+    }
+
     @Test
     fun addResultCarriesVerified() {
         val base = JSONObject().put("cartId", "c").put("store", "heb").put("added", JSONArray()).put("skipped", JSONArray())

@@ -16,9 +16,11 @@ import '../theme.dart';
 import '../webview_host.dart';
 import 'cart_list.dart';
 import 'flow_parts.dart';
+import 'location_picker.dart';
 
 /// Starts a cart for one recipe. The default is
-/// `MealioCart.instance.prepareCart`.
+/// `MealioCart.instance.prepareCart`. The drop-in passes no `zip`: the user
+/// chooses their store.
 typedef PrepareCart = Future<CartSession> Function({
   String? store,
   required Recipe recipe,
@@ -27,7 +29,8 @@ typedef PrepareCart = Future<CartSession> Function({
 });
 
 /// Starts a cart for one or more recipes. The default is
-/// `MealioCart.instance.prepareCart`, which also fits this type.
+/// `MealioCart.instance.prepareCart`, which also fits this type. The drop-in
+/// passes no `zip`: the user chooses their store.
 typedef PrepareCarts = Future<CartSession> Function({
   String? store,
   required List<Recipe> recipes,
@@ -42,7 +45,7 @@ List<Recipe> _recipeList(Recipe? recipe, List<Recipe>? recipes) =>
 /// Lists the stores. The default is `MealioCart.instance.stores`.
 typedef LoadStores = Future<List<StoreInfo>> Function();
 
-enum _Phase { loading, list, adding, done, error, stores }
+enum _Phase { loading, list, adding, done, error, stores, location }
 
 /// The whole flow in one sheet. Use [MealioCartFlow.show], or
 /// [MealioCartButton] which calls it.
@@ -63,6 +66,8 @@ class MealioCartFlow extends StatefulWidget {
     this.prepareCart,
     this.prepareCarts,
     this.loadStores,
+    this.loadLocations,
+    this.saveStore,
   }) : assert(recipe != null || recipes != null, 'Pass recipe or recipes.');
 
   /// One recipe. Pass this or [recipes].
@@ -78,7 +83,8 @@ class MealioCartFlow extends StatefulWidget {
   /// first time. The user can change store from the sheet either way.
   final String? store;
 
-  /// 5-digit zip. Needed for Kroger family stores.
+  /// 5-digit zip, if you know it. Fills the zip box when a Kroger family store
+  /// asks the user which store they shop at. Without it, they type it in.
   final String? zip;
 
   /// The user closed the sheet. `result` is null when nothing was added.
@@ -105,6 +111,13 @@ class MealioCartFlow extends StatefulWidget {
   /// Replaces `MealioCart.instance.stores`, for tests and custom clients.
   final LoadStores? loadStores;
 
+  /// Replaces `MealioCart.instance.storeLocations`, for tests and custom
+  /// clients.
+  final LoadLocations? loadLocations;
+
+  /// Replaces `MealioCart.instance.setStore`, for tests and custom clients.
+  final SaveStore? saveStore;
+
   /// Shows the flow over the app. Resolves with the result when something was
   /// added, else null. It never opens the store's cart. Pass `recipe` for
   /// one recipe or `recipes` for several in one cart.
@@ -120,6 +133,8 @@ class MealioCartFlow extends StatefulWidget {
     PrepareCart? prepareCart,
     PrepareCarts? prepareCarts,
     LoadStores? loadStores,
+    LoadLocations? loadLocations,
+    SaveStore? saveStore,
   }) async {
     assert(recipe != null || recipes != null, 'Pass recipe or recipes.');
     final t = theme ?? MealioTheme.of(context);
@@ -135,6 +150,8 @@ class MealioCartFlow extends StatefulWidget {
           prepareCart: prepareCart,
           prepareCarts: prepareCarts,
           loadStores: loadStores,
+          loadLocations: loadLocations,
+          saveStore: saveStore,
           onAdded: (AddResult a) {
             added = a;
             onAdded?.call(a);
@@ -213,6 +230,13 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
     if (mounted) setState(() => _stores = list);
   }
 
+  void _openLocation(_Phase from) {
+    setState(() {
+      _backTo = from;
+      _phase = _Phase.location;
+    });
+  }
+
   void _pickStore(String id) {
     _store = id;
     unawaited(_start(id));
@@ -238,11 +262,11 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
       final one = widget.prepareCart;
       final CartSession c;
       if (many != null) {
-        c = await many(store: storeId, recipes: recipes, zip: widget.zip, onStep: onStep);
+        c = await many(store: storeId, recipes: recipes, onStep: onStep);
       } else if (one != null && recipes.length == 1) {
-        c = await one(store: storeId, recipe: recipes.first, zip: widget.zip, onStep: onStep);
+        c = await one(store: storeId, recipe: recipes.first, onStep: onStep);
       } else {
-        c = await MealioCart.instance.prepareCart(store: storeId, recipes: recipes, zip: widget.zip, onStep: onStep);
+        c = await MealioCart.instance.prepareCart(store: storeId, recipes: recipes, onStep: onStep);
       }
       if (_run != id || !mounted) return;
       setState(() {
@@ -254,6 +278,17 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
       if (_run != id || !mounted) return;
       if (e is MealioException && e.code == MealioErrorCode.storeRequired) {
         unawaited(_openStores(_Phase.error));
+        return;
+      }
+      if (e is MealioException && e.code == MealioErrorCode.locationRequired) {
+        // Which store the user shops at is theirs to say. With no store named
+        // there is nothing to look up, so they pick the chain first.
+        if (storeId != null) {
+          _store = storeId;
+          _openLocation(_Phase.error);
+        } else {
+          unawaited(_openStores(_Phase.error));
+        }
         return;
       }
       _fail(e, 'Something went wrong.');
@@ -313,6 +348,8 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
         return 'Something went wrong';
       case _Phase.stores:
         return 'Choose your store';
+      case _Phase.location:
+        return 'Find your $storeName';
       case _Phase.list:
       case _Phase.adding:
         return 'Your $storeName list';
@@ -363,6 +400,24 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
         onPick: _pickStore,
         onBack: cart != null && _backTo == _Phase.list ? () => setState(() => _phase = _Phase.list) : null,
       );
+    } else if (_phase == _Phase.location && store != null) {
+      final toList = cart != null && _backTo == _Phase.list;
+      body = LocationPicker(
+        theme: t,
+        store: store,
+        storeName: storeName,
+        zip: cart?.location?.zip ?? widget.zip,
+        current: cart?.location?.id,
+        loadLocations: widget.loadLocations,
+        saveStore: widget.saveStore,
+        onPicked: (StoreLocation _) {
+          if (mounted) unawaited(_start(store));
+        },
+        backLabel: toList ? 'Back to your list' : 'Choose a different store',
+        onBack: toList
+            ? () => setState(() => _phase = _Phase.list)
+            : () => unawaited(_openStores(_Phase.error)),
+      );
     } else if ((_phase == _Phase.list || _phase == _Phase.adding) && cart != null) {
       body = MealioCartList(
         session: cart,
@@ -370,6 +425,7 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
         busy: _phase == _Phase.adding,
         onAdd: _add,
         onChangeStore: () => unawaited(_openStores(_Phase.list)),
+        onChangeLocation: () => _openLocation(_Phase.list),
         theme: t,
       );
     } else if (_phase == _Phase.done && result != null && cart != null) {
@@ -511,6 +567,9 @@ class MealioCartButton extends StatefulWidget {
   /// Store id, e.g. "heb". Optional: without it the user's default store is
   /// used, and the sheet asks them to pick one the first time.
   final String? store;
+
+  /// 5-digit zip, if you know it. Fills the zip box when a Kroger family store
+  /// asks the user which store they shop at. Without it, they type it in.
   final String? zip;
 
   /// Defaults to "Add to my grocery cart".

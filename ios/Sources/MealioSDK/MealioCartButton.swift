@@ -22,7 +22,9 @@ public struct MealioCartButton: View {
     ///   - recipe: The recipe to cart.
     ///   - store: Store id, e.g. "heb". Optional: without it the user's
     ///     default store is used, or they pick one in the sheet.
-    ///   - zip: 5-digit zip. Needed for Kroger family stores.
+    ///   - zip: 5-digit zip, if you know it. Fills the zip box when a Kroger
+    ///     family store asks the user which store they shop at. Without it,
+    ///     they type it in.
     ///   - label: Defaults to "Add to my grocery cart".
     ///   - disabled: Fades the button and ignores taps.
     ///   - onAdded: Called after the cart is filled, before the user taps Done.

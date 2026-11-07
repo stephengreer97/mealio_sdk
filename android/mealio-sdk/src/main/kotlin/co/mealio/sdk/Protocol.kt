@@ -459,6 +459,8 @@ data class PreparedCart(
     val storeName: String? = null,
     /** The recipes this cart was made from, in the order they were sent. Empty from older servers. */
     val recipes: List<CartRecipe> = emptyList(),
+    /** The exact store, on a Kroger family cart. The user can change it. Null from older servers. */
+    val location: StoreLocation? = null,
 ) {
     companion object {
         fun fromJson(o: JSONObject): PreparedCart {
@@ -477,8 +479,31 @@ data class PreparedCart(
                 items = items,
                 storeName = o.str("storeName"),
                 recipes = o.arr("recipes")?.objects()?.map { CartRecipe.fromJson(it) } ?: emptyList(),
+                location = o.obj("location")?.let { StoreLocation.fromJson(it) },
             )
         }
+    }
+}
+
+/** One physical store of a Kroger family chain. */
+data class StoreLocation(
+    val id: String,
+    val name: String,
+    /** "123 Main St, Dallas, TX 75201". */
+    val address: String,
+    val zip: String? = null,
+) {
+    companion object {
+        fun fromJson(o: JSONObject): StoreLocation =
+            StoreLocation(o.str("id") ?: "", o.str("name") ?: "", o.str("address") ?: "", o.str("zip"))
+    }
+}
+
+/** The store carts use by default. `location` is set for a Kroger family store. */
+data class StorePreferences(val defaultStore: String?, val location: StoreLocation?) {
+    companion object {
+        fun fromJson(o: JSONObject): StorePreferences =
+            StorePreferences(o.str("defaultStore"), o.obj("location")?.let { StoreLocation.fromJson(it) })
     }
 }
 

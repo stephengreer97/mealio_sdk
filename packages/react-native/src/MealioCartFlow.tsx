@@ -9,7 +9,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator, Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View,
 } from 'react-native';
-import type { AddedItem, AddResult, CartItem, CartSession, MealioError, Product, Recipe, Step, StoreInfo } from '@mealio/sdk-core';
+import type { AddedItem, AddResult, CartItem, CartSession, MealioError, Product, Recipe, Step, StoreInfo, StoreLocation } from '@mealio/sdk-core';
 import { useMealio, useMealioInternal } from './MealioProvider';
 import { money, type MealioTheme } from './theme';
 
@@ -29,7 +29,10 @@ export interface MealioCartFlowProps {
    * first time. The user can change store from the sheet either way.
    */
   store?: string | null;
-  /** 5-digit zip. Needed for Kroger family stores. */
+  /**
+   * 5-digit zip, if you know it. Fills the zip box when a Kroger family store
+   * asks the user which store they shop at. Without it, they type it in.
+   */
   zip?: string | null;
   /** Called when the sheet closes. `result` is null when nothing was added. */
   onClose: (result: AddResult | null) => void;
@@ -38,7 +41,7 @@ export interface MealioCartFlowProps {
   onError?: (e: MealioError | Error) => void;
 }
 
-type Phase = 'loading' | 'list' | 'adding' | 'done' | 'error' | 'stores';
+type Phase = 'loading' | 'list' | 'adding' | 'done' | 'error' | 'stores' | 'location';
 
 export function MealioCartFlow(props: MealioCartFlowProps) {
   const { visible } = props;
@@ -75,22 +78,30 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
     }
   }, [stores, mealio]);
 
+  const openLocation = useCallback((from: Phase) => { backTo.current = from; setPhase('location'); }, []);
+
   const start = useCallback(async (storeId: string | null) => {
     const id = ++run.current;
     setPhase('loading'); setStep('connecting'); setCart(null); setResult(null); setError(null);
     try {
-      const c = await mealio.prepareCart({ store: storeId, recipes, zip: props.zip }, { onStep: (s) => run.current === id && setStep(s) });
+      const c = await mealio.prepareCart({ store: storeId, recipes }, { onStep: (s) => run.current === id && setStep(s) });
       if (run.current !== id) return;
       setStore(c.store); setCart(c); setPhase('list');
     } catch (e: any) {
       if (run.current !== id) return;
       if (e?.code === 'store_required') { openStores('error'); return; }
+      if (e?.code === 'location_required') {
+        // Which store the user shops at is theirs to say. With no store named
+        // there is nothing to look up, so they pick the chain first.
+        if (storeId) { setStore(storeId); openLocation('error'); } else openStores('error');
+        return;
+      }
       setError({ code: e?.code || 'error', message: e?.message || 'Something went wrong.' });
       setPhase('error');
       props.onError?.(e);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.zip, recipes]);
+  }, [recipes]);
 
   useEffect(() => { if (visible) start(props.store ?? null); else run.current += 1; }, [visible]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -135,9 +146,15 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
           ) : phase === 'stores' ? (
             <StorePicker t={t} stores={stores} current={store} onPick={(id) => { setStore(id); start(id); }}
               onBack={cart && backTo.current === 'list' ? () => setPhase('list') : null} />
+          ) : phase === 'location' && store ? (
+            <LocationPicker t={t} store={store} storeName={storeName} zip={cart?.cart.location?.zip ?? props.zip ?? null} current={cart?.cart.location?.id ?? null}
+              onPicked={() => start(store)}
+              back={cart && backTo.current === 'list'
+                ? { label: 'Back to your list', onPress: () => setPhase('list') }
+                : { label: 'Choose a different store', onPress: () => openStores('error') }} />
           ) : (phase === 'list' || phase === 'adding') && cart ? (
             <CartList t={t} cart={cart} storeName={storeName} busy={phase === 'adding'} onChange={bump} onAdd={add}
-              onChangeStore={() => openStores('list')} />
+              onChangeStore={() => openStores('list')} onChangeLocation={() => openLocation('list')} />
           ) : phase === 'done' && result && cart ? (
             <Done t={t} cart={cart} result={result} storeName={storeName} onDone={close} />
           ) : (
@@ -154,17 +171,18 @@ function headerTitle(phase: Phase, storeName: string): string {
   if (phase === 'loading') return storeName === 'your store' ? 'Getting your cart ready' : `Getting your ${storeName} cart ready`;
   if (phase === 'error') return 'Something went wrong';
   if (phase === 'stores') return 'Choose your store';
+  if (phase === 'location') return `Find your ${storeName}`;
   return `Your ${storeName} list`;
 }
 
 function storeLabel(id: string): string {
-  const known: Record<string, string> = { heb: 'H-E-B', aldi: 'ALDI', kroger: 'Kroger', safeway: 'Safeway', wegmans: 'Wegmans' };
+  const known: Record<string, string> = { heb: 'H-E-B', aldi: 'ALDI', kroger: 'Kroger', safeway: 'Safeway', wegmans: 'Wegmans', qfc: "QFC", frys: "Fry's", smiths: "Smith's", bakers: "Baker's", marianos: "Mariano's", pick_n_save: "Pick 'n Save", pay_less: "Pay-Less" };
   return known[id] || id.replace(/_/g, ' ').replace(/\b\w/g, (m) => m.toUpperCase());
 }
 
 // ── pieces ─────────────────────────────────────────────────────────────
 
-function Header({ t, recipeTitle, title, onClose }: { t: MealioTheme; recipeTitle?: string; title: string; onClose: () => void }) {
+export function Header({ t, recipeTitle, title, onClose }: { t: MealioTheme; recipeTitle?: string; title: string; onClose: () => void }) {
   const s = styles(t);
   return (
     <View style={s.header}>
@@ -214,16 +232,29 @@ export interface CartListProps {
   onAdd: () => void;
   /** Shows a tappable store chip. */
   onChangeStore?: (() => void) | null;
+  /** Shows a Change link beside the exact store, on a Kroger family cart. */
+  onChangeLocation?: (() => void) | null;
 }
 
 /** The list screen on its own, for partners who host it in their own sheet. */
-export function CartList({ t, cart, storeName, busy, onChange, onAdd, onChangeStore }: CartListProps) {
+export function CartList({ t, cart, storeName, busy, onChange, onAdd, onChangeStore, onChangeLocation }: CartListProps) {
   const s = styles(t);
   const [open, setOpen] = useState<string | null>(() => cart.items.find((i) => i.status === 'choose' || i.status === 'remembered_unavailable')?.key ?? null);
   const est = cart.estimate();
   const selectable = cart.items.filter((i) => i.status !== 'unavailable');
+  const location = cart.cart.location;
   return (
     <View style={s.flex}>
+      {location ? (
+        <View style={s.locationRow} testID="mealio-location">
+          <Text style={[s.small, s.flex]} numberOfLines={2}>{location.name}, {location.address}</Text>
+          {onChangeLocation ? (
+            <Pressable onPress={onChangeLocation} disabled={busy} accessibilityRole="button" accessibilityLabel={`Store location: ${location.name}. Change location`} hitSlop={8}>
+              <Text style={[s.small, { color: t.accent }]}>Change</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      ) : null}
       <View style={s.chipRow}>
         {onChangeStore ? (
           <Pressable onPress={onChangeStore} disabled={busy} accessibilityRole="button" accessibilityLabel={`Store: ${storeName}. Change store`} style={s.chip}>
@@ -620,7 +651,94 @@ function reasonText(r: string): string {
   return 'the store refused it';
 }
 
-function StorePicker({ t, stores, current, onPick, onBack }: {
+const isZip = (z: string) => /^\d{5}$/.test(z);
+
+/**
+ * Which Kroger family store the user shops at: a zip box, then that chain's
+ * nearby stores. A zip the partner or an earlier pick supplied fills the box
+ * and searches at once, and the user still taps the store they want. Used in
+ * the cart sheet and in store settings.
+ */
+export function LocationPicker({ t, store, storeName, zip: startZip, current, onPicked, back }: {
+  t: MealioTheme; store: string; storeName: string; zip: string | null; current: string | null;
+  onPicked: (location: StoreLocation) => void;
+  back: { label: string; onPress: () => void };
+}) {
+  const s = styles(t);
+  const mealio = useMealio();
+  const [zip, setZip] = useState(startZip ?? '');
+  const [found, setFound] = useState<{ zip: string; locations: StoreLocation[] } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [saving, setSaving] = useState<string | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+  const ask = useRef(0);
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+
+  const find = useCallback(async (z: string) => {
+    const id = ++ask.current;
+    setBusy(true); setProblem(null); setFound(null);
+    try {
+      const locations = await mealio.storeLocations(store, z);
+      if (ask.current === id) setFound({ zip: z, locations });
+    } catch (e: any) {
+      if (ask.current === id) setProblem(e?.message || 'Could not look up stores. Try again.');
+    } finally {
+      if (ask.current === id) setBusy(false);
+    }
+  }, [mealio, store]);
+
+  useEffect(() => { if (startZip && isZip(startZip)) find(startZip); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const pick = useCallback(async (l: StoreLocation) => {
+    setSaving(l.id); setProblem(null);
+    try {
+      await mealio.setStore(store, l.id);
+      // Closed while saving: the store is saved, and no cart should start.
+      if (mounted.current) onPicked(l);
+    } catch (e: any) {
+      if (!mounted.current) return;
+      setProblem(e?.message || 'Could not save that store. Try again.');
+      setSaving(null);
+    }
+  }, [mealio, store, onPicked]);
+
+  return (
+    <View style={s.flex}>
+      <ScrollView style={s.flex} contentContainerStyle={s.list} keyboardShouldPersistTaps="handled">
+        <Text style={s.muted}>Enter your zip code to see {storeName} stores near you.</Text>
+        <View style={s.zipRow}>
+          <TextInput value={zip} onChangeText={(v) => setZip(v.replace(/\D/g, '').slice(0, 5))} onSubmitEditing={() => isZip(zip) && find(zip)}
+            keyboardType="number-pad" returnKeyType="search" maxLength={5} placeholder="Zip code" placeholderTextColor={t.muted}
+            accessibilityLabel="Zip code" testID="mealio-zip" style={s.zipInput} />
+          <Pressable onPress={() => find(zip)} disabled={!isZip(zip) || busy} accessibilityRole="button" testID="mealio-find-stores"
+            style={[s.zipBtn, (!isZip(zip) || busy) && { opacity: 0.5 }]}>
+            <Text style={s.ctaText}>Find stores</Text>
+          </Pressable>
+        </View>
+        {busy ? <ActivityIndicator color={t.accent} /> : null}
+        {problem ? <Text style={s.stepText}>{problem}</Text> : null}
+        {found && found.locations.length === 0 ? <Text style={s.muted}>No {storeName} stores near {found.zip}. Try another zip code.</Text> : null}
+        {found?.locations.map((l) => (
+          <Pressable key={l.id} onPress={() => pick(l)} disabled={saving !== null} accessibilityRole="radio" accessibilityState={{ selected: l.id === current }}
+            testID={`mealio-location-${l.id}`} style={[s.locationOption, l.id === current && { borderColor: t.accent, borderWidth: 2 }]}>
+            <View style={s.flex}>
+              <Text style={s.name}>{l.name}</Text>
+              <Text style={s.small}>{l.address}</Text>
+            </View>
+            {saving === l.id ? <ActivityIndicator size="small" color={t.accent} />
+              : l.id === current ? <Text style={[s.small, { color: t.accent }]}>Current</Text> : null}
+          </Pressable>
+        ))}
+      </ScrollView>
+      <View style={s.footer}>
+        <Pressable onPress={back.onPress} accessibilityRole="button" style={[s.cta, s.ctaQuiet]}><Text style={[s.ctaText, { color: t.text }]}>{back.label}</Text></Pressable>
+      </View>
+    </View>
+  );
+}
+
+export function StorePicker({ t, stores, current, onPick, onBack }: {
   t: MealioTheme; stores: StoreInfo[] | null; current: string | null; onPick: (id: string) => void; onBack: (() => void) | null;
 }) {
   const s = styles(t);
@@ -659,6 +777,9 @@ function ErrorView({ t, error, onRetry, onClose }: { t: MealioTheme; error: { co
   );
 }
 
+/** The sheet's styles, for the other screens built from these pieces. */
+export const sheetStyles = (t: MealioTheme) => styles(t);
+
 // ── styles ─────────────────────────────────────────────────────────────
 
 const cache = new WeakMap<MealioTheme, ReturnType<typeof make>>();
@@ -686,6 +807,11 @@ function make(t: MealioTheme) {
     chipRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 20, paddingBottom: 10 },
     chip: { flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 36, paddingHorizontal: 12, borderRadius: 18, backgroundColor: t.surface },
     chipText: { ...f, fontSize: 13, fontWeight: '600', color: t.text },
+    locationRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 20, paddingBottom: 8 },
+    locationOption: { minHeight: 56, paddingHorizontal: 16, paddingVertical: 10, gap: 10, borderRadius: t.radius, borderWidth: 1, borderColor: t.border, flexDirection: 'row', alignItems: 'center', margin: 1 },
+    zipRow: { flexDirection: 'row', gap: 8, alignItems: 'center' },
+    zipInput: { ...f, flex: 1, minHeight: 48, paddingHorizontal: 12, borderRadius: t.radius - 2, backgroundColor: t.surface, color: t.text, fontSize: 16 },
+    zipBtn: { minHeight: 48, paddingHorizontal: 16, borderRadius: t.radius - 2, backgroundColor: t.accent, alignItems: 'center', justifyContent: 'center' },
     storeRow: { minHeight: 56, paddingHorizontal: 16, borderRadius: t.radius, borderWidth: 1, borderColor: t.border, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', margin: 1 },
     pad12: { paddingHorizontal: 12 },
     muted: { ...f, color: t.muted, fontSize: 14 },

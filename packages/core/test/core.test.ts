@@ -573,3 +573,38 @@ describe('warm-up never shares the page with a cart', () => {
     expect(paths).toEqual(['/api/v1/sdk/carts']);
   });
 });
+
+describe('store locations', () => {
+  function client(reply: (path: string, body: any) => { status?: number; json: unknown }) {
+    const calls: Array<{ path: string; body: any }> = [];
+    const fetchImpl = (async (url: string, init: any) => {
+      const path = String(url).replace('https://mealio.test', '');
+      const body = JSON.parse(init.body);
+      calls.push({ path, body });
+      const r = reply(path, body);
+      return new Response(JSON.stringify(r.json), { status: r.status ?? 200 });
+    }) as unknown as typeof fetch;
+    const c = new MealioClient({ publishableKey: 'pk', getSessionToken: async () => 'mst_x', platform: 'web-test', sdkVersion: '0', baseUrl: 'https://mealio.test', fetchImpl, keys: KEYS }, fakeHost());
+    return { c, calls };
+  }
+  const OAK = { id: 'k2', name: 'Kroger Oak', address: '3 Oak St, Dallas, TX 75202', zip: '75202' };
+
+  it('lists stores near a zip', async () => {
+    const { c, calls } = client(() => ({ json: { locations: [OAK] } }));
+    expect(await c.storeLocations('kroger', '75202')).toEqual([OAK]);
+    expect(calls[0]).toEqual({ path: '/api/v1/sdk/locations', body: { store: 'kroger', zip: '75202' } });
+  });
+
+  it('reads and sets the store', async () => {
+    const { c, calls } = client(() => ({ json: { defaultStore: 'kroger', location: OAK } }));
+    await c.storePreferences();
+    await c.setStore('kroger', 'k2');
+    await c.setStore('heb');
+    expect(calls.map((x) => x.body)).toEqual([{}, { store: 'kroger', locationId: 'k2' }, { store: 'heb' }]);
+  });
+
+  it('a cart with no store chosen fails with location_required', async () => {
+    const { c } = client(() => ({ status: 409, json: { error: { code: 'location_required', message: 'Choose' } } }));
+    await expect(c.prepareCart({ store: 'kroger', recipe: { id: 'r', ingredients: [{ name: 'garlic' }] } })).rejects.toMatchObject({ code: 'location_required' });
+  });
+});

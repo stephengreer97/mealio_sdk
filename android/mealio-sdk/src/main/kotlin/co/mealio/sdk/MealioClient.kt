@@ -27,7 +27,7 @@ const val WARM_FRESH_MS = 4 * 60_000L
 /**
  * An error raised to the app. `code` is one of the PROTOCOL.md codes:
  * bad_envelope, blocked, store_unavailable, login_cancelled, session_expired,
- * network, unsupported, store_required. Also "server" (Mealio answered with an error),
+ * network, unsupported, store_required, location_required. Also "server" (Mealio answered with an error),
  * "unknown_item" / "unknown_product" (CartSession.choose), "bad_recipe" /
  * "too_many_recipes" (prepareCart with no recipes or more than MAX_RECIPES),
  * or any code the server's `fail` instruction carries.
@@ -187,7 +187,34 @@ class MealioClient @JvmOverloads constructor(
     }
 
     /**
+     * A Kroger family chain's stores near a zip, nearest first, for the user to
+     * choose from. Save their choice with [setStore].
+     */
+    suspend fun storeLocations(store: String, zip: String): List<StoreLocation> {
+        val j = post("/api/v1/sdk/locations", JSONObject().put("store", store).put("zip", zip))
+        return j.arr("locations")?.objects()?.map { StoreLocation.fromJson(it) } ?: emptyList()
+    }
+
+    /** The user's default store, and their exact store if it is in the Kroger family. */
+    suspend fun storePreferences(): StorePreferences =
+        StorePreferences.fromJson(post("/api/v1/sdk/preferences", JSONObject()))
+
+    /**
+     * Make a store the user's default. A Kroger family store needs `locationId`
+     * from [storeLocations] the first time, and otherwise fails with
+     * "location_required". Sending it later moves them to that store.
+     */
+    @JvmOverloads
+    suspend fun setStore(store: String, locationId: String? = null): StorePreferences {
+        val body = JSONObject().put("store", store).putIfNotNull("locationId", locationId?.takeIf { it.isNotEmpty() })
+        return StorePreferences.fromJson(post("/api/v1/sdk/preferences", body))
+    }
+
+    /**
      * Start a cart: signs in to the store if needed, searches every ingredient.
+     * A Kroger family store the user has not chosen a location for fails with
+     * "location_required", before any sign-in. Pass `zip` to use the nearest
+     * store instead of asking them.
      * `store` is optional: null uses the user's default store, and the job fails
      * with "store_required" when they have none yet.
      */

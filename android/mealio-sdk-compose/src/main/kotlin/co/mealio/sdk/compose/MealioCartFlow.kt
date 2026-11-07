@@ -83,6 +83,7 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
@@ -107,6 +108,7 @@ import co.mealio.sdk.Product
 import co.mealio.sdk.Recipe
 import co.mealio.sdk.Step
 import co.mealio.sdk.StoreInfo
+import co.mealio.sdk.StoreLocation
 import co.mealio.sdk.forRecipes
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -120,7 +122,7 @@ import kotlinx.coroutines.launch
 // pre-selected. Unchecking an item leaves it out of this run only: its
 // remembered choice stays for next time. There is no skip button.
 
-private enum class Phase { LOADING, LIST, ADDING, DONE, ERROR, STORES }
+private enum class Phase { LOADING, LIST, ADDING, DONE, ERROR, STORES, LOCATION }
 
 private data class FlowError(val code: String, val message: String)
 
@@ -130,7 +132,8 @@ private data class FlowError(val code: String, val message: String)
  * @param store store id from GET /api/v1/stores, e.g. "heb". Optional: without
  *   it the user's default store is used, and the sheet asks them to pick one
  *   the first time. The user can change store from the sheet either way.
- * @param zip 5-digit zip. Needed for Kroger family stores.
+ * @param zip 5-digit zip, if you know it. Fills the zip box when a Kroger family
+ *   store asks the user which store they shop at. Without it, they type it in.
  * @param onClose called when the sheet closes. `result` is null when nothing was added.
  *   Set `visible` to false here.
  * @param onAdded called after the cart is filled, before the user taps Done.
@@ -170,8 +173,16 @@ fun MealioCartFlow(
     if (!visible) return
     // Everything below lives only while the sheet is open, so each open starts fresh.
     val backRef = remember { mutableStateOf<() -> Unit>({}) }
+    SheetDialog(onDismiss = { backRef.value() }) {
+        FlowSheet(theme, recipes, store, zip, onClose, onAdded, onError, backRef)
+    }
+}
+
+/** The full-window dialog every Mealio sheet sits in. */
+@Composable
+internal fun SheetDialog(onDismiss: () -> Unit, content: @Composable () -> Unit) {
     Dialog(
-        onDismissRequest = { backRef.value() },
+        onDismissRequest = onDismiss,
         properties = DialogProperties(
             usePlatformDefaultWidth = false,
             decorFitsSystemWindows = false,
@@ -187,7 +198,41 @@ fun MealioCartFlow(
                 it.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
             }
         }
-        FlowSheet(theme, recipes, store, zip, onClose, onAdded, onError, backRef)
+        content()
+    }
+}
+
+/** The scrim and the sheet that slides up over it, grabber included. */
+@Composable
+internal fun SheetFrame(t: MealioTheme, content: @Composable ColumnScope.() -> Unit) {
+    val shown = remember { MutableTransitionState(false).apply { targetState = true } }
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color(0x59000000))
+            .statusBarsPadding(),
+        contentAlignment = Alignment.BottomCenter,
+    ) {
+        AnimatedVisibility(visibleState = shown, enter = slideInVertically { it } + fadeIn()) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .fillMaxHeight(0.94f)
+                    .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
+                    .background(t.background)
+                    .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)),
+            ) {
+                Box(
+                    Modifier
+                        .align(Alignment.CenterHorizontally)
+                        .padding(top = 8.dp)
+                        .size(width = 36.dp, height = 5.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(t.border),
+                )
+                content()
+            }
+        }
     }
 }
 
@@ -245,19 +290,35 @@ private fun FlowSheet(
         }
     }
 
+    fun openLocation(from: Phase) {
+        backTo = from
+        phase = Phase.LOCATION
+    }
+
     fun start(storeId: String?) {
         job?.cancel()
         phase = Phase.LOADING; step = Step.CONNECTING; cart = null; result = null; error = null
         job = scope.launch {
             try {
-                val c = MealioCart.prepareCart(storeId, recipes, zip) { s, _ -> step = s }
+                val c = MealioCart.prepareCart(storeId, recipes) { s, _ -> step = s }
                 store = c.store
                 cart = c
                 phase = Phase.LIST
             } catch (e: CancellationException) {
                 throw e
             } catch (e: MealioException) {
-                if (e.code == "store_required") openStores(Phase.ERROR) else fail(e, "Something went wrong.")
+                when (e.code) {
+                    "store_required" -> openStores(Phase.ERROR)
+                    // Which store the user shops at is theirs to say. With no store
+                    // named there is nothing to look up, so they pick the chain first.
+                    "location_required" -> if (storeId != null) {
+                        store = storeId
+                        openLocation(Phase.ERROR)
+                    } else {
+                        openStores(Phase.ERROR)
+                    }
+                    else -> fail(e, "Something went wrong.")
+                }
             } catch (e: Exception) {
                 fail(e, "Something went wrong.")
             }
@@ -296,53 +357,40 @@ private fun FlowSheet(
     // The kicker over the title: the recipe's own title, or "3 meals".
     val kicker = if (recipes.size == 1) recipes[0].title else if (recipes.size > 1) "${recipes.size} meals" else null
     val lineCount = recipes.sumOf { it.ingredients.size }
-    val shown = remember { MutableTransitionState(false).apply { targetState = true } }
 
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(Color(0x59000000))
-            .statusBarsPadding(),
-        contentAlignment = Alignment.BottomCenter,
-    ) {
-        AnimatedVisibility(visibleState = shown, enter = slideInVertically { it } + fadeIn()) {
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .fillMaxHeight(0.94f)
-                    .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
-                    .background(t.background)
-                    .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)),
-            ) {
-                Box(
-                    Modifier
-                        .align(Alignment.CenterHorizontally)
-                        .padding(top = 8.dp)
-                        .size(width = 36.dp, height = 5.dp)
-                        .clip(RoundedCornerShape(3.dp))
-                        .background(t.border),
+    SheetFrame(t) {
+        val l = login
+        Header(t, kicker, l?.title ?: headerTitle(phase, storeName), onClose = ::close)
+        val c = cart
+        val r = result
+        val at = store
+        when {
+            l != null -> LoginPane(t, l, storeName)
+            phase == Phase.LOADING -> Loading(t, step, storeName, lineCount)
+            phase == Phase.STORES -> StorePicker(
+                t, stores, store,
+                onPick = { id -> store = id; start(id) },
+                onBack = if (c != null && backTo == Phase.LIST) ({ phase = Phase.LIST }) else null,
+            )
+            phase == Phase.LOCATION && at != null -> {
+                val backToList = c != null && backTo == Phase.LIST
+                LocationPicker(
+                    t, at, storeName,
+                    startZip = c?.cart?.location?.zip ?: zip,
+                    current = c?.cart?.location?.id,
+                    onPicked = { start(at) },
+                    backLabel = if (backToList) "Back to your list" else "Choose a different store",
+                    onBack = if (backToList) ({ phase = Phase.LIST }) else ({ openStores(Phase.ERROR) }),
                 )
-                val l = login
-                Header(t, kicker, l?.title ?: headerTitle(phase, storeName), onClose = ::close)
-                val c = cart
-                val r = result
-                when {
-                    l != null -> LoginPane(t, l, storeName)
-                    phase == Phase.LOADING -> Loading(t, step, storeName, lineCount)
-                    phase == Phase.STORES -> StorePicker(
-                        t, stores, store,
-                        onPick = { id -> store = id; start(id) },
-                        onBack = if (c != null && backTo == Phase.LIST) ({ phase = Phase.LIST }) else null,
-                    )
-                    (phase == Phase.LIST || phase == Phase.ADDING) && c != null ->
-                        MealioCartList(
-                            c, storeName, busy = phase == Phase.ADDING, onAdd = ::add, theme = t, modifier = Modifier.weight(1f),
-                            onChangeStore = { openStores(Phase.LIST) },
-                        )
-                    phase == Phase.DONE && r != null && c != null -> Done(t, c, r, storeName, onDone = ::close)
-                    else -> ErrorView(t, error, onRetry = { start(store) }, onClose = ::close)
-                }
             }
+            (phase == Phase.LIST || phase == Phase.ADDING) && c != null ->
+                MealioCartList(
+                    c, storeName, busy = phase == Phase.ADDING, onAdd = ::add, theme = t, modifier = Modifier.weight(1f),
+                    onChangeStore = { openStores(Phase.LIST) },
+                    onChangeLocation = { openLocation(Phase.LIST) },
+                )
+            phase == Phase.DONE && r != null && c != null -> Done(t, c, r, storeName, onDone = ::close)
+            else -> ErrorView(t, error, onRetry = { start(store) }, onClose = ::close)
         }
     }
 }
@@ -352,11 +400,12 @@ private fun headerTitle(phase: Phase, storeName: String): String = when (phase) 
     Phase.LOADING -> if (storeName == "your store") "Getting your cart ready" else "Getting your $storeName cart ready"
     Phase.ERROR -> "Something went wrong"
     Phase.STORES -> "Choose your store"
+    Phase.LOCATION -> "Find your $storeName"
     else -> "Your $storeName list"
 }
 
 internal fun storeLabel(id: String): String {
-    val known = mapOf("heb" to "H-E-B", "aldi" to "ALDI", "kroger" to "Kroger", "safeway" to "Safeway", "wegmans" to "Wegmans")
+    val known = mapOf("heb" to "H-E-B", "aldi" to "ALDI", "kroger" to "Kroger", "safeway" to "Safeway", "wegmans" to "Wegmans", "qfc" to "QFC", "frys" to "Fry's", "smiths" to "Smith's", "bakers" to "Baker's", "marianos" to "Mariano's", "pick_n_save" to "Pick 'n Save", "pay_less" to "Pay-Less")
     return known[id] ?: Regex("\\b\\w").replace(id.replace('_', ' ')) { it.value.uppercase() }
 }
 
@@ -385,12 +434,12 @@ private fun Dp.minus2(): Dp = (this - 2.dp).coerceAtLeast(0.dp)
 private fun hairline(): Dp = with(LocalDensity.current) { 1.toDp() }
 
 @Composable
-private fun TopRule(t: MealioTheme, thickness: Dp = 1.dp) {
+internal fun TopRule(t: MealioTheme, thickness: Dp = 1.dp) {
     Box(Modifier.fillMaxWidth().height(thickness).background(t.border))
 }
 
 @Composable
-private fun Header(t: MealioTheme, recipeTitle: String?, title: String, onClose: () -> Unit) {
+internal fun Header(t: MealioTheme, recipeTitle: String?, title: String, onClose: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -482,7 +531,9 @@ private fun Loading(t: MealioTheme, step: Step, storeName: String, count: Int) {
  * The list screen on its own, for apps that host it in their own sheet: every
  * item with its checkbox, options, search, the estimated total and the Add
  * button. `onChange` is called after each selection change. With
- * `onChangeStore`, a tappable store chip sits above the list.
+ * `onChangeStore`, a tappable store chip sits above the list. On a Kroger
+ * family cart the exact store shows above that, with a Change link when
+ * `onChangeLocation` is set.
  */
 @Composable
 fun MealioCartList(
@@ -494,6 +545,7 @@ fun MealioCartList(
     onChange: () -> Unit = {},
     onChangeStore: (() -> Unit)? = null,
     theme: MealioTheme = LocalMealioTheme.current,
+    onChangeLocation: (() -> Unit)? = null,
 ) {
     val t = theme
     // CartSession is not observable; this counter redraws after each change.
@@ -505,8 +557,35 @@ fun MealioCartList(
     @Suppress("UNUSED_EXPRESSION") version
     val est = cart.estimate()
     val selectable = cart.items.count { it.status != ItemStatus.UNAVAILABLE }
+    val location = cart.cart.location
 
     Column(modifier.fillMaxWidth()) {
+        if (location != null) {
+            Row(
+                Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    "${location.name}, ${location.address}",
+                    style = t.ts(12, color = t.muted, lineHeight = 17),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                if (onChangeLocation != null) {
+                    val changeLabel = "Store location: ${location.name}. Change location"
+                    Text(
+                        "Change",
+                        style = t.ts(12, color = t.accent, lineHeight = 17),
+                        modifier = Modifier
+                            .clickable(enabled = !busy, role = Role.Button, onClick = onChangeLocation)
+                            .semantics { contentDescription = changeLabel }
+                            .padding(8.dp),
+                    )
+                }
+            }
+        }
         Row(
             Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -606,7 +685,7 @@ fun MealioCartList(
 }
 
 @Composable
-private fun Cta(
+internal fun Cta(
     t: MealioTheme,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
@@ -1241,6 +1320,164 @@ internal fun reasonText(r: String): String = when {
     Regex("stock").containsMatchIn(r) -> "out of stock"
     Regex("timeout|no_answer").containsMatchIn(r) -> "the store did not answer"
     else -> "the store refused it"
+}
+
+private fun isZip(z: String): Boolean = z.length == 5 && z.all { it in '0'..'9' }
+
+private class FoundLocations(val zip: String, val locations: List<StoreLocation>)
+
+/**
+ * Which Kroger family store the user shops at: a zip box, then that chain's
+ * nearby stores. A zip the partner or an earlier pick supplied fills the box
+ * and searches at once, and the user still taps the store they want. Used in
+ * the cart sheet and in store settings.
+ */
+@Composable
+internal fun ColumnScope.LocationPicker(
+    t: MealioTheme,
+    store: String,
+    storeName: String,
+    startZip: String?,
+    current: String?,
+    onPicked: (StoreLocation) -> Unit,
+    backLabel: String,
+    onBack: () -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    var zip by remember { mutableStateOf(startZip ?: "") }
+    var found by remember { mutableStateOf<FoundLocations?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    var saving by remember { mutableStateOf<String?>(null) }
+    var problem by remember { mutableStateOf<String?>(null) }
+    // Only the newest lookup may answer.
+    var ask by remember { mutableIntStateOf(0) }
+
+    fun find(z: String) {
+        val id = ++ask
+        busy = true
+        problem = null
+        found = null
+        scope.launch {
+            try {
+                val locations = MealioCart.storeLocations(store, z)
+                if (ask != id) return@launch
+                found = FoundLocations(z, locations)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (ask != id) return@launch
+                problem = e.message ?: "Could not look up stores. Try again."
+            } finally {
+                if (ask == id) busy = false
+            }
+        }
+    }
+
+    fun pick(l: StoreLocation) {
+        saving = l.id
+        problem = null
+        scope.launch {
+            try {
+                MealioCart.setStore(store, l.id)
+                onPicked(l)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                problem = e.message ?: "Could not save that store. Try again."
+                saving = null
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (startZip != null && isZip(startZip)) find(startZip)
+    }
+
+    Column(
+        Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(start = 16.dp, end = 16.dp, bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text("Enter your zip code to see $storeName stores near you.", style = t.ts(14, color = t.muted))
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            val shape = RoundedCornerShape(t.radius.minus2())
+            val valid = isZip(zip)
+            BasicTextField(
+                value = zip,
+                onValueChange = { v -> zip = v.filter { it in '0'..'9' }.take(5) },
+                singleLine = true,
+                textStyle = t.ts(16),
+                cursorBrush = SolidColor(t.accent),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(onSearch = { if (isZip(zip)) find(zip) }),
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 48.dp)
+                    .semantics { contentDescription = "Zip code" },
+                decorationBox = { inner ->
+                    Box(
+                        Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(shape).background(t.surface).padding(horizontal = 12.dp),
+                        contentAlignment = Alignment.CenterStart,
+                    ) {
+                        if (zip.isEmpty()) Text("Zip code", style = t.ts(16, color = t.muted), maxLines = 1)
+                        inner()
+                    }
+                },
+            )
+            Box(
+                Modifier
+                    .heightIn(min = 48.dp)
+                    .alpha(if (valid && !busy) 1f else 0.5f)
+                    .clip(shape)
+                    .background(t.accent)
+                    .clickable(enabled = valid && !busy, role = Role.Button, onClick = { find(zip) })
+                    .padding(horizontal = 16.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("Find stores", style = t.ts(16, FontWeight.Bold, t.onAccent))
+            }
+        }
+        if (busy) {
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(Modifier.size(28.dp), color = t.accent, strokeWidth = 2.5.dp)
+            }
+        }
+        problem?.let { Text(it, style = t.ts(15)) }
+        val results = found
+        if (results != null && results.locations.isEmpty()) {
+            Text("No $storeName stores near ${results.zip}. Try another zip code.", style = t.ts(14, color = t.muted))
+        }
+        results?.locations?.forEach { l ->
+            key(l.id) {
+                val on = l.id == current
+                val shape = RoundedCornerShape(t.radius)
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 56.dp)
+                        .clip(shape)
+                        .border(if (on) 2.dp else 1.dp, if (on) t.accent else t.border, shape)
+                        .selectable(selected = on, enabled = saving == null, role = Role.RadioButton, onClick = { pick(l) })
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(l.name, style = t.ts(15, FontWeight.SemiBold, lineHeight = 20))
+                        Text(l.address, style = t.ts(12, color = t.muted, lineHeight = 17))
+                    }
+                    if (saving == l.id) {
+                        CircularProgressIndicator(Modifier.size(20.dp), color = t.accent, strokeWidth = 2.dp)
+                    } else if (on) {
+                        Text("Current", style = t.ts(12, color = t.accent, lineHeight = 17))
+                    }
+                }
+            }
+        }
+    }
+    TopRule(t)
+    Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 28.dp)) {
+        Cta(t, onClick = onBack, background = t.surface) { Text(backLabel, style = t.ts(16, FontWeight.Bold, t.text)) }
+    }
 }
 
 @Composable

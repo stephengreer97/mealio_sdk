@@ -12,9 +12,10 @@ import { Modal, Platform, Pressable, SafeAreaView, StyleSheet, Text, View } from
 import { WebView, type WebViewMessageEvent, type WebViewNavigation } from 'react-native-webview';
 import {
   MealioClient, MealioError, matchesAny, parseMessage,
-  type CartSession, type Host, type JsonMessage, type Matcher, type PrepareCartInput, type StepListener, type StoreInfo,
+  type CartSession, type Host, type JsonMessage, type Matcher, type PrepareCartInput, type StepListener, type StoreInfo, type StoreLocation, type StorePreferences,
 } from '@mealio/sdk-core';
 import { resolveTheme, type MealioTheme } from './theme';
+import { MealioStoreSettings } from './MealioStoreSettings';
 
 export const SDK_VERSION = '0.4.2';
 
@@ -48,6 +49,14 @@ export interface MealioApi {
    * yourself if you start carts another way. Never shows sign-in, never throws.
    */
   warm(opts?: { store?: string | null }): Promise<void>;
+  /** A Kroger family chain's stores near a zip, for your own store screen. */
+  storeLocations(store: string, zip: string): Promise<StoreLocation[]>;
+  /** The user's default store, and their exact store if it is in the Kroger family. */
+  storePreferences(): Promise<StorePreferences>;
+  /** Make a store the user's default. Kroger family stores need `locationId` the first time. */
+  setStore(store: string, locationId?: string | null): Promise<StorePreferences>;
+  /** Open the sheet where the user changes their store or zip. Put it on your settings screen. */
+  openStoreSettings(): void;
   theme: MealioTheme;
 }
 
@@ -184,6 +193,7 @@ export function MealioProvider(props: MealioProviderProps) {
   const loginRef = useRef<LoginState | null>(null);
   const checkTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const [hosts, setHosts] = useState(0);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const epochStore = useMemo(() => props.epochStorage || memoryEpoch(), [props.epochStorage]);
 
   // ── hidden WebView ───────────────────────────────────────────────────
@@ -371,6 +381,10 @@ export function MealioProvider(props: MealioProviderProps) {
     prepareCart: (input, opts) => client.prepareCart(input, opts),
     stores: () => client.stores(),
     warm: (opts) => client.warm(opts),
+    storeLocations: (store, zip) => client.storeLocations(store, zip),
+    storePreferences: () => client.storePreferences(),
+    setStore: (store, locationId) => client.setStore(store, locationId),
+    openStoreSettings: () => setSettingsOpen(true),
     async signOutOfAllStores() {
       client.clearWarm();
       await epochStore.set((await epochStore.get()) + 1);
@@ -403,6 +417,7 @@ export function MealioProvider(props: MealioProviderProps) {
     <ApiCtx.Provider value={api}>
       <InternalCtx.Provider value={internal}>
         {props.children}
+        {settingsOpen ? <MealioStoreSettings visible onClose={() => setSettingsOpen(false)} /> : null}
         <View pointerEvents="none" style={styles.hidden}>
           <WebView
             ref={hidden}
