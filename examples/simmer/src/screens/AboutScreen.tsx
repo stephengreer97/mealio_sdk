@@ -57,7 +57,7 @@ export default function AboutScreen({ navigation }: { navigation: { goBack(): vo
         ))}
 
         <Text style={s.h2}>Settings</Text>
-        <Text style={s.label}>ZIP code (needed for Kroger family stores)</Text>
+        <Text style={s.label}>ZIP code (fills in the Kroger store search)</Text>
         <TextInput value={zip} onChangeText={(t) => setZip(t.replace(/\D/g, '').slice(0, 5))} onEndEditing={() => simmer.setZip(zip)}
           keyboardType="number-pad" placeholder="78704" placeholderTextColor={C.faint} style={s.input} />
         <Button label="Sign out of grocery stores" kind="quiet" icon="log-out-outline" onPress={signOut} style={{ marginTop: 16 }} />
