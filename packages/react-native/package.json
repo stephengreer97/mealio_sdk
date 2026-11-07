@@ -1,6 +1,6 @@
 {
   "name": "@mealio/react-native-cart",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "Mealio Cart SDK for React Native: put an Add to my grocery cart button in your app.",
   "license": "SEE LICENSE IN LICENSE",
   "author": "Mealio <contact@mealio.co>",
@@ -31,7 +31,7 @@
     "prepack": "npm run build"
   },
   "dependencies": {
-    "@mealio/sdk-core": "0.4.2"
+    "@mealio/sdk-core": "0.5.0"
   },
   "peerDependencies": {
     "react": ">=18",

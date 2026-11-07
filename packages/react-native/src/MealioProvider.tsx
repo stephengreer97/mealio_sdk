@@ -18,7 +18,7 @@ import {
 import { money, resolveTheme, type MealioColorScheme, type MealioTheme } from './theme';
 import { MealioStoreSettings } from './MealioStoreSettings';
 
-export const SDK_VERSION = '0.4.2';
+export const SDK_VERSION = '0.5.0';
 
 export interface MealioSheetOptions {
   /** Show the total and the done screen prices. Defaults to true. Options keep their own prices. */

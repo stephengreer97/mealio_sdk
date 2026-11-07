@@ -1,4 +1,4 @@
-## Unreleased
+## 0.5.0
 
 - The sheet shows a clear message for the monthly cart cap and per-user cart limits.
   The words are the `capReached` and `tooManyCarts` strings.
