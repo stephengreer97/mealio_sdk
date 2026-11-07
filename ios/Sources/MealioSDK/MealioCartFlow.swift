@@ -147,7 +147,7 @@ public struct MealioCartFlow: View {
     public var body: some View {
         VStack(spacing: 0) {
             MealioGrabber(t: t)
-            MealioFlowHeader(t: t, recipeTitle: kicker,
+            MealioFlowHeader(t: t, recipeTitle: kicker, photos: mealioRecipePhotos(recipes),
                              title: model.login?.title ?? headerTitle,
                              onClose: { dismiss() })
             content
@@ -476,6 +476,7 @@ struct MealioLoginWebView: UIViewRepresentable {
 struct MealioFlowHeader: View {
     let t: MealioTheme
     let recipeTitle: String?
+    var photos: [URL] = []
     let title: String
     let onClose: () -> Void
 
@@ -489,6 +490,15 @@ struct MealioFlowHeader: View {
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                     .accessibilityIgnoresInvertColors()
                     .accessibilityHidden(true)
+            }
+            if !photos.isEmpty {
+                // By position: two recipes can share a photo.
+                HStack(spacing: -18) {
+                    ForEach(photos.indices, id: \.self) { i in
+                        MealioRecipePhoto(t: t, url: photos[i])
+                    }
+                }
+                .accessibilityHidden(true)
             }
             VStack(alignment: .leading, spacing: 2) {
                 if let kicker = recipeTitle, !kicker.isEmpty {
@@ -631,9 +641,7 @@ public struct MealioCartList: View {
         self.onChangeLocation = onChangeLocation
         self.onAdd = onAdd
         // The first item needing a choice starts expanded.
-        self._open = State(initialValue: cart.items.first {
-            $0.status == .choose || $0.status == .rememberedUnavailable
-        }?.key)
+        self._open = State(initialValue: cart.firstToOpen)
     }
 
     private var t: MealioTheme { themeOverride ?? MealioCart.resolvedTheme(for: systemScheme) }
@@ -678,7 +686,7 @@ public struct MealioCartList: View {
             .padding(.bottom, 10)
             // Said while any item has no saved product, which on a recipe's first
             // cart is every item: the run where nothing on screen shows it yet.
-            if cart.items.contains(where: { $0.status == .choose }) {
+            if cart.showsRememberNote {
                 Text(ui.tr(.rememberNote))
                     .font(t.font(13, .medium))
                     .foregroundColor(t.text)
@@ -1006,11 +1014,12 @@ struct MealioItemRow: View {
         return ui.tr(gone ? .usualNotAvailable : .usualOut)
     }
 
-    private func meta(on: Bool, picked: Product?, options: [Product]) -> String {
+    func meta(on: Bool, picked: Product?, options: [Product]) -> String {
         if let p = picked {
             let parts: [String?] = [ui.price(p), p.id == item.remembered?.id ? ui.tr(.yourUsual) : nil]
             return parts.compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " \u{00B7} ")
         }
+        if item.startUnchecked { return ui.tr(.pantryHint) }
         switch item.status {
         case .remembered: return ui.tr(.notAddingThisTime)
         case .rememberedUnavailable: return ui.tr(.usualOutOfStock)
@@ -1204,6 +1213,28 @@ struct MealioThumb: View {
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .opacity(dim ? 0.45 : 1)
         .accessibilityHidden(true)
+    }
+}
+
+/// One recipe photo in the sheet header. Loads as product images do, but
+/// fills its square, since a photo of a dish is not a pack shot on white.
+@MainActor
+struct MealioRecipePhoto: View {
+    let t: MealioTheme
+    let url: URL
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: t.radius / 2)
+        AsyncImage(url: url) { image in
+            image.resizable().scaledToFill()
+        } placeholder: {
+            t.surface
+        }
+        .frame(width: 44, height: 44)
+        .background(t.surface)
+        .clipShape(shape)
+        .overlay(shape.strokeBorder(t.background, lineWidth: 2))
+        .accessibilityIgnoresInvertColors()
     }
 }
 

@@ -356,6 +356,14 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
 
   List<Recipe> get _recipes => _recipeList(widget.recipe, widget.recipes);
 
+  /// Up to 3 dish photos for the header, https only.
+  List<String> get _photos => _recipes
+      .map((Recipe r) => r.photoUrl)
+      .whereType<String>()
+      .where((String u) => u.startsWith('https://'))
+      .take(3)
+      .toList();
+
   /// The header's small line: the recipe's title, or "3 meals".
   String? _kicker(MealioUi ui) {
     final recipes = _recipes;
@@ -496,6 +504,7 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
     return SheetFrame(
       theme: t,
       kicker: _kicker(ui),
+      photos: _photos,
       title: login != null ? login.title : _title(ui, storeName, named),
       onClose: _close,
       child: body,

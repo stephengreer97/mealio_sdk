@@ -66,6 +66,7 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
   const bump = useCallback(() => setVersion((v) => v + 1), []);
   const recipes = useMemo(() => props.recipes ?? (props.recipe ? [props.recipe] : []), [props.recipes, props.recipe]);
   const kicker = recipes.length === 1 ? recipes[0].title : recipes.length > 1 ? ui.tr('meals', { count: recipes.length }) : undefined;
+  const photos = useMemo(() => recipes.map((r) => r.photoUrl).filter((u): u is string => !!u && u.startsWith('https://')).slice(0, 3), [recipes]);
   const lineCount = useMemo(() => recipes.reduce((n, r) => n + r.ingredients.length, 0), [recipes]);
 
   useEffect(() => {
@@ -141,7 +142,7 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
       <View style={s.scrim}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={[s.sheet, sheetHeight(ui.sheet.height)]}>
           <View style={s.grabber} />
-          <Header t={t} recipeTitle={kicker} title={internal.login ? internal.login.title : headerTitle(phase, storeName, named, ui)} onClose={close} />
+          <Header t={t} recipeTitle={kicker} photos={photos} title={internal.login ? internal.login.title : headerTitle(phase, storeName, named, ui)} onClose={close} />
           {internal.login ? (
             <View style={s.flex}>
               <Text style={s.loginNote}>{ui.tr('loginNote', { store: storeName })}</Text>
@@ -197,12 +198,17 @@ function storeLabel(id: string): string {
 
 // ── pieces ─────────────────────────────────────────────────────────────
 
-export function Header({ t, recipeTitle, title, onClose }: { t: MealioTheme; recipeTitle?: string; title: string; onClose: () => void }) {
+export function Header({ t, recipeTitle, title, onClose, photos }: { t: MealioTheme; recipeTitle?: string; title: string; onClose: () => void; photos?: string[] }) {
   const s = styles(t);
   const { ui } = useMealio();
   return (
     <View style={s.header}>
       {ui.sheet.logo ? <Image source={ui.sheet.logo} style={s.logo} resizeMode="contain" accessibilityIgnoresInvertColors /> : null}
+      {photos?.length ? (
+        <View style={s.photos} testID="mealio-recipe-photos" accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+          {photos.map((uri, i) => <Image key={`${i}:${uri}`} source={{ uri }} style={[s.photo, i > 0 && s.photoStacked]} resizeMode="cover" accessibilityIgnoresInvertColors />)}
+        </View>
+      ) : null}
       <View style={s.flex}>
         {recipeTitle ? <Text style={s.kicker} numberOfLines={1}>{recipeTitle}</Text> : null}
         <Text style={s.h1} numberOfLines={2} accessibilityRole="header">{title}</Text>
@@ -258,7 +264,7 @@ export interface CartListProps {
 export function CartList({ t, cart, storeName, busy, onChange, onAdd, onChangeStore, onChangeLocation }: CartListProps) {
   const s = styles(t);
   const { ui } = useMealio();
-  const [open, setOpen] = useState<string | null>(() => cart.items.find((i) => i.status === 'choose' || i.status === 'remembered_unavailable')?.key ?? null);
+  const [open, setOpen] = useState<string | null>(() => cart.items.find((i) => !i.startUnchecked && (i.status === 'choose' || i.status === 'remembered_unavailable'))?.key ?? null);
   const est = cart.estimate();
   const selectable = cart.items.filter((i) => i.status !== 'unavailable');
   const location = cart.cart.location;
@@ -285,7 +291,7 @@ export function CartList({ t, cart, storeName, busy, onChange, onAdd, onChangeSt
       </View>
       {/* Said while any item has no saved product, which on a recipe's first
           cart is every item: the run where nothing on screen shows it yet. */}
-      {cart.items.some((i) => i.status === 'choose') ? (
+      {cart.items.some((i) => i.status === 'choose' && !i.startUnchecked) ? (
         <View style={s.info} testID="mealio-remember-note">
           <Text style={s.infoText}>{ui.tr('rememberNote')}</Text>
         </View>
@@ -381,6 +387,7 @@ function ItemRow({ t, cart, item, storeName, open, onToggleOpen, onChange, disab
 
   const meta = picked
     ? [priceText(picked, ui), picked.id === item.remembered?.id ? ui.tr('yourUsual') : null].filter(Boolean).join(' · ')
+    : item.startUnchecked ? ui.tr('pantryHint')
     : item.status === 'remembered' ? ui.tr('notAddingThisTime')
       : item.status === 'remembered_unavailable' ? ui.tr('usualOutOfStock')
         : ui.plural('options', options.length);
@@ -836,6 +843,9 @@ function make(t: MealioTheme) {
     flex: { flex: 1 },
     scrim: { flex: 1, backgroundColor: 'rgba(0,0,0,0.35)', justifyContent: 'flex-end' },
     sheet: { height: '94%', backgroundColor: t.background, borderTopLeftRadius: 20, borderTopRightRadius: 20, overflow: 'hidden' },
+    photos: { flexDirection: 'row' },
+    photo: { width: 44, height: 44, borderRadius: t.radius / 2, backgroundColor: t.surface, borderWidth: 2, borderColor: t.background },
+    photoStacked: { marginLeft: -18 },
     logo: { width: 36, height: 36, borderRadius: 8 },
     grabber: { alignSelf: 'center', width: 36, height: 5, borderRadius: 3, backgroundColor: t.border, marginTop: 8 },
     header: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, paddingHorizontal: 20, paddingTop: 12, paddingBottom: 8 },

@@ -632,3 +632,21 @@ describe('strings', () => {
     }
   });
 });
+
+describe('pantry and optional items', () => {
+  const salt = { key: 'salt', ingredient: 'salt', quantity: 1, status: 'remembered', options: [{ id: '9', productId: '9', name: 'Salt', unitPrice: 1 }], selectedId: '9', remembered: { id: '9', productId: '9', name: 'Salt' }, startUnchecked: true };
+  const onion = { ...salt, key: 'onion', ingredient: 'onion', startUnchecked: undefined };
+  const session = () => new CartSession({} as MealioClient, { cartId: 'c', store: 'heb', items: [salt, onion], ready: [], needsChoice: [], unavailable: [] } as any);
+
+  it('a remembered product stays unchecked until the user checks it', () => {
+    const c = session();
+    expect(c.isSelected('salt')).toBe(false);
+    expect(c.isSelected('onion')).toBe(true);
+    c.select('salt', '9');
+    expect(c.isSelected('salt')).toBe(true);
+  });
+
+  it('is left out of the estimate until then', () => {
+    expect(session().estimate().count).toBe(1);
+  });
+});

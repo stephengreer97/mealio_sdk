@@ -61,6 +61,10 @@ That is the whole integration.
 - `zip` is optional. A Kroger family store asks the user which store they shop
   at, and `zip` fills the zip box on that screen. Without it, they type it in.
   The list shows the store with a Change link.
+- `Recipe` also takes `servings` and `makeServings`, to scale the recipe, and
+  `photoUrl`, an https image shown at the top of the sheet (up to 3).
+  `RecipeIngredient` takes `pantry` and `optional`: those items start unchecked,
+  even with a remembered product, and say "You may already have this".
 - `label:` changes the button text (default "Add to my grocery cart");
   `disabled:` fades it. `variant:` changes its shape, see "Button variants".
 

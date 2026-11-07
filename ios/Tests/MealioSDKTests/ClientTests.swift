@@ -862,6 +862,105 @@ final class ClientTests: XCTestCase {
         XCTAssertEqual(cs.estimate().count, 2)
     }
 
+    // MARK: Recipe details
+
+    private static let pantryProduct = Product(id: "9", name: "Salt", unitPrice: 1)
+
+    /// Same as the TS "pantry and optional items" cart: salt is remembered and
+    /// starts unchecked, onion is remembered and does not.
+    private static func pantryCart(saltStatus: ItemStatus = .remembered) -> PreparedCart {
+        func item(_ key: String, _ status: ItemStatus, startUnchecked: Bool) -> CartItem {
+            CartItem(key: key, ingredient: key, status: status, options: [pantryProduct],
+                     selectedId: status == .remembered ? "9" : nil,
+                     remembered: status == .remembered ? pantryProduct : nil, startUnchecked: startUnchecked)
+        }
+        return PreparedCart(cartId: "c", store: "heb", items: [
+            item("salt", saltStatus, startUnchecked: true),
+            item("onion", .remembered, startUnchecked: false),
+        ])
+    }
+
+    @MainActor
+    func testARememberedProductStaysUncheckedUntilTheUserChecksIt() throws {
+        let session = CartSession(client: makeClient(keys: TestSigner.keys), cart: ClientTests.pantryCart())
+        XCTAssertFalse(session.isSelected("salt"))
+        XCTAssertTrue(session.isSelected("onion"))
+        XCTAssertEqual(session.selections()[0], Selection(key: "salt", productId: nil, remember: false))
+
+        try session.select(key: "salt", productId: "9")
+        XCTAssertTrue(session.isSelected("salt"))
+        XCTAssertEqual(session.selections()[0], Selection(key: "salt", productId: "9", quantity: 1, remember: true))
+    }
+
+    @MainActor
+    func testAStartUncheckedItemIsLeftOutOfTheEstimateUntilThen() throws {
+        let session = CartSession(client: makeClient(keys: TestSigner.keys), cart: ClientTests.pantryCart())
+        XCTAssertEqual(session.estimate().count, 1)
+        try session.select(key: "salt", productId: "9")
+        XCTAssertEqual(session.estimate().count, 2)
+    }
+
+    @MainActor
+    func testAStartUncheckedItemNeitherOpensNorRaisesTheRememberNote() throws {
+        let client = makeClient(keys: TestSigner.keys)
+        let choose = CartSession(client: client, cart: ClientTests.pantryCart(saltStatus: .choose))
+        XCTAssertNil(choose.firstToOpen)
+        XCTAssertFalse(choose.showsRememberNote)
+        let gone = CartSession(client: client, cart: ClientTests.pantryCart(saltStatus: .rememberedUnavailable))
+        XCTAssertNil(gone.firstToOpen)
+
+        // The same cart without the mark does both.
+        let plain = try makeSession(client, json: ClientTests.newCartJSON)
+        XCTAssertEqual(plain.firstToOpen, "garlic")
+        XCTAssertTrue(plain.showsRememberNote)
+    }
+
+    func testStartUncheckedDecodesAndIsFalseFromOlderServers() throws {
+        let marked = try JSONDecoder().decode(CartItem.self, from: Data(#"{"key":"x","ingredient":"x","quantity":1,"status":"choose","startUnchecked":true}"#.utf8))
+        XCTAssertTrue(marked.startUnchecked)
+        let old = try JSONDecoder().decode(PreparedCart.self, from: Data(ClientTests.newCartJSON.utf8))
+        XCTAssertFalse(try XCTUnwrap(old.items.first).startUnchecked)
+    }
+
+    @MainActor
+    func testRecipeDetailsGoInThePrepareBodyOnlyWhenSet() async throws {
+        let cart: JSONValue = try XCTUnwrap(JSONValue.parse(ClientTests.multiCartJSON))
+        let client = makeClient(keys: TestSigner.keys)
+
+        let set = Recorder()
+        serveDone(cart, rec: set)
+        _ = try await client.prepareCart(recipe: Recipe(id: "r1", ingredients: [
+            RecipeIngredient(name: "salt", pantry: true),
+            RecipeIngredient(name: "cilantro", optional: true),
+        ], servings: 4, makeServings: 2, photoUrl: "https://img.test/a.jpg"))
+        let recipe = try XCTUnwrap(set.body("/api/v1/sdk/carts")?["recipe"])
+        XCTAssertEqual(recipe["servings"]?.doubleValue, 4)
+        XCTAssertEqual(recipe["makeServings"]?.doubleValue, 2)
+        XCTAssertEqual(recipe["photoUrl"], .string("https://img.test/a.jpg"))
+        let ingredients = try XCTUnwrap(recipe["ingredients"]?.arrayValue)
+        XCTAssertEqual(ingredients[0]["pantry"], .bool(true))
+        XCTAssertNil(ingredients[0]["optional"])
+        XCTAssertEqual(ingredients[1]["optional"], .bool(true))
+        XCTAssertNil(ingredients[1]["pantry"])
+
+        let unset = Recorder()
+        serveDone(cart, rec: unset)
+        _ = try await client.prepareCart(recipe: ClientTests.recipe("r1"))
+        let plain = try XCTUnwrap(unset.body("/api/v1/sdk/carts")?["recipe"])
+        for key in ["servings", "makeServings", "photoUrl"] { XCTAssertNil(plain[key], key) }
+        let line = try XCTUnwrap(plain["ingredients"]?.arrayValue?.first)
+        for key in ["pantry", "optional"] { XCTAssertNil(line[key], key) }
+    }
+
+    func testRecipePhotosAreHttpsOnlyAtMostThreeInOrder() {
+        func recipe(_ url: String?) -> Recipe { Recipe(id: "r", ingredients: [], photoUrl: url) }
+        let urls = (1...4).map { "https://img.test/\($0).jpg" }
+        let photos = mealioRecipePhotos([recipe(nil), recipe("http://img.test/no.jpg"), recipe(""), recipe("data:image/png;base64,AA==")]
+                                        + urls.map { recipe($0) })
+        XCTAssertEqual(photos.map(\.absoluteString), Array(urls.prefix(3)))
+        XCTAssertEqual(mealioRecipePhotos([]), [])
+    }
+
     // MARK: Multi-recipe carts
 
     /// A cart from four recipes: ingredients they share merged into one item.

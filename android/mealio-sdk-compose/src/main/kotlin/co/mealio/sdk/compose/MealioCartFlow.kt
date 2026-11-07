@@ -381,11 +381,12 @@ private fun FlowSheet(
     val named = cart?.storeName != null || store != null
     // The kicker over the title: the recipe's own title, or "3 meals".
     val kicker = if (recipes.size == 1) recipes[0].title else if (recipes.size > 1) ui.tr("meals", "count" to recipes.size) else null
+    val photos = remember(recipes) { recipes.mapNotNull { it.photoUrl }.filter { it.startsWith("https://") }.take(3) }
     val lineCount = recipes.sumOf { it.ingredients.size }
 
     SheetFrame(t) {
         val l = login
-        Header(t, kicker, l?.title ?: headerTitle(phase, storeName, named, ui), onClose = ::close)
+        Header(t, kicker, l?.title ?: headerTitle(phase, storeName, named, ui), onClose = ::close, photos = photos)
         val c = cart
         val r = result
         val at = store
@@ -469,7 +470,16 @@ internal fun TopRule(t: MealioTheme, thickness: Dp = 1.dp) {
 }
 
 @Composable
-internal fun Header(t: MealioTheme, recipeTitle: String?, title: String, onClose: () -> Unit) {
+private fun RecipePhoto(t: MealioTheme, url: String, modifier: Modifier) {
+    val img = rememberProductImage(url)
+    val shape = RoundedCornerShape(t.radius / 2)
+    Box(modifier.size(44.dp).clip(shape).background(t.surface).border(2.dp, t.background, shape)) {
+        if (img != null) Image(img, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+    }
+}
+
+@Composable
+internal fun Header(t: MealioTheme, recipeTitle: String?, title: String, onClose: () -> Unit, photos: List<String> = emptyList()) {
     val ui = LocalMealioUi.current
     val closeLabel = ui.tr("close")
     Row(
@@ -479,6 +489,12 @@ internal fun Header(t: MealioTheme, recipeTitle: String?, title: String, onClose
     ) {
         ui.sheet.logo?.let { logo ->
             Image(logo, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.size(36.dp).clip(RoundedCornerShape(8.dp)))
+        }
+        if (photos.isNotEmpty()) {
+            // Each photo sits 26dp past the last, so 18dp of a 44dp photo overlaps.
+            Box(Modifier.clearAndSetSemantics { }) {
+                photos.forEachIndexed { i, url -> RecipePhoto(t, url, Modifier.padding(start = 26.dp * i)) }
+            }
         }
         Column(Modifier.weight(1f)) {
             if (!recipeTitle.isNullOrEmpty()) {
@@ -589,7 +605,7 @@ fun MealioCartList(
     var version by remember(cart) { mutableIntStateOf(0) }
     val bump = { version += 1; onChange() }
     var open by remember(cart) {
-        mutableStateOf(cart.items.firstOrNull { it.status == ItemStatus.CHOOSE || it.status == ItemStatus.REMEMBERED_UNAVAILABLE }?.key)
+        mutableStateOf(cart.items.firstOrNull { !it.startUnchecked && (it.status == ItemStatus.CHOOSE || it.status == ItemStatus.REMEMBERED_UNAVAILABLE) }?.key)
     }
     @Suppress("UNUSED_EXPRESSION") version
     val est = cart.estimate()
@@ -649,7 +665,7 @@ fun MealioCartList(
         }
         // Said while any item has no saved product, which on a recipe's first
         // cart is every item: the run where nothing on screen shows it yet.
-        if (cart.items.any { it.status == ItemStatus.CHOOSE }) {
+        if (cart.items.any { it.status == ItemStatus.CHOOSE && !it.startUnchecked }) {
             val shape = RoundedCornerShape(10.dp)
             Box(
                 Modifier
@@ -853,6 +869,7 @@ private fun ItemRow(
             priceText(picked, ui).takeIf { it.isNotEmpty() },
             if (picked.id == item.remembered?.id) ui.tr("yourUsual") else null,
         ).joinToString(" · ")
+        item.startUnchecked -> ui.tr("pantryHint")
         item.status == ItemStatus.REMEMBERED -> ui.tr("notAddingThisTime")
         item.status == ItemStatus.REMEMBERED_UNAVAILABLE -> ui.tr("usualOutOfStock")
         else -> ui.plural("options", options.size)

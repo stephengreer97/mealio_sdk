@@ -116,6 +116,8 @@ MealioCartButton(
 )
 ```
 
+Optional recipe details: `servings` with `makeServings` scales weights and any `quantity` you set, `RecipeIngredient(pantry = true)` or `optional = true` starts that item unchecked (`CartItem.startUnchecked`) with a "You may already have this" hint (`pantryHint`), and an https `photoUrl` shows in the sheet header, up to 3 photos.
+
 ### Several meals in one cart
 
 Pass `recipes` instead of `recipe`, up to 10 (`MAX_RECIPES`), each with its

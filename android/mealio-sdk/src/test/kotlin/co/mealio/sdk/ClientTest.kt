@@ -136,6 +136,37 @@ class ClientTest {
     }
 
     @Test
+    fun recipeDetailsAreSentOnlyWhenSet(): Unit = runBlocking {
+        val bodies = mutableListOf<JSONObject>()
+        val client = MealioClient(config(), FakeHost(), FakeTransport { _, _, b -> bodies.add(b); HttpResponse(503, "{}") })
+        val full = Recipe(
+            "r1",
+            listOf(RecipeIngredient("salt", pantry = true), RecipeIngredient("cilantro", optional = true)),
+            servings = 4.0,
+            makeServings = 6.0,
+            photoUrl = "https://example.com/tacos.jpg",
+        )
+
+        code { client.prepareCart("heb", full) }
+        code { client.prepareCart("heb", Recipe("r2", listOf(RecipeIngredient("onion")))) }
+
+        val sent = bodies[0].getJSONObject("recipe")
+        assertEquals(4.0, sent.getDouble("servings"), 0.0)
+        assertEquals(6.0, sent.getDouble("makeServings"), 0.0)
+        assertEquals("https://example.com/tacos.jpg", sent.getString("photoUrl"))
+        val lines = sent.getJSONArray("ingredients").objects()
+        assertTrue(lines[0].getBoolean("pantry"))
+        assertFalse(lines[0].has("optional"))
+        assertTrue(lines[1].getBoolean("optional"))
+        assertFalse(lines[1].has("pantry"))
+
+        val plain = bodies[1].getJSONObject("recipe")
+        for (k in listOf("servings", "makeServings", "photoUrl")) assertFalse(k, plain.has(k))
+        val line = plain.getJSONArray("ingredients").getJSONObject(0)
+        for (k in listOf("pantry", "optional")) assertFalse(k, line.has(k))
+    }
+
+    @Test
     fun noRecipesOrTooManyFailBeforeAnyRequest(): Unit = runBlocking {
         var tokens = 0
         val transport = FakeTransport { _, _, _ -> error("no calls") }

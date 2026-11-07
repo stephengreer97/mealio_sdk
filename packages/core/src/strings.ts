@@ -98,6 +98,7 @@ export const DEFAULT_STRINGS = {
   a11yMore: "More {item}",
   a11yChangeLocation: "Store location: {name}. Change location",
   a11yChangeStore: "Store: {store}. Change store",
+  pantryHint: "You may already have this",
   noStoresNear: "No {store} stores near {zip}. Try another zip code.",
 };
 

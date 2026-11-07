@@ -679,6 +679,7 @@ class CartItem {
     required this.quantity,
     this.recipes,
     this.weightLb,
+    this.startUnchecked,
     this.status = ItemStatus.choose,
     this.options = const <Product>[],
     this.selectedId,
@@ -717,6 +718,7 @@ class CartItem {
       quantity: _int(m['quantity'], 1),
       recipes: m['recipes'] is List ? _list(m['recipes']).map(ItemRecipe.fromJson).toList() : null,
       weightLb: _doubleOrNull(m['weightLb']),
+      startUnchecked: m['startUnchecked'] is bool ? m['startUnchecked']! as bool : null,
       status: status,
       options: options,
       selectedId: selectedId,
@@ -741,6 +743,10 @@ class CartItem {
   /// The recipe's own weight for this line, in lb, when it gave one in a
   /// weight unit. Null otherwise.
   final double? weightLb;
+
+  /// A pantry or optional item. It starts unchecked, even when a product is
+  /// remembered. Null from older servers.
+  final bool? startUnchecked;
 
   final ItemStatus status;
 
@@ -774,6 +780,7 @@ class CartItem {
     };
     _put(out, 'recipes', recipes?.map((ItemRecipe r) => r.toJson()).toList());
     _put(out, 'weightLb', weightLb);
+    _put(out, 'startUnchecked', startUnchecked);
     _put(out, 'rememberedPreferenceId', rememberedPreferenceId);
     _put(out, 'reason', reason);
     // ignore: deprecated_member_use_from_same_package
@@ -1148,7 +1155,14 @@ class Selection {
 }
 
 class RecipeIngredient {
-  const RecipeIngredient({required this.name, this.quantity, this.amount, this.unit});
+  const RecipeIngredient({
+    required this.name,
+    this.quantity,
+    this.amount,
+    this.unit,
+    this.pantry,
+    this.optional,
+  });
 
   factory RecipeIngredient.fromJson(Object? json) {
     final m = _mapOrNull(json) ?? const <String, Object?>{};
@@ -1157,6 +1171,8 @@ class RecipeIngredient {
       quantity: _intOrNull(m['quantity']),
       amount: m['amount'] is num ? m['amount']! as num : null,
       unit: _strOrNull(m['unit']),
+      pantry: m['pantry'] is bool ? m['pantry']! as bool : null,
+      optional: m['optional'] is bool ? m['optional']! as bool : null,
     );
   }
 
@@ -1167,17 +1183,32 @@ class RecipeIngredient {
   final num? amount;
   final String? unit;
 
+  /// Something most kitchens already have, like salt. It starts unchecked.
+  final bool? pantry;
+
+  /// The recipe works without it. It starts unchecked.
+  final bool? optional;
+
   Map<String, Object?> toJson() {
     final out = <String, Object?>{'name': name};
     _put(out, 'quantity', quantity);
     _put(out, 'amount', amount);
     _put(out, 'unit', unit);
+    _put(out, 'pantry', pantry);
+    _put(out, 'optional', optional);
     return out;
   }
 }
 
 class Recipe {
-  const Recipe({required this.id, this.title, required this.ingredients});
+  const Recipe({
+    required this.id,
+    this.title,
+    required this.ingredients,
+    this.servings,
+    this.makeServings,
+    this.photoUrl,
+  });
 
   factory Recipe.fromJson(Object? json) {
     final m = _mapOrNull(json) ?? const <String, Object?>{};
@@ -1185,6 +1216,9 @@ class Recipe {
       id: _str(m['id']),
       title: _strOrNull(m['title']),
       ingredients: _list(m['ingredients']).map(RecipeIngredient.fromJson).toList(),
+      servings: m['servings'] is num ? m['servings']! as num : null,
+      makeServings: m['makeServings'] is num ? m['makeServings']! as num : null,
+      photoUrl: _strOrNull(m['photoUrl']),
     );
   }
 
@@ -1192,10 +1226,24 @@ class Recipe {
   final String? title;
   final List<RecipeIngredient> ingredients;
 
+  /// How many the recipe as written feeds.
+  final num? servings;
+
+  /// How many the user is cooking for. With [servings], weights and any
+  /// `quantity` you set scale to match, up to 10 times either way. A line with
+  /// no quantity stays at one package.
+  final num? makeServings;
+
+  /// An https image of the dish. The drop-in shows it at the top of the sheet.
+  final String? photoUrl;
+
   Map<String, Object?> toJson() {
     final out = <String, Object?>{'id': id};
     _put(out, 'title', title);
     out['ingredients'] = ingredients.map((RecipeIngredient i) => i.toJson()).toList();
+    _put(out, 'servings', servings);
+    _put(out, 'makeServings', makeServings);
+    _put(out, 'photoUrl', photoUrl);
     return out;
   }
 }

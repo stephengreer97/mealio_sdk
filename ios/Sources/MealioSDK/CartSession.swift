@@ -101,6 +101,15 @@ func mealioListAnd(_ xs: [String]) -> String {
     MealioText().listAnd(xs)
 }
 
+/// The photos at the top of the drop-in's sheet: https only, at most three.
+func mealioRecipePhotos(_ recipes: [Recipe]) -> [URL] {
+    let urls = recipes.compactMap { recipe -> URL? in
+        guard let s = recipe.photoUrl, s.hasPrefix("https://") else { return nil }
+        return URL(string: s)
+    }
+    return Array(urls.prefix(3))
+}
+
 /// True for a 5-digit US zip, the only thing the store lookup takes.
 func mealioIsZip(_ z: String) -> Bool {
     z.utf8.count == 5 && z.utf8.allSatisfy { (48...57).contains($0) }
@@ -121,7 +130,8 @@ public final class CartSession: ObservableObject {
     public let cart: PreparedCart
     private let client: MealioClient
 
-    /// The user's picks, by item key. Remembered items start picked.
+    /// The user's picks, by item key. Remembered items start picked, unless
+    /// the server marked them `startUnchecked`.
     @Published private var picks: [String: Pick] = [:]
     /// Options found with `search`, by item key, newest first.
     @Published private var extra: [String: [Product]] = [:]
@@ -134,7 +144,7 @@ public final class CartSession: ObservableObject {
         self.client = client
         self.cart = cart
         for item in cart.items {
-            if let id = item.selectedId {
+            if let id = item.selectedId, !item.startUnchecked {
                 picks[item.key] = Pick(productId: id, preferenceId: item.rememberedPreferenceId)
             }
         }
@@ -148,6 +158,15 @@ public final class CartSession: ObservableObject {
     public var location: StoreLocation? { cart.location }
     /// Every item, in recipe order (older servers: rebuilt from the 0.1 groupings).
     public var items: [CartItem] { cart.items }
+    /// The item the list opens with: the first that needs a choice. A pantry
+    /// or optional item can wait until the user checks it.
+    var firstToOpen: String? {
+        items.first { !$0.startUnchecked && ($0.status == .choose || $0.status == .rememberedUnavailable) }?.key
+    }
+    /// True while an item the user is buying has no saved product yet.
+    var showsRememberNote: Bool {
+        items.contains { $0.status == .choose && !$0.startUnchecked }
+    }
     /// The recipes this cart was made from. Older servers: none listed.
     public var recipes: [CartRecipe] { cart.recipes ?? [] }
     /// The recipes that call for an item, for a "For Tacos and Pasta" line.

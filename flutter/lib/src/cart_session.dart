@@ -1,9 +1,10 @@
 // A prepared cart the app can show and edit before filling the store cart.
 // Mirrors CartSession in packages/core/src/client.ts.
 //
-// Every item is shown every run. Remembered products start selected; the user
-// can select another option, search for something else, or deselect an item
-// to leave it out of THIS run (its remembered choice is kept for next time).
+// Every item is shown every run. Remembered products start selected, except
+// a `startUnchecked` item (pantry or optional), which waits for the user. The
+// user can select another option, search for something else, or deselect an
+// item to leave it out of THIS run (its remembered choice is kept for next time).
 
 import 'package:flutter/foundation.dart';
 
@@ -138,7 +139,9 @@ class CartSession extends ChangeNotifier {
   CartSession(this._client, this.cart) {
     for (final CartItem it in items) {
       final id = it.selectedId;
-      if (id != null && id.isNotEmpty) _picks[it.key] = _Pick(id, it.rememberedPreferenceId);
+      if (id != null && id.isNotEmpty && it.startUnchecked != true) {
+        _picks[it.key] = _Pick(id, it.rememberedPreferenceId);
+      }
     }
   }
 

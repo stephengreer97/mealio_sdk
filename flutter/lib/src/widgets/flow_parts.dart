@@ -103,6 +103,7 @@ class SheetFrame extends StatelessWidget {
     required this.theme,
     required this.title,
     this.kicker,
+    this.photos = const <String>[],
     required this.onClose,
     required this.child,
   });
@@ -110,6 +111,9 @@ class SheetFrame extends StatelessWidget {
   final MealioTheme theme;
   final String title;
   final String? kicker;
+
+  /// Recipe photos for the header, already filtered. See [SheetHeader.photos].
+  final List<String> photos;
   final VoidCallback onClose;
   final Widget child;
 
@@ -148,7 +152,7 @@ class SheetFrame extends StatelessWidget {
                         decoration: BoxDecoration(color: t.border, borderRadius: BorderRadius.circular(3)),
                       ),
                     ),
-                    SheetHeader(theme: t, kicker: kicker, title: title, onClose: onClose),
+                    SheetHeader(theme: t, kicker: kicker, photos: photos, title: title, onClose: onClose),
                     Expanded(child: child),
                   ],
                 ),
@@ -161,11 +165,73 @@ class SheetFrame extends StatelessWidget {
   }
 }
 
+/// The dish photos in the header. Decoration only, so screen readers skip them.
+class _RecipePhotos extends StatelessWidget {
+  const _RecipePhotos({required this.theme, required this.photos});
+
+  static const double _size = 44;
+  static const double _ring = 2;
+  static const double _overlap = 18;
+
+  final MealioTheme theme;
+  final List<String> photos;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = theme;
+    const step = _size - _overlap;
+    return ExcludeSemantics(
+      key: const ValueKey<String>('mealio-recipe-photos'),
+      child: SizedBox(
+        width: _size + step * (photos.length - 1),
+        height: _size,
+        child: Stack(
+          children: <Widget>[
+            for (var i = 0; i < photos.length; i++)
+              Positioned(
+                left: step * i,
+                top: 0,
+                width: _size,
+                height: _size,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: t.surface,
+                    borderRadius: BorderRadius.circular(t.radius / 2),
+                    border: Border.all(color: t.background, width: _ring),
+                  ),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(math.max(0, t.radius / 2 - _ring)),
+                    child: Image.network(
+                      photos[i],
+                      fit: BoxFit.cover,
+                      excludeFromSemantics: true,
+                      errorBuilder: (BuildContext context, Object error, StackTrace? stack) => const SizedBox.shrink(),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class SheetHeader extends StatelessWidget {
-  const SheetHeader({super.key, required this.theme, this.kicker, required this.title, required this.onClose});
+  const SheetHeader({
+    super.key,
+    required this.theme,
+    this.kicker,
+    this.photos = const <String>[],
+    required this.title,
+    required this.onClose,
+  });
 
   final MealioTheme theme;
   final String? kicker;
+
+  /// Image URLs, stacked and overlapping beside the title.
+  final List<String> photos;
   final String title;
   final VoidCallback onClose;
 
@@ -192,6 +258,10 @@ class SheetHeader extends StatelessWidget {
                 excludeFromSemantics: true,
               ),
             ),
+            const SizedBox(width: 12),
+          ],
+          if (photos.isNotEmpty) ...<Widget>[
+            _RecipePhotos(theme: t, photos: photos),
             const SizedBox(width: 12),
           ],
           Expanded(

@@ -12,6 +12,12 @@
   `PreparedCart.location`, `CartSession.location`,
   `MealioCartList.onChangeLocation` and
   `MealioErrorCode.locationRequired`.
+- Recipe data. `Recipe` gains `servings`, `makeServings` and `photoUrl`;
+  `RecipeIngredient` gains `pantry` and `optional`. Each goes to the server
+  only when set. Pantry and optional items come back with the new
+  `CartItem.startUnchecked`, stay unchecked even with a remembered product,
+  and show the new `pantryHint` string until checked. The sheet header shows
+  up to 3 recipe photos, https only.
 - `MealioCartFlow` and `MealioCartButton` no longer send `zip` to
   `prepareCart`. The parameter stays and fills the zip box.
 - Look and text. `MealioCart.configure`, `MealioScope` and `MealioThemeScope`

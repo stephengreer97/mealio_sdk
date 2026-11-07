@@ -102,6 +102,7 @@ val DEFAULT_STRINGS: Map<String, String> = linkedMapOf(
     "a11yMore" to "More {item}",
     "a11yChangeLocation" to "Store location: {name}. Change location",
     "a11yChangeStore" to "Store: {store}. Change store",
+    "pantryHint" to "You may already have this",
 )
 
 private val PLACEHOLDER = Regex("\\{(\\w+)\\}")

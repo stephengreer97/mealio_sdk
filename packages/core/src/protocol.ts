@@ -178,6 +178,8 @@ export interface CartItem {
   recipes?: ItemRecipe[];
   /** The recipe's own weight for this line, in lb, when it gave one in a weight unit. */
   weightLb?: number;
+  /** A pantry or optional item. It starts unchecked, even when a product is remembered. */
+  startUnchecked?: boolean;
   /**
    * remembered              the user's remembered product, in stock, pre-selected
    * choose                  nothing remembered yet: the user picks
@@ -304,12 +306,26 @@ export interface RecipeIngredient {
   quantity?: number;
   amount?: number | null;
   unit?: string | null;
+  /** Something most kitchens already have, like salt. It starts unchecked. */
+  pantry?: boolean;
+  /** The recipe works without it. It starts unchecked. */
+  optional?: boolean;
 }
 
 export interface Recipe {
   id: string;
   title?: string;
   ingredients: RecipeIngredient[];
+  /** How many the recipe as written feeds. */
+  servings?: number;
+  /**
+   * How many the user is cooking for. With `servings`, weights and any
+   * `quantity` you set scale to match, up to 10 times either way. A line with no
+   * quantity stays at one package.
+   */
+  makeServings?: number;
+  /** An https image of the dish. The drop-in shows it at the top of the sheet. */
+  photoUrl?: string;
 }
 
 /** At most this many recipes in one prepareCart. */

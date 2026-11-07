@@ -91,5 +91,6 @@
   "a11yLess": "Less {item}",
   "a11yMore": "More {item}",
   "a11yChangeLocation": "Store location: {name}. Change location",
-  "a11yChangeStore": "Store: {store}. Change store"
+  "a11yChangeStore": "Store: {store}. Change store",
+  "pantryHint": "You may already have this"
 }

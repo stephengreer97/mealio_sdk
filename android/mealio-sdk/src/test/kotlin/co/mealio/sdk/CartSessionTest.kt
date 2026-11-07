@@ -573,4 +573,39 @@ class CartSessionTest {
         assertEquals("Para Tacos y Pasta", forRecipes(cs, "onion", text))
         assertNull(forRecipes(cs, "salt", text))
     }
+
+    /** salt marked startUnchecked and remembered, onion remembered, from a server that sends the flag. */
+    private fun pantry(): JSONObject {
+        val salt = product("s1", "Salt", 1.0)
+        val onion = product("o1", "Onion", 1.0)
+        return JSONObject().put("cartId", "c1").put("store", "heb")
+            .put("items", JSONArray()
+                .put(item("salt", "remembered", listOf(salt), "s1", salt).put("startUnchecked", true))
+                .put(item("onion", "remembered", listOf(onion), "o1", onion)))
+    }
+
+    @Test
+    fun aRememberedProductStaysUncheckedUntilTheUserChecksIt() {
+        val cs = session(pantry())
+        assertTrue(cs.items[0].startUnchecked)
+        assertFalse(cs.isSelected("salt"))
+        assertTrue(cs.isSelected("onion"))
+        assertEquals(Selection("salt", null, remember = false), cs.selections()[0])
+        cs.select("salt", "s1")
+        assertTrue(cs.isSelected("salt"))
+        assertEquals(Selection("salt", "s1", quantity = 1, remember = true, preferenceId = null), cs.selections()[0])
+    }
+
+    @Test
+    fun aStartUncheckedItemIsLeftOutOfTheEstimateUntilChecked() {
+        val cs = session(pantry())
+        assertEquals(1, cs.estimate().count)
+        cs.select("salt", "s1")
+        assertEquals(2, cs.estimate().count)
+    }
+
+    @Test
+    fun startUncheckedDefaultsToFalseWhenTheServerLeavesItOut() {
+        assertFalse(session().items[0].startUnchecked)
+    }
 }
