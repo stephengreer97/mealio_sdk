@@ -60,6 +60,8 @@ fun MealioCartContent(
         busy = busy,
         modifier = modifier,
         onAdd = {
+            // Two taps before a redraw add once.
+            if (busy) return@MealioCartList
             busy = true
             scope.launch {
                 try {

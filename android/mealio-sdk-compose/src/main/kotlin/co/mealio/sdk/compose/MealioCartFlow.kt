@@ -1,5 +1,8 @@
 package co.mealio.sdk.compose
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.view.ViewGroup
 import android.view.WindowManager
 import androidx.compose.animation.AnimatedVisibility
@@ -58,6 +61,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -71,6 +75,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
@@ -115,8 +120,9 @@ import co.mealio.sdk.StoreInfo
 import co.mealio.sdk.StoreLocation
 import co.mealio.sdk.forRecipes
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Job
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.launch
+import java.util.UUID
 
 // The drop-in: ONE sheet that runs the whole add-to-cart flow over the
 // partner's app. Loading, store sign-in, the list, adding, done. Port of
@@ -125,10 +131,6 @@ import kotlinx.coroutines.launch
 // The list shows EVERY item, every time. Remembered products come back
 // pre-selected. Unchecking an item leaves it out of this run only: its
 // remembered choice stays for next time. There is no skip button.
-
-private enum class Phase { LOADING, LIST, ADDING, DONE, ERROR, STORES, LOCATION }
-
-private data class FlowError(val code: String, val message: String)
 
 /**
  * The whole flow in one sheet. Requires MealioCart.configure(...) first.
@@ -181,12 +183,55 @@ fun MealioCartFlow(
     doneMessage: String? = null,
     doneAction: MealioDoneAction? = null,
 ) {
-    if (!visible) return
-    // Everything below lives only while the sheet is open, so each open starts fresh.
-    val backRef = remember { mutableStateOf<() -> Unit>({}) }
-    SheetDialog(onDismiss = { backRef.value() }) {
-        FlowSheet(theme, recipes, store, zip, onClose, onAdded, onError, backRef, doneMessage, doneAction)
+    // Hidden by the partner mid-add: the sheet stays up until the add ends.
+    val shown = remember { mutableStateOf<CartFlowModel?>(null) }
+    val stillAdding = shown.value?.let { it.adding && !it.finished } == true
+    if (!visible && !stillAdding) return
+    // Each open gets a new id; a recreated activity gets the same one back and
+    // finds the same model, its job still running. Everything else about this
+    // open lives in that model, outside composition.
+    var openedNow = false
+    val id = rememberSaveable { openedNow = true; UUID.randomUUID().toString() }
+    val ui = LocalMealioUi.current
+    val callbacks = FlowCallbacks(onClose, onAdded, onError)
+    val model = remember(id) {
+        FlowModels.obtain(id, openedNow) { CartFlowModel(recipes, store, ui, callbacks) }
     }
+    if (model == null) {
+        // Restored after the process died: the cart it showed is gone, and a new
+        // one is not started without the user asking. Close instead.
+        val onCloseNow by rememberUpdatedState(onClose)
+        LaunchedEffect(id) { onCloseNow(null) }
+        return
+    }
+    SideEffect {
+        model.ui = ui
+        model.callbacks = callbacks
+        shown.value = model
+    }
+    LaunchedEffect(model, store) { model.propStoreChanged(store) }
+    val user by MealioCart.user.collectAsState()
+    LaunchedEffect(model, user, model.phase) { model.checkUser(user) }
+    val activity = LocalContext.current.findActivity()
+    DisposableEffect(model) {
+        model.attach()
+        onDispose {
+            // A recreation keeps the model and its job; leaving for good ends them.
+            if (activity?.isChangingConfigurations == true) model.detach() else model.dispose()
+        }
+    }
+    SheetDialog(onDismiss = { model.back() }) {
+        FlowSheet(theme, model, recipes, zip, doneMessage, doneAction)
+    }
+}
+
+private fun Context.findActivity(): Activity? {
+    var c: Context? = this
+    while (c is ContextWrapper) {
+        if (c is Activity) return c
+        c = c.baseContext
+    }
+    return null
 }
 
 /** The full-window dialog every Mealio sheet sits in. */
@@ -262,155 +307,22 @@ internal fun SheetFrame(t: MealioTheme, content: @Composable ColumnScope.() -> U
 @Composable
 private fun FlowSheet(
     t: MealioTheme,
+    model: CartFlowModel,
     recipes: List<Recipe>,
-    initialStore: String?,
     zip: String?,
-    onClose: (AddResult?) -> Unit,
-    onAdded: (AddResult) -> Unit,
-    onError: (Exception) -> Unit,
-    backRef: androidx.compose.runtime.MutableState<() -> Unit>,
     doneMessage: String?,
     doneAction: MealioDoneAction?,
 ) {
     val ui = LocalMealioUi.current
-    val scope = rememberCoroutineScope()
-    var phase by remember { mutableStateOf(Phase.LOADING) }
-    var step by remember { mutableStateOf(Step.CONNECTING) }
-    var cart by remember { mutableStateOf<CartSession?>(null) }
-    var result by remember { mutableStateOf<AddResult?>(null) }
-    var error by remember { mutableStateOf<FlowError?>(null) }
-    var job by remember { mutableStateOf<Job?>(null) }
-    var store by remember { mutableStateOf(initialStore) }
-    var stores by remember { mutableStateOf<List<StoreInfo>?>(null) }
-    var backTo by remember { mutableStateOf(Phase.LIST) }
     val login by MealioInlineLogin.current.collectAsState()
-    val onCloseNow by rememberUpdatedState(onClose)
-    val onAddedNow by rememberUpdatedState(onAdded)
-    val onErrorNow by rememberUpdatedState(onError)
-
-    // While this sheet is open, a store sign-in renders inside it.
-    DisposableEffect(Unit) {
-        val detach = MealioInlineLogin.attachSheet()
-        onDispose { detach() }
-    }
-
-    fun stepNow(): MealioSheetStep = if (login != null) MealioSheetStep.SIGNIN else when (phase) {
-        Phase.LOADING -> MealioSheetStep.LOADING
-        Phase.LIST -> MealioSheetStep.LIST
-        Phase.ADDING -> MealioSheetStep.ADDING
-        Phase.DONE -> MealioSheetStep.DONE
-        Phase.ERROR -> MealioSheetStep.ERROR
-        Phase.STORES -> MealioSheetStep.STORES
-        Phase.LOCATION -> MealioSheetStep.LOCATION
-    }
-
-    fun fail(e: Exception, fallback: String, at: MealioSheetStep) {
-        val code = (e as? MealioException)?.code ?: "error"
-        error = FlowError(code, e.message ?: fallback)
-        phase = Phase.ERROR
-        ui.emit(MealioEvent.Error(code, at))
-        onErrorNow(e)
-    }
-
-    fun openStores(from: Phase) {
-        backTo = from
-        phase = Phase.STORES
-        if (stores == null) {
-            scope.launch {
-                stores = try {
-                    MealioCart.stores()
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    emptyList()
-                }
-            }
-        }
-    }
-
-    fun openLocation(from: Phase) {
-        backTo = from
-        phase = Phase.LOCATION
-    }
-
-    fun askLocation(storeId: String, from: Phase) {
-        ui.emit(MealioEvent.LocationAsked(storeId))
-        openLocation(from)
-    }
-
-    fun start(storeId: String?) {
-        job?.cancel()
-        phase = Phase.LOADING; step = Step.CONNECTING; cart = null; result = null; error = null
-        job = scope.launch {
-            try {
-                val c = MealioCart.prepareCart(storeId, recipes) { s, _ -> step = s }
-                store = c.store
-                cart = c
-                phase = Phase.LIST
-                ui.emit(MealioEvent.ListShown(c.store, c.items.size))
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: MealioException) {
-                when (e.code) {
-                    "store_required", "store_not_allowed" -> {
-                        store = null
-                        openStores(Phase.ERROR)
-                    }
-                    // Which store the user shops at is theirs to say. With no store
-                    // named there is nothing to look up, so they pick the chain first.
-                    "location_required" -> if (storeId != null) {
-                        store = storeId
-                        askLocation(storeId, Phase.ERROR)
-                    } else {
-                        openStores(Phase.ERROR)
-                    }
-                    else -> fail(e, ui.tr("somethingWrongSentence"), MealioSheetStep.LOADING)
-                }
-            } catch (e: Exception) {
-                fail(e, ui.tr("somethingWrongSentence"), MealioSheetStep.LOADING)
-            }
-        }
-    }
-
-    fun add() {
-        val c = cart ?: return
-        phase = Phase.ADDING
-        ui.emit(MealioEvent.AddStarted(c.estimate().count))
-        job = scope.launch {
-            try {
-                val r = c.addToCart()
-                result = r
-                phase = Phase.DONE
-                ui.emit(MealioEvent.CartAdded(r.store, r.added.size, r.failed.size))
-                onAddedNow(r)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                fail(e, ui.tr("couldNotAdd"), MealioSheetStep.ADDING)
-            }
-        }
-    }
-
-    fun close() {
-        job?.cancel()
-        ui.emit(MealioEvent.SheetClosed(stepNow(), if (phase == Phase.DONE) result?.added?.size ?: 0 else 0))
-        login?.cancel()
-        onCloseNow(if (phase == Phase.DONE) result else null)
-    }
-
-    // Back: inside the store's sign-in pages first, then close the sheet.
-    backRef.value = { if (login?.goBack() != true) close() }
-
-    LaunchedEffect(Unit) {
-        ui.emit(MealioEvent.SheetOpened(recipes.size))
-        start(initialStore)
-    }
+    val phase = model.phase
+    val store = model.store
 
     val signingIn = login != null
-    LaunchedEffect(signingIn) { if (signingIn) ui.emit(MealioEvent.SigninShown(store)) }
+    LaunchedEffect(signingIn) { if (signingIn) ui.emit(MealioEvent.SigninShown(model.store)) }
 
-    val storeName = cart?.storeName ?: store?.let { storeLabel(it) } ?: ui.tr("yourStore")
-    val named = cart?.storeName != null || store != null
+    val storeName = model.cart?.storeName ?: store?.let { storeLabel(it) } ?: ui.tr("yourStore")
+    val named = model.cart?.storeName != null || store != null
     // The kicker over the title: the recipe's own title, or "3 meals".
     val kicker = if (recipes.size == 1) recipes[0].title else if (recipes.size > 1) ui.tr("meals", "count" to recipes.size) else null
     val photos = remember(recipes) { recipes.mapNotNull { it.photoUrl }.filter { it.startsWith("https://") }.take(3) }
@@ -418,42 +330,51 @@ private fun FlowSheet(
 
     SheetFrame(t) {
         val l = login
-        Header(t, kicker, l?.title ?: headerTitle(phase, storeName, named, ui), onClose = ::close, photos = photos)
-        val c = cart
-        val r = result
+        // An add cannot be stopped: X is off while it runs, unless it asked for a sign-in.
+        Header(
+            t, kicker, l?.title ?: headerTitle(phase, storeName, named, ui), onClose = { model.close() }, photos = photos,
+            closeEnabled = !(phase == Phase.ADDING && l == null),
+        )
+        val c = model.cart
+        val r = model.result
         val at = store
         when {
             l != null -> LoginPane(t, l, storeName)
-            phase == Phase.LOADING -> Loading(t, step, storeName, lineCount)
+            phase == Phase.LOADING -> Loading(t, model.step, storeName, lineCount)
             phase == Phase.STORES -> StorePicker(
-                t, stores, store,
-                onPick = { id -> ui.emit(MealioEvent.StorePicked(id)); store = id; start(id) },
-                onBack = if (c != null && backTo == Phase.LIST) ({ phase = Phase.LIST }) else null,
+                t, model.stores, store,
+                onPick = { id -> model.pickStore(id) },
+                onBack = if (c != null && model.backTo == Phase.LIST) ({ model.backToList() }) else null,
             )
             phase == Phase.LOCATION && at != null -> {
-                val backToList = c != null && backTo == Phase.LIST
+                val backToList = c != null && model.backTo == Phase.LIST
                 LocationPicker(
                     t, at, storeName,
                     startZip = c?.cart?.location?.zip ?: zip,
                     current = c?.cart?.location?.id,
-                    onPicked = { start(at) },
+                    onPicked = { model.start(at) },
                     backLabel = ui.tr(if (backToList) "backToList" else "differentStore"),
-                    onBack = if (backToList) ({ phase = Phase.LIST }) else ({ openStores(Phase.ERROR) }),
+                    onBack = if (backToList) ({ model.backToList() }) else ({ model.openStores(Phase.ERROR) }),
                 )
             }
-            (phase == Phase.LIST || phase == Phase.ADDING) && c != null ->
+            (phase == Phase.LIST || phase == Phase.ADDING) && c != null -> key(c, model.version) {
                 MealioCartList(
-                    c, storeName, busy = phase == Phase.ADDING, onAdd = ::add, theme = t, modifier = Modifier.weight(1f),
-                    onChangeStore = { openStores(Phase.LIST) },
-                    onChangeLocation = { at?.let { askLocation(it, Phase.LIST) } },
+                    c, storeName, busy = phase == Phase.ADDING, onAdd = { model.add() }, theme = t, modifier = Modifier.weight(1f),
+                    onChangeStore = { model.openStores(Phase.LIST) },
+                    onChangeLocation = { at?.let { model.askLocation(it, Phase.LIST) } },
                 )
+            }
             phase == Phase.DONE && r != null && c != null -> Done(
-                t, c, r, storeName, onDone = ::close,
+                t, c, r, storeName, onDone = { model.close() },
                 message = doneMessage,
                 actionLabel = doneAction?.label,
-                onAction = { close(); doneAction?.onClick?.invoke(r) },
+                onAction = { if (model.close()) doneAction?.onClick?.invoke(r) },
             )
-            else -> ErrorView(t, error, onRetry = { start(store) }, onClose = ::close)
+            else -> ErrorView(
+                t, model.error,
+                note = if (model.failedAdd != null) ui.tr("addFailedNote") else null,
+                onRetry = { model.retry() }, onClose = { model.close() },
+            )
         }
     }
 }
@@ -511,7 +432,14 @@ private fun RecipePhoto(t: MealioTheme, url: String, modifier: Modifier) {
 }
 
 @Composable
-internal fun Header(t: MealioTheme, recipeTitle: String?, title: String, onClose: () -> Unit, photos: List<String> = emptyList()) {
+internal fun Header(
+    t: MealioTheme,
+    recipeTitle: String?,
+    title: String,
+    onClose: () -> Unit,
+    photos: List<String> = emptyList(),
+    closeEnabled: Boolean = true,
+) {
     val ui = LocalMealioUi.current
     val closeLabel = ui.tr("close")
     Row(
@@ -543,9 +471,10 @@ internal fun Header(t: MealioTheme, recipeTitle: String?, title: String, onClose
         Box(
             Modifier
                 .size(44.dp)
+                .alpha(if (closeEnabled) 1f else 0.4f)
                 .clip(CircleShape)
                 .background(t.surface)
-                .clickable(role = Role.Button, onClickLabel = closeLabel, onClick = onClose)
+                .clickable(enabled = closeEnabled, role = Role.Button, onClickLabel = closeLabel, onClick = onClose)
                 .semantics { contentDescription = closeLabel },
             contentAlignment = Alignment.Center,
         ) {
@@ -756,7 +685,8 @@ fun MealioCartList(
                     else Text(ui.tr("pricesAtCheckout"), style = t.ts(15, FontWeight.SemiBold, t.muted))
                 }
             }
-            val off = busy || est.count == 0
+            // Off while a search runs, so the add never waits behind it.
+            val off = busy || est.count == 0 || cart.searching
             Cta(t, enabled = !off, onClick = onAdd, modifier = Modifier.alpha(if (off) 0.5f else 1f)) {
                 if (busy) {
                     CircularProgressIndicator(Modifier.size(24.dp), color = t.onAccent, strokeWidth = 2.5.dp)
@@ -874,29 +804,32 @@ private fun ItemRow(
 
     fun pick(p: Product, preferenceId: String? = null) {
         if (disabled) return
+        if (!on) ui.emit(MealioEvent.ItemChecked(item.key))
         cart.select(item.key, p.id, preferenceId)
         onChange()
     }
 
     fun search() {
         val q = query.trim()
-        if (q.length < 2 || searching) return
+        if (q.length < 2 || searching || disabled) return
         searching = true
         searchNote = null
-        scope.launch {
+        // Undispatched, so the search is registered (cart.searching) before onChange below.
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
             try {
                 val found = cart.search(item.key, q)
                 searchNote = if (found.isEmpty()) ui.tr("nothingFound", "query" to q) else null
                 query = ""
-                onChange()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                searchNote = e.message ?: ui.tr("searchFailed")
+                if ((e as? MealioException)?.code != "cancelled") searchNote = e.message ?: ui.tr("searchFailed")
             } finally {
                 searching = false
+                onChange()
             }
         }
+        onChange() // Add is off from here until the search ends.
     }
 
     val meta = when {
@@ -1120,7 +1053,7 @@ private fun ItemRow(
                             .widthIn(min = 76.dp)
                             .clip(shape)
                             .background(t.text)
-                            .clickable(enabled = !searching, role = Role.Button, onClick = { search() })
+                            .clickable(enabled = !searching && !disabled, role = Role.Button, onClick = { search() })
                             .padding(horizontal = 14.dp),
                         contentAlignment = Alignment.Center,
                     ) {
@@ -1657,7 +1590,7 @@ private fun ColumnScope.StorePicker(
 }
 
 @Composable
-private fun ColumnScope.ErrorView(t: MealioTheme, error: FlowError?, onRetry: () -> Unit, onClose: () -> Unit) {
+private fun ColumnScope.ErrorView(t: MealioTheme, error: FlowError?, note: String?, onRetry: () -> Unit, onClose: () -> Unit) {
     val ui = LocalMealioUi.current
     val msg = if (error?.code == "login_cancelled") ui.tr("signInClosed")
     else if (error?.code == "cart_cap_reached") ui.tr("capReached")
@@ -1665,6 +1598,8 @@ private fun ColumnScope.ErrorView(t: MealioTheme, error: FlowError?, onRetry: ()
     else error?.message ?: ui.tr("somethingWrongSentence")
     Column(Modifier.weight(1f).fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(msg, style = t.ts(15))
+        // After a failed add: some lines may have gone in before it failed.
+        note?.let { Text(it, style = t.ts(13, color = t.muted, lineHeight = 18)) }
         Spacer(Modifier.weight(1f))
         Cta(t, onClick = onRetry) { Text(ui.tr("tryAgain"), style = t.ts(16, FontWeight.Bold, t.onAccent)) }
         Cta(t, onClick = onClose, background = t.surface) { Text(ui.tr("close"), style = t.ts(16, FontWeight.Bold, t.text)) }

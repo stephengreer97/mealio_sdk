@@ -11,6 +11,7 @@ import 'package:flutter/foundation.dart';
 import 'client.dart';
 import 'errors.dart';
 import 'protocol.dart';
+import 'runner.dart' show CancelToken;
 
 /// A total: of the selected items ([CartSession.estimate]) or of what the
 /// store took ([CartSession.addedTotal]).
@@ -74,24 +75,30 @@ class AddedPrice {
 
 double _cents(double n) => (n * 100).round() / 100;
 
+/// Whole cents, so adding lines up stays exact. The list and done totals both sum these.
+int _wholeCents(double amount) => (amount * 100).round();
+
 /// What one added line cost, or null when its price is unknown. By weight:
 /// price per lb times the pounds, else the package price once. Otherwise
 /// unit price times quantity. `fallback` is the chosen [Product], for
 /// servers whose added entries carry no prices.
-AddedPrice? addedPrice(AddedItem a, [Product? fallback]) => _addedPrice(a, fallback);
+AddedPrice? addedPrice(AddedItem a, [Product? fallback]) =>
+    _linePrice(a.quantity, a.weightLb, a.unitPrice, a.pricePerLb, a.estimated, fallback);
 
-AddedPrice? _addedPrice(AddedItem a, Product? fallback) {
-  final perLb = a.pricePerLb ?? fallback?.pricePerLb;
-  final unit = a.unitPrice ?? fallback?.unitPrice;
-  final est = a.estimated ?? fallback?.estimated ?? false;
-  final lb = a.weightLb;
+AddedPrice? _addedPrice(AddedItem a, Product? fallback) => addedPrice(a, fallback);
+
+AddedPrice? _linePrice(int quantity, double? weightLb, double? unitPrice, double? pricePerLb, bool? estimated, Product? fallback) {
+  final perLb = pricePerLb ?? fallback?.pricePerLb;
+  final unit = unitPrice ?? fallback?.unitPrice;
+  final est = estimated ?? fallback?.estimated ?? false;
+  final lb = weightLb;
   if (lb != null) {
     if (perLb != null) return AddedPrice(amount: _cents(perLb * lb), estimated: true);
     if (unit != null) return AddedPrice(amount: _cents(unit), estimated: true);
     return null;
   }
   if (unit == null) return null;
-  return AddedPrice(amount: _cents(unit * (a.quantity < 1 ? 1 : a.quantity)), estimated: est);
+  return AddedPrice(amount: _cents(unit * (quantity < 1 ? 1 : quantity)), estimated: est);
 }
 
 /// The weight step (lb) for a sold-by-weight item whose store lists no
@@ -155,6 +162,8 @@ class CartSession extends ChangeNotifier {
   final Map<String, List<Product>> _extra = <String, List<Product>>{};
   final Map<String, int> _qty = <String, int>{};
   final Map<String, double> _lb = <String, double>{};
+  Future<AddResult>? _adding;
+  final Set<CancelToken> _searches = <CancelToken>{};
 
   String get cartId => cart.cartId;
   String get store => cart.store;
@@ -176,6 +185,9 @@ class CartSession extends ChangeNotifier {
   /// The recipes that call for an item, for a "For Tacos and Pasta" line.
   /// Empty from older servers and for a key the cart does not have.
   List<ItemRecipe> recipesFor(String key) => _find(key)?.recipes ?? const <ItemRecipe>[];
+
+  /// What the server changed or ignored in what you sent. Empty from older servers.
+  List<CartWarning> get warnings => cart.warnings ?? const <CartWarning>[];
 
   // ignore: deprecated_member_use_from_same_package
   @Deprecated('Use items')
@@ -200,12 +212,16 @@ class CartSession extends ChangeNotifier {
   String? selectedId(String key) => _picks[key]?.productId;
 
   /// Packages to add for an item: the recipe's quantity (at least 1) until
-  /// the user changes it.
+  /// the user changes it, never over the selected product's cap. What this
+  /// returns is what is sent.
   int quantity(String key) {
-    final stored = _qty[key];
-    if (stored != null) return stored;
-    final q = _find(key)?.quantity ?? 1;
-    return q < 1 ? 1 : q;
+    var n = _qty[key];
+    if (n == null) {
+      final q = _find(key)?.quantity ?? 1;
+      n = q < 1 ? 1 : q;
+    }
+    final max = maxQuantity(key);
+    return n < max ? n : max;
   }
 
   /// The most the user can add: the selected product's store cap, else 99.
@@ -337,15 +353,61 @@ class CartSession extends ChangeNotifier {
     if (_picks.remove(key) != null) notifyListeners();
   }
 
+  /// Take the user's picks from an earlier cart, after a failed add. Works by
+  /// item key, on the same store: what they unticked stays unticked, and a
+  /// product still offered comes back with its quantity, weight and
+  /// preference. A product no longer offered leaves the item as this cart set it.
+  void restorePicks(CartSession from) {
+    if (from.store != store) return;
+    for (final CartItem it in items) {
+      if (from._find(it.key) == null) continue;
+      final productId = from.selectedId(it.key);
+      if (productId == null) {
+        deselect(it.key);
+        continue;
+      }
+      Product? product;
+      for (final Product p in options(it.key)) {
+        if (p.id == productId) product = p;
+      }
+      if (product == null) continue;
+      final pref = from.preferenceId(it.key);
+      final offered = product.preferences.any((ProductPreference p) => p.id == pref);
+      select(it.key, productId, preferenceId: offered ? pref : null);
+      final q = from._qty[it.key];
+      if (q != null) setQuantity(it.key, q);
+      final lb = from._lb[it.key];
+      if (lb != null) setWeight(it.key, lb);
+    }
+  }
+
+  /// True while a search runs. Keep Add disabled until it ends.
+  bool get searching => _searches.isNotEmpty;
+
+  /// Stop every search of this cart. Closing the sheet does this.
+  void cancelSearches() {
+    for (final CancelToken c in List<CancelToken>.of(_searches)) {
+      c.cancel();
+    }
+  }
+
   /// Search the store for something else and add the results to this item's
-  /// options. Returns what the search found.
-  Future<List<Product>> search(String key, String query, {StepListener? onStep}) async {
-    final r = await _client.search(cart.cartId, key, query, onStep: onStep);
-    final prev = _extra[key] ?? const <Product>[];
-    final seen = prev.map((Product p) => p.id).toSet();
-    _extra[key] = <Product>[...r.options.where((Product p) => !seen.contains(p.id)), ...prev];
+  /// options. Returns what the search found. Listeners hear when it starts
+  /// and ends, so Add can follow [searching].
+  Future<List<Product>> search(String key, String query, {StepListener? onStep, CancelToken? cancel}) async {
+    final stop = cancel ?? CancelToken();
+    _searches.add(stop);
     notifyListeners();
-    return r.options;
+    try {
+      final r = await _client.search(cart.cartId, key, query, onStep: onStep, cancel: stop);
+      final prev = _extra[key] ?? const <Product>[];
+      final seen = prev.map((Product p) => p.id).toSet();
+      _extra[key] = <Product>[...r.options.where((Product p) => !seen.contains(p.id)), ...prev];
+      return r.options;
+    } finally {
+      _searches.remove(stop);
+      notifyListeners();
+    }
   }
 
   /// One selection per item, in recipe order. Selected items are added and
@@ -368,7 +430,7 @@ class CartSession extends ChangeNotifier {
       return Selection(
         key: it.key,
         productId: p.productId,
-        quantity: _clampedQuantity(it.key),
+        quantity: quantity(it.key),
         remember: true,
         preferenceId: p.preferenceId,
       );
@@ -385,7 +447,7 @@ class CartSession extends ChangeNotifier {
   /// 0): a total that leaves an item out is wrong, so show no number at all
   /// ("Prices at checkout"). A weight item priced per lb counts as priced.
   CartEstimate estimate() {
-    var total = 0.0;
+    var total = 0;
     var count = 0;
     var unpriced = 0;
     var estimated = false;
@@ -393,28 +455,19 @@ class CartSession extends ChangeNotifier {
       final p = selected(it.key);
       if (p == null || needsPreference(it.key)) continue;
       count += 1;
-      if (p.soldByWeight ?? false) {
-        estimated = true;
-        final perLb = p.pricePerLb;
-        if (perLb != null) {
-          total += perLb * weight(it.key);
-        } else if (p.unitPrice != null) {
-          total += p.unitPrice!;
-        } else {
-          unpriced += 1;
-        }
+      // Priced line by line as the done screen will price it, so the two agree.
+      final byWeight = p.soldByWeight ?? false;
+      final line = _linePrice(quantity(it.key), byWeight ? weight(it.key) : null, null, null, null, p);
+      if (byWeight) estimated = true;
+      if (line == null) {
+        unpriced += 1;
         continue;
       }
-      final unit = p.unitPrice;
-      if (unit != null) {
-        total += unit * _clampedQuantity(it.key);
-      } else {
-        unpriced += 1;
-      }
-      if (p.estimated) estimated = true;
+      total += _wholeCents(line.amount);
+      if (line.estimated) estimated = true;
     }
     return CartEstimate(
-      total: unpriced > 0 ? null : _cents(total),
+      total: unpriced > 0 ? null : total / 100,
       count: count,
       estimated: estimated || unpriced > 0,
       unpriced: unpriced,
@@ -426,7 +479,7 @@ class CartSession extends ChangeNotifier {
   /// Prices come from the added entries, else (an older server) from the
   /// product selected in this session.
   CartEstimate addedTotal(AddResult result) {
-    var total = 0.0;
+    var total = 0;
     var unpriced = 0;
     var estimated = false;
     for (final AddedItem a in result.added) {
@@ -435,11 +488,11 @@ class CartSession extends ChangeNotifier {
         unpriced += 1;
         continue;
       }
-      total += p.amount;
+      total += _wholeCents(p.amount);
       if (p.estimated) estimated = true;
     }
     return CartEstimate(
-      total: unpriced > 0 ? null : _cents(total),
+      total: unpriced > 0 ? null : total / 100,
       count: result.added.length,
       estimated: estimated || unpriced > 0,
       unpriced: unpriced,
@@ -450,8 +503,18 @@ class CartSession extends ChangeNotifier {
   /// as the fallback.
   AddedPrice? addedPrice(AddedItem a) => _addedPrice(a, selected(a.key));
 
-  /// Fill the store cart with the current selections.
-  Future<AddResult> addToCart({StepListener? onStep}) => _client.addToCart(cart.cartId, selections(), onStep: onStep);
+  /// Fill the store cart with the current selections. A second call while
+  /// one is running returns the same future.
+  Future<AddResult> addToCart({StepListener? onStep}) {
+    final running = _adding;
+    if (running != null) return running;
+    late final Future<AddResult> adding;
+    adding = _client.addToCart(cart.cartId, selections(), onStep: onStep).whenComplete(() {
+      if (identical(_adding, adding)) _adding = null;
+    });
+    _adding = adding;
+    return adding;
+  }
 
   @Deprecated('Use select')
   void choose(String key, String productId, {int? quantity, bool? remember, String? preferenceId}) =>
@@ -472,12 +535,6 @@ class CartSession extends ChangeNotifier {
       if (s.key == key) return s.productId == null ? null : s;
     }
     return null;
-  }
-
-  int _clampedQuantity(String key) {
-    final q = quantity(key);
-    final max = maxQuantity(key);
-    return q < max ? q : max;
   }
 
   static List<Product> _baseOptions(CartItem it) {

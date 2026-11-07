@@ -19,6 +19,7 @@ public enum MealioStringKey: String, CaseIterable {
     case somethingWrong
     case somethingWrongSentence
     case couldNotAdd
+    case addFailedNote
     case signInClosed
     case tryAgain
     case yourStore
@@ -122,6 +123,7 @@ public let DEFAULT_STRINGS: MealioStrings = [
     .somethingWrong: "Something went wrong",
     .somethingWrongSentence: "Something went wrong.",
     .couldNotAdd: "Could not add to your cart.",
+    .addFailedNote: "Some items may already be in your cart. Check it before adding again.",
     .signInClosed: "Sign-in was closed before it finished.",
     .tryAgain: "Try again",
     .yourStore: "your store",

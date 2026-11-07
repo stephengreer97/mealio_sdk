@@ -805,7 +805,8 @@ void main() {
       expect(s.options('garlic').map((Product p) => p.id), <String>['g1', 'g9']);
       await s.search('garlic', 'powder');
       expect(s.options('garlic').map((Product p) => p.id), <String>['g1', 'g8', 'g9']);
-      expect(notified, 2);
+      // Each search notifies as it starts and as it ends, for `searching`.
+      expect(notified, 4);
       s.select('garlic', 'g9');
       expect(s.selectedId('garlic'), 'g9');
       expect(() => s.select('garlic', 'nope'), throwsA(isA<MealioException>()));

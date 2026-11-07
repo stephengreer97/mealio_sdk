@@ -303,6 +303,24 @@ MealioCart.configure(sheet: MealioSheetOptions(showTotal: false,
 as a full screen cover, which has no swipe to close. In a `.sheet` of your own,
 `.full` is the tallest sheet the system allows.
 
+While items are being added the sheet cannot be closed: the close button is
+off and the swipe does nothing. The add always ends on its own.
+
+### Hosting the sheet from UIKit
+
+`MealioCartFlow` is a SwiftUI view, so wrap it in a `UIHostingController`.
+SwiftUI's dismiss cannot close a controller UIKit presented, so dismiss it
+yourself in `onClose`. Every close button calls `onClose` straight away.
+
+```swift
+var host: UIViewController?
+let flow = MealioCartFlow(recipe: recipe, store: "heb", onClose: { result in
+    host?.dismiss(animated: true)
+})
+host = UIHostingController(rootView: flow)
+present(host!, animated: true)
+```
+
 ## Install
 
 ### Swift Package Manager
@@ -382,6 +400,26 @@ struct RecipeApp: App {
   attestation on in the Mealio dashboard.
 - `baseURL:` for testing against a non-production Mealio.
 
+If your session function throws or takes over 30 seconds, calls fail with
+`session_failed`, and your error's message is the `message`. Every request to
+Mealio gets 30 seconds, then fails with `network`.
+
+### Signed-in users
+
+Tell the SDK who is signed in, at launch and whenever it changes:
+
+```swift
+MealioCart.setUser(user?.id)                      // nil while nobody is signed in
+MealioCart.onSignInRequired = { router.showSignIn() }
+```
+
+A change of user stops a cart being prepared, starts a new Mealio session and,
+when there was a user before, signs out of the stores (an add under way finishes
+first). While it is nil there is no session and no warm-up, and
+`MealioCartButton` and store settings call `onSignInRequired` instead of opening.
+Without `onSignInRequired` the button is disabled then. Each also takes its own
+`onSignInRequired:`. Until you call `setUser`, nothing changes.
+
 ## Building your own UI
 
 Everything the sheet does is public, if you want your own screens.
@@ -457,6 +495,18 @@ entry may carry `imageUrl`, `ingredient`, `unitPrice`, `pricePerLb` and
 
 No partial totals: `estimate()` and `addedTotal(_:)` return `total: nil` when
 any counted item has no price. Show no number then, never a sum of the rest.
+Both sum whole cents line by line, so the list and done totals agree.
+
+`quantity(for:)` never exceeds the selected product's cap, and is what is sent.
+`session.warnings` lists what the server changed or ignored in your recipe
+(`ingredients_dropped`, `lines_dropped`, `servings_ignored`); debug builds log them.
+
+A prepare or search can be stopped with a `CancelToken`: it stops after the
+current step, never shows sign-in, and fails with `cancelled`.
+`session.searching` is true while a search runs (keep Add off), and
+`session.cancelSearches()` stops them. An add cannot be cancelled, and a second
+`addToCart` while one runs gets the same result. After a failed add, prepare a
+new cart and call `newSession.restorePicks(from: oldSession)` to keep the user's picks.
 
 ### Upgrading from 0.1
 
@@ -507,6 +557,9 @@ All errors are `MealioError` with a `code` and a readable `message`:
 | `store_unavailable` | The store cannot be reached now |
 | `login_cancelled` | The user closed the login sheet |
 | `session_expired` | The SDK session token expired twice in a row; get a new one from your server |
+| `session_failed` | Your session function threw or took over 30 seconds; `message` is your error's |
+| `not_signed_in` | `setUser(nil)`: nobody is signed in, so there is no session |
+| `cancelled` | A prepare or search was stopped (the sheet closed or the user changed) |
 | `network` | Could not reach Mealio |
 | `unsupported` | An instruction this SDK version does not know (update the SDK) |
 | `server` | Mealio answered with an error, or something the SDK could not read |

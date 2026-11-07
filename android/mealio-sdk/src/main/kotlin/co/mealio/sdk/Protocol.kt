@@ -464,6 +464,8 @@ data class PreparedCart(
     val recipes: List<CartRecipe> = emptyList(),
     /** The exact store, on a Kroger family cart. The user can change it. Null from older servers. */
     val location: StoreLocation? = null,
+    /** What the server changed or ignored in what was sent. Empty from older servers. */
+    val warnings: List<CartWarning> = emptyList(),
 ) {
     companion object {
         fun fromJson(o: JSONObject): PreparedCart {
@@ -483,7 +485,22 @@ data class PreparedCart(
                 storeName = o.str("storeName"),
                 recipes = o.arr("recipes")?.objects()?.map { CartRecipe.fromJson(it) } ?: emptyList(),
                 location = o.obj("location")?.let { StoreLocation.fromJson(it) },
+                warnings = o.arr("warnings")?.objects()?.mapNotNull { CartWarning.fromJson(it) } ?: emptyList(),
             )
+        }
+    }
+}
+
+/** Something the server changed or ignored in what was sent. The cart still works. */
+data class CartWarning(
+    /** ingredients_dropped, lines_dropped, servings_ignored, or a newer code. */
+    val code: String,
+    val message: String,
+) {
+    companion object {
+        fun fromJson(o: JSONObject): CartWarning? {
+            val code = o.str("code") ?: return null
+            return CartWarning(code, o.str("message") ?: "")
         }
     }
 }

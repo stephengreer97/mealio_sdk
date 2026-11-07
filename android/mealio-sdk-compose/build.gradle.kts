@@ -32,6 +32,11 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    testOptions {
+        // The flow model is plain Kotlin; Android calls it may reach return defaults.
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 dependencies {
@@ -43,6 +48,13 @@ dependencies {
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3")
+    // android.jar's org.json is a stub; the SDK parses with the real one in tests.
+    testImplementation("org.json:json:20231013")
+    // Signs test envelopes with the shared TEST key.
+    testImplementation("org.bouncycastle:bcprov-jdk18on:1.77")
 }
 
 // Maven Central: co.mealio:mealio-sdk-compose. Signed only when a key is present (the

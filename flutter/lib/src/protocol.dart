@@ -792,6 +792,22 @@ class CartItem {
 List<CartItem> _items(Object? v, String group) =>
     _list(v).map((Object? j) => CartItem.fromJson(j, group: group)).toList();
 
+/// Something the server changed or ignored in what was sent. The cart still works.
+class CartWarning {
+  const CartWarning({required this.code, required this.message});
+
+  factory CartWarning.fromJson(Object? json) {
+    final m = _mapOrNull(json) ?? const <String, Object?>{};
+    return CartWarning(code: _str(m['code']), message: _str(m['message']));
+  }
+
+  /// `ingredients_dropped`, `lines_dropped`, `servings_ignored`, or a newer code.
+  final String code;
+  final String message;
+
+  Map<String, Object?> toJson() => <String, Object?>{'code': code, 'message': message};
+}
+
 class PreparedCart {
   const PreparedCart({
     required this.cartId,
@@ -803,6 +819,7 @@ class PreparedCart {
     this.ready = const <CartItem>[],
     this.needsChoice = const <CartItem>[],
     this.unavailable = const <CartItem>[],
+    this.warnings,
   });
 
   /// Reads `items`; a 0.1 server without it gets items rebuilt from the
@@ -825,6 +842,7 @@ class PreparedCart {
       ready: ready,
       needsChoice: needsChoice,
       unavailable: unavailable,
+      warnings: m['warnings'] is List ? _list(m['warnings']).map(CartWarning.fromJson).toList() : null,
     );
   }
 
@@ -853,6 +871,9 @@ class PreparedCart {
   @Deprecated('Use items')
   final List<CartItem> unavailable;
 
+  /// What the server changed or ignored in what was sent. Null from older servers.
+  final List<CartWarning>? warnings;
+
   Map<String, Object?> toJson() {
     final out = <String, Object?>{'cartId': cartId, 'store': store};
     _put(out, 'storeName', storeName);
@@ -865,6 +886,7 @@ class PreparedCart {
     out['needsChoice'] = needsChoice.map((CartItem i) => i.toJson()).toList();
     // ignore: deprecated_member_use_from_same_package
     out['unavailable'] = unavailable.map((CartItem i) => i.toJson()).toList();
+    _put(out, 'warnings', warnings?.map((CartWarning w) => w.toJson()).toList());
     return out;
   }
 }

@@ -10,12 +10,15 @@ val BLOCKED_PATTERNS: List<String> = listOf(
     "payment",
     "billing",
     "wallet",
-    "place-?order",
-    "submit-?order",
-    "order-?confirm",
+    "place[-_]?order",
+    "submit[-_]?order",
+    "order[-_]?confirm",
     "gift-?card",
     "/account/(delete|close|security|password)",
     "/addresses?/(add|edit|delete|new)",
+    "/orders?/(submit|place)(/|\\?|$)",
+    "/cart/confirm",
+    "/purchase(/|\\?|$)",
 )
 
 private val BLOCKED_RE = Regex(BLOCKED_PATTERNS.joinToString("|"), RegexOption.IGNORE_CASE)
@@ -117,7 +120,7 @@ private val URL_RE = Regex("^([a-z][a-z0-9+.-]*)://([^/?#]*)([^#]*)", RegexOptio
 private val AUTHORITY_RE = Regex("^([a-z0-9-]+(?:\\.[a-z0-9-]+)*)(?::\\d{1,5})?$", RegexOption.IGNORE_CASE)
 private val PERCENT_RE = Regex("%([0-9a-fA-F]{2})")
 private val OPERATION_NAME_RE = Regex("\"operationName\"\\s*:\\s*\"([^\"]*)\"")
-private val MUTATION_RE = Regex("\\bmutation\\s+([A-Za-z_][A-Za-z0-9_]*)")
+private val FORM_FIELD_RE = Regex("(?:^|&)(operationName|query)=([^&]*)")
 private val OPS_RE = Regex(BLOCKED_GRAPHQL_OPERATION, RegexOption.IGNORE_CASE)
 
 /**
@@ -194,31 +197,141 @@ fun isBlockedPath(pathAndQuery: String?): Boolean {
     return BLOCKED_RE.containsMatchIn(s) || BLOCKED_RE.containsMatchIn(decodePercent(s))
 }
 
+/** JavaScript's line terminators: `.` in a JS regex stops at these. */
+private fun isLineEnd(c: Char) = c == '\n' || c == '\r' || c == '\u2028' || c == '\u2029'
+
+private fun isNameStart(c: Char) = c in 'A'..'Z' || c in 'a'..'z' || c == '_'
+private fun isNamePart(c: Char) = isNameStart(c) || c in '0'..'9'
+
+/**
+ * Names and the tokens { } ( ) of a GraphQL document, with block strings,
+ * strings and comments left out. A hand-written scanner rather than the
+ * reference's regex, which java.util.regex can overflow its stack on with a
+ * long string; it reads the same tokens.
+ */
+private fun graphqlTokens(doc: String): List<String> {
+    val out = ArrayList<String>()
+    var i = 0
+    val n = doc.length
+    while (i < n) {
+        val c = doc[i]
+        if (c == '"') {
+            if (doc.startsWith("\"\"\"", i)) {
+                val end = doc.indexOf("\"\"\"", i + 3)
+                if (end >= 0) { i = end + 3; continue }
+            }
+            // "(?:[^"\\]|\\.)*": a backslash escapes any one character but a line end.
+            var j = i + 1
+            var closed = -1
+            while (j < n) {
+                val d = doc[j]
+                if (d == '"') { closed = j; break }
+                if (d == '\\') {
+                    if (j + 1 < n && !isLineEnd(doc[j + 1])) { j += 2; continue }
+                    break
+                }
+                j += 1
+            }
+            i = if (closed >= 0) closed + 1 else i + 1
+            continue
+        }
+        if (c == '#') {
+            while (i < n && doc[i] != '\n' && doc[i] != '\r') i += 1
+            continue
+        }
+        if (c == '{' || c == '}' || c == '(' || c == ')') { out.add(c.toString()); i += 1; continue }
+        if (isNameStart(c)) {
+            val start = i
+            while (i < n && isNamePart(doc[i])) i += 1
+            out.add(doc.substring(start, i))
+            continue
+        }
+        i += 1
+    }
+    return out
+}
+
+/**
+ * Every name a GraphQL document's mutations use: the operation's name and the
+ * fields it selects at any depth, aliases included, plus the fields of its
+ * fragments. Arguments and `on Type` conditions are not fields. Empty when the
+ * document has no mutation, so a query may read a field called paymentMethods.
+ * Port of mutationNames in packages/core/src/allowlist.ts.
+ */
+fun mutationNames(doc: String): List<String> {
+    val names = ArrayList<String>()
+    var braces = 0
+    var parens = 0
+    var kind = ""
+    var mutation = false
+    var afterOn = false
+    for (t in graphqlTokens(doc)) {
+        when {
+            t == "(" -> parens += 1
+            t == ")" -> parens = maxOf(0, parens - 1)
+            parens > 0 -> continue
+            t == "{" -> braces += 1
+            t == "}" -> { braces = maxOf(0, braces - 1); if (braces == 0) kind = "" }
+            braces == 0 && kind.isEmpty() && t in GRAPHQL_KINDS -> {
+                kind = t
+                if (t == "mutation") mutation = true
+            }
+            afterOn -> afterOn = false
+            t == "on" -> afterOn = true
+            kind == "mutation" || kind == "fragment" -> names.add(t)
+        }
+    }
+    return if (mutation) names else emptyList()
+}
+
+private val GRAPHQL_KINDS = setOf("mutation", "query", "subscription", "fragment")
+
+/** JSON.parse as the reference uses it: an object or array, or null when the body is not JSON. */
+private fun parseJsonBody(body: String): Any? {
+    val s = body.trim()
+    if (!s.startsWith("{") && !s.startsWith("[")) return null
+    return try {
+        val tok = org.json.JSONTokener(s)
+        val v = tok.nextValue()
+        if (tok.nextClean() != 0.toChar()) null else v
+    } catch (e: Exception) {
+        null
+    }
+}
+
 /**
  * Does a request body name a blocked operation? Reads `operationName` the way
  * the server will (after JSON parsing, so `\\u004f` escapes do not hide it),
- * for a single request or a batch, and the names of any mutations in `query`.
+ * for a single request or a batch, or form-encoded, and every name in any
+ * mutation (see mutationNames). A persisted query that sends only an innocent
+ * name and a hash cannot be read here; the signature on the envelope covers it.
  * The guard script applies the same rule to requests a page script makes; this
  * applies it to the runner's own `fetch` op, which never passes through the page.
  */
 fun bodyBlocked(body: String?): Boolean {
     if (body.isNullOrEmpty()) return false
     val names = ArrayList<String>()
+    val docs = ArrayList<String>()
     for (m in OPERATION_NAME_RE.findAll(body)) names.add(m.groupValues[1])
-    try {
-        val list: List<Any?> = when (val j = org.json.JSONTokener(body).nextValue()) {
+    val j = parseJsonBody(body)
+    if (j != null) {
+        val list: List<Any?> = when (j) {
             is org.json.JSONArray -> (0 until j.length()).map { j.opt(it) }
-            is org.json.JSONObject -> listOf(j)
-            else -> emptyList()
+            else -> listOf(j)
         }
         for (o in list) {
             if (o !is org.json.JSONObject) continue
             (o.opt("operationName") as? String)?.let { names.add(it) }
-            val q = o.opt("query") as? String
-            if (q != null) for (m in MUTATION_RE.findAll(q)) names.add(m.groupValues[1])
+            (o.opt("query") as? String)?.let { docs.add(it) }
         }
-    } catch (e: Exception) {
-        // not JSON: the raw scan above stands
+    } else {
+        // Not JSON: form-encoded, or a bare GraphQL document.
+        docs.add(body)
+        for (m in FORM_FIELD_RE.findAll(body)) {
+            val v = decodePercent(m.groupValues[2].replace('+', ' '))
+            if (m.groupValues[1] == "query") docs.add(v) else names.add(v)
+        }
     }
+    for (d in docs) names.addAll(mutationNames(d))
     return names.any { OPS_RE.containsMatchIn(it) }
 }

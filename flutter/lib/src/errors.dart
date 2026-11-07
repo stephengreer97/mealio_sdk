@@ -9,6 +9,16 @@ abstract final class MealioErrorCode {
   static const String loginCancelled = 'login_cancelled';
   static const String sessionExpired = 'session_expired';
   static const String network = 'network';
+
+  /// The session function (`sessionTokenProvider`) failed or took over 30
+  /// seconds. `message` is its error's message.
+  static const String sessionFailed = 'session_failed';
+
+  /// `MealioCart.setUser(null)`: nobody is signed in, so no session is asked for.
+  static const String notSignedIn = 'not_signed_in';
+
+  /// A prepare or search was stopped: the sheet closed, or the user changed.
+  static const String cancelled = 'cancelled';
   static const String unsupported = 'unsupported';
 
   /// No store was given and the user has no default store yet.

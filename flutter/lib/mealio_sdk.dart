@@ -12,11 +12,14 @@ export 'src/cart_session.dart';
 export 'src/client.dart'
     show
         ClientConfig,
+        JobQueue,
         MealioClient,
         MealioStep,
         StepListener,
         defaultBaseUrl,
         mealioSdkVersion,
+        requestTimeout,
+        runCancellable,
         sdkCoreVersion,
         stepOf;
 export 'src/errors.dart';

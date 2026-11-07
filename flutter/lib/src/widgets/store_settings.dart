@@ -59,7 +59,8 @@ class MealioStoreSettings extends StatefulWidget {
   final SaveStore? saveStore;
 
   /// Shows the sheet over the app, for the user to change their store or zip.
-  /// Resolves when it closes.
+  /// Resolves when it closes. While nobody is signed in it does not open, and
+  /// calls `onSignInRequired` (or the one given to `MealioCart.configure`).
   static Future<void> show(
     BuildContext context, {
     ValueChanged<StorePreferences>? onChange,
@@ -68,7 +69,13 @@ class MealioStoreSettings extends StatefulWidget {
     LoadPreferences? loadPreferences,
     LoadLocations? loadLocations,
     SaveStore? saveStore,
+    VoidCallback? onSignInRequired,
   }) async {
+    // Nobody is signed in (MealioCart.setUser(null)): there is no store to show.
+    if (MealioCart.isConfigured && !MealioCart.instance.hasUser) {
+      (onSignInRequired ?? MealioCart.instance.onSignInRequired)?.call();
+      return;
+    }
     final carry = mealioCarryScope(context);
     await Navigator.of(context, rootNavigator: true).push<void>(
       MealioSheetRoute<void>(

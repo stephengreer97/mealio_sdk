@@ -12,12 +12,15 @@ const List<String> blockedPatterns = <String>[
   'payment',
   'billing',
   'wallet',
-  'place-?order',
-  'submit-?order',
-  'order-?confirm',
+  'place[-_]?order',
+  'submit[-_]?order',
+  'order[-_]?confirm',
   'gift-?card',
   '/account/(delete|close|security|password)',
   '/addresses?/(add|edit|delete|new)',
+  r'/orders?/(submit|place)(/|\?|$)',
+  '/cart/confirm',
+  r'/purchase(/|\?|$)',
 ];
 
 final RegExp _blockedRe = RegExp(blockedPatterns.join('|'), caseSensitive: false);
@@ -257,40 +260,99 @@ String decodePercent(String s) {
 bool isBlockedPath(String pathAndQuery) =>
     _blockedRe.hasMatch(pathAndQuery) || _blockedRe.hasMatch(decodePercent(pathAndQuery));
 
-/// GraphQL operation names no request may carry (case-insensitive regex source).
-const String blockedGraphqlOperation = 'checkout|placeorder|submitorder|payment';
+/// Operation and field names no request may carry (case-insensitive regex
+/// source). Every SDK and the guard script use this exact list.
+const String blockedGraphqlOperation =
+    'check_?out|place_?order|submit_?order|confirm_?order|create_?order|purchase|payment';
 
 final RegExp _opsRe = RegExp(blockedGraphqlOperation, caseSensitive: false);
 final RegExp _rawOperationRe = RegExp(r'"operationName"\s*:\s*"([^"]*)"');
-final RegExp _mutationRe = RegExp(r'\bmutation\s+([A-Za-z_][A-Za-z0-9_]*)');
+final RegExp _ignoredRe = RegExp(r'"""[\s\S]*?"""|"(?:[^"\\]|\\.)*"|#[^\n\r]*');
+final RegExp _tokenRe = RegExp(r'[A-Za-z_][A-Za-z0-9_]*|[{}()]');
+final RegExp _formRe = RegExp(r'(?:^|&)(operationName|query)=([^&]*)');
+const Set<String> _definitions = <String>{'mutation', 'query', 'subscription', 'fragment'};
+
+/// Every name a GraphQL document's mutations use: the operation's name and the
+/// fields it selects at any depth, aliases included, plus the fields of its
+/// fragments. Arguments and `on Type` conditions are not fields. Empty when the
+/// document has no mutation, so a query may read a field called paymentMethods.
+List<String> mutationNames(String doc) {
+  final text = doc.replaceAll(_ignoredRe, ' ');
+  final names = <String>[];
+  var braces = 0, parens = 0;
+  var kind = '';
+  var mutation = false, afterOn = false;
+  for (final Match m in _tokenRe.allMatches(text)) {
+    final t = m.group(0)!;
+    if (t == '(') {
+      parens += 1;
+    } else if (t == ')') {
+      parens = parens > 0 ? parens - 1 : 0;
+    } else if (parens > 0) {
+      continue;
+    } else if (t == '{') {
+      braces += 1;
+    } else if (t == '}') {
+      braces = braces > 0 ? braces - 1 : 0;
+      if (braces == 0) kind = '';
+    } else if (braces == 0 && kind.isEmpty && _definitions.contains(t)) {
+      kind = t;
+      if (t == 'mutation') mutation = true;
+    } else if (afterOn) {
+      afterOn = false;
+    } else if (t == 'on') {
+      afterOn = true;
+    } else if (kind == 'mutation' || kind == 'fragment') {
+      names.add(t);
+    }
+  }
+  return mutation ? names : const <String>[];
+}
 
 /// Does a request body name a blocked operation? Reads `operationName` the way
-/// the server will (after JSON parsing, so `O` escapes do not hide it),
-/// for a single request or a batch, and the names of any mutations in `query`.
-/// The guard script applies the same rule to requests a page script makes; this
-/// applies it to the runner's own `fetch` op, which never passes through the page.
+/// the server will (after JSON parsing, so `\u004f` escapes do not hide it),
+/// for a single request or a batch, or form-encoded, and every name in any
+/// mutation (see [mutationNames]). A persisted query that sends only an
+/// innocent name and a hash cannot be read here; the signature on the
+/// envelope covers it. The guard script applies the same rule to requests a
+/// page script makes; this applies it to the runner's own `fetch` op, which
+/// never passes through the page.
 bool bodyBlocked(String? body) {
   if (body == null || body.isEmpty) return false;
   final names = <String>[
     for (final Match m in _rawOperationRe.allMatches(body)) m.group(1)!,
   ];
+  final docs = <String>[];
   Object? j;
+  var json = true;
   try {
     j = jsonDecode(body);
   } on FormatException {
-    j = null; // not JSON: the raw scan above stands
+    json = false;
   }
-  final List<Object?> list = j is List<Object?> ? j : <Object?>[j];
-  for (final Object? o in list) {
-    if (o is! Map<String, Object?>) continue;
-    final op = o['operationName'];
-    if (op is String) names.add(op);
-    final q = o['query'];
-    if (q is String) {
-      for (final Match m in _mutationRe.allMatches(q)) {
-        names.add(m.group(1)!);
+  if (json) {
+    final List<Object?> list = j is List<Object?> ? j : <Object?>[j];
+    for (final Object? o in list) {
+      if (o is! Map<String, Object?>) continue;
+      final op = o['operationName'];
+      if (op is String) names.add(op);
+      final q = o['query'];
+      if (q is String) docs.add(q);
+    }
+  } else {
+    // Not JSON: form-encoded, or a bare GraphQL document.
+    docs.add(body);
+    for (final Match m in _formRe.allMatches(body)) {
+      final v = decodePercent(m.group(2)!.replaceAll('+', ' '));
+      if (m.group(1) == 'query') {
+        docs.add(v);
+      } else {
+        names.add(v);
       }
     }
+  }
+  for (final String d in docs) {
+    names.addAll(mutationNames(d));
   }
   return names.any(_opsRe.hasMatch);
 }

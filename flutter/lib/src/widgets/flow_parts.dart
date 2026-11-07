@@ -116,6 +116,7 @@ class SheetFrame extends StatelessWidget {
     this.kicker,
     this.photos = const <String>[],
     required this.onClose,
+    this.closeEnabled = true,
     required this.child,
   });
 
@@ -126,6 +127,9 @@ class SheetFrame extends StatelessWidget {
   /// Recipe photos for the header, already filtered. See [SheetHeader.photos].
   final List<String> photos;
   final VoidCallback onClose;
+
+  /// False while the sheet cannot be closed (an add under way).
+  final bool closeEnabled;
   final Widget child;
 
   @override
@@ -163,7 +167,14 @@ class SheetFrame extends StatelessWidget {
                         decoration: BoxDecoration(color: t.border, borderRadius: BorderRadius.circular(3)),
                       ),
                     ),
-                    SheetHeader(theme: t, kicker: kicker, photos: photos, title: title, onClose: onClose),
+                    SheetHeader(
+                      theme: t,
+                      kicker: kicker,
+                      photos: photos,
+                      title: title,
+                      onClose: onClose,
+                      closeEnabled: closeEnabled,
+                    ),
                     Expanded(child: child),
                   ],
                 ),
@@ -236,6 +247,7 @@ class SheetHeader extends StatelessWidget {
     this.photos = const <String>[],
     required this.title,
     required this.onClose,
+    this.closeEnabled = true,
   });
 
   final MealioTheme theme;
@@ -245,6 +257,9 @@ class SheetHeader extends StatelessWidget {
   final List<String> photos;
   final String title;
   final VoidCallback onClose;
+
+  /// False draws the close button dimmed and inert.
+  final bool closeEnabled;
 
   @override
   Widget build(BuildContext context) {
@@ -297,18 +312,22 @@ class SheetHeader extends StatelessWidget {
           const SizedBox(width: 12),
           Semantics(
             button: true,
+            enabled: closeEnabled,
             label: ui.tr('close'),
             excludeSemantics: true,
-            child: Material(
-              color: t.surface,
-              shape: const CircleBorder(),
-              clipBehavior: Clip.antiAlias,
-              child: InkWell(
-                onTap: onClose,
-                child: SizedBox(
-                  width: 44,
-                  height: 44,
-                  child: Center(child: Text('✕', style: t.style(size: 16))),
+            child: Opacity(
+              opacity: closeEnabled ? 1 : 0.4,
+              child: Material(
+                color: t.surface,
+                shape: const CircleBorder(),
+                clipBehavior: Clip.antiAlias,
+                child: InkWell(
+                  onTap: closeEnabled ? onClose : null,
+                  child: SizedBox(
+                    width: 44,
+                    height: 44,
+                    child: Center(child: Text('✕', style: t.style(size: 16))),
+                  ),
                 ),
               ),
             ),
@@ -1006,6 +1025,7 @@ class ErrorView extends StatelessWidget {
     required this.message,
     required this.onRetry,
     required this.onClose,
+    this.note,
   });
 
   final MealioTheme theme;
@@ -1013,6 +1033,9 @@ class ErrorView extends StatelessWidget {
   final String? message;
   final VoidCallback onRetry;
   final VoidCallback onClose;
+
+  /// A second line under the message, like `addFailedNote` after a failed add.
+  final String? note;
 
   @override
   Widget build(BuildContext context) {
@@ -1031,6 +1054,10 @@ class ErrorView extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
           Semantics(liveRegion: true, child: Text(msg, style: t.style(size: 15))),
+          if (note != null) ...<Widget>[
+            const SizedBox(height: 8),
+            Text(note!, key: const ValueKey<String>('mealio-add-failed-note'), style: t.style(size: 14, color: t.muted)),
+          ],
           const Spacer(),
           Cta(theme: t, label: ui.tr('tryAgain'), onTap: onRetry),
           const SizedBox(height: 12),

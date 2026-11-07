@@ -2,7 +2,10 @@
 // MealioClient with the WebView host from MealioScope and the stored
 // store-session epoch.
 
-import 'package:flutter/widgets.dart' show BuildContext, ValueChanged;
+import 'dart:async';
+
+import 'package:flutter/foundation.dart' show ChangeNotifier, Listenable, kDebugMode;
+import 'package:flutter/widgets.dart' show BuildContext, ValueChanged, VoidCallback;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
@@ -12,6 +15,7 @@ import 'errors.dart';
 import 'events.dart';
 import 'host.dart';
 import 'protocol.dart';
+import 'runner.dart' show CancelToken;
 import 'strings.dart';
 import 'theme.dart';
 import 'ui.dart';
@@ -22,7 +26,11 @@ const String _epochKey = 'mealio_sdk.store_epoch';
 
 /// Resolves the mounted MealioScope's host at call time, so `configure` can
 /// run before the first frame.
-class _ScopedHost implements MealioHost {
+class _ScopedHost implements MealioHost, MealioPageIdentity {
+  /// The mounted scope's page. A remount brings a new, blank one.
+  @override
+  Object? get currentPage => WebViewHost.current?.page;
+
   WebViewHost get _h {
     final h = WebViewHost.current;
     if (h == null) {
@@ -52,6 +60,10 @@ class _ScopedHost implements MealioHost {
       _h.fetch(store, request, timeoutMs, maxBytes);
 }
 
+class _Notifier extends ChangeNotifier {
+  void notify() => notifyListeners();
+}
+
 /// The Mealio Cart SDK.
 ///
 /// ```dart
@@ -64,9 +76,12 @@ class _ScopedHost implements MealioHost {
 /// // or MealioCartButton(recipes: <Recipe>[tacos, pasta]) for one cart.
 /// ```
 class MealioCart {
-  MealioCart._(this._client);
+  MealioCart._(this._client, this._onSignInRequired);
 
   static MealioCart? _instance;
+
+  /// One queue for the one hidden page, whichever configuration drives it.
+  static final JobQueue _queue = JobQueue();
 
   /// Set up the SDK. Call once, for example in `main()`. Calling it again
   /// replaces the configuration.
@@ -79,6 +94,9 @@ class MealioCart {
   /// `formatMoney`, `sheet` and `onEvent` (every step of the sheet, for your
   /// analytics; nothing is sent to Mealio) go with it. `MealioScope` overrides
   /// each one.
+  ///
+  /// `onSignInRequired` is called when a [MealioCartButton] or the store
+  /// settings are used while [setUser] says nobody is signed in.
   static MealioCart configure({
     required String publishableKey,
     required Future<String> Function() sessionTokenProvider,
@@ -91,6 +109,7 @@ class MealioCart {
     MealioMoneyFormat? formatMoney,
     MealioSheetOptions? sheet,
     MealioEventListener? onEvent,
+    VoidCallback? onSignInRequired,
   }) {
     MealioLook.configured = MealioLook(
       theme: theme,
@@ -110,12 +129,16 @@ class MealioCart {
         baseUrl: baseUrl,
         getAttestation: attestationProvider,
         getEpoch: storeEpoch,
+        queue: _queue,
+        debug: kDebugMode,
       ),
       _ScopedHost(),
     );
     // The hidden page checks its own navigations against the same list.
     WebViewHost.sharedAllowlist = client.allowlist;
-    return _instance = MealioCart._(client);
+    // Whatever the old configuration had under way stops with it.
+    _instance?._client.cancelJobs();
+    return _instance = MealioCart._(client, onSignInRequired);
   }
 
   /// The configured SDK. Throws [MealioException] `not_configured` before
@@ -131,9 +154,46 @@ class MealioCart {
   static bool get isConfigured => _instance != null;
 
   final MealioClient _client;
+  final VoidCallback? _onSignInRequired;
+  final _Notifier _userChanges = _Notifier();
+  bool _tracking = false;
+  String? _user;
 
   /// The client underneath, for apps that drive the protocol themselves.
   MealioClient get client => _client;
+
+  /// The `onSignInRequired` given to [configure].
+  VoidCallback? get onSignInRequired => _onSignInRequired;
+
+  /// What [setUser] was last given. Null before the first call, too: see [hasUser].
+  String? get userId => _user;
+
+  /// False while [setUser] says nobody is signed in. True until it is first called.
+  bool get hasUser => !_tracking || _user != null;
+
+  /// Notifies on every change of [setUser].
+  Listenable get userChanges => _userChanges;
+
+  /// Tell the SDK who is signed in to your app, or null for nobody. Call it
+  /// at start and whenever that changes.
+  ///
+  /// A change stops any cart being prepared or searched (an add under way
+  /// finishes), starts a new Mealio session, and if the old value was a user,
+  /// signs out of the stores. A failed store sign-out never blocks this and
+  /// is never thrown. While null there is no session and no warm-up, and
+  /// [MealioCartButton] calls `onSignInRequired` instead of opening.
+  void setUser(String? id) {
+    if (_tracking && id == _user) return;
+    _tracking = true;
+    _user = id;
+    if (_client.setUser(id)) {
+      unawaited(_clearStores().then<void>((_) {}, onError: (Object _) {}));
+    }
+    _userChanges.notify();
+  }
+
+  /// Stop every cart being prepared or searched. An add under way runs on.
+  void cancelJobs() => _client.cancelJobs();
 
   /// Stores the SDK supports right now.
   Future<List<StoreInfo>> stores() => _client.stores();
@@ -176,11 +236,12 @@ class MealioCart {
     List<Recipe>? recipes,
     String? zip,
     StepListener? onStep,
+    CancelToken? cancel,
   }) async {
     if (WebViewHost.current == null) {
       throw const MealioException(MealioErrorCode.noScope, 'Place MealioScope near the root of your app.');
     }
-    return _client.prepareCart(store: store, recipe: recipe, recipes: recipes, zip: zip, onStep: onStep);
+    return _client.prepareCart(store: store, recipe: recipe, recipes: recipes, zip: zip, onStep: onStep, cancel: cancel);
   }
 
   /// Runs the login check for the user's store ahead of time, so the next
@@ -188,7 +249,7 @@ class MealioCart {
   /// it yourself if you start carts another way. Never shows sign-in, never
   /// throws, and does nothing until a MealioScope is mounted.
   Future<void> warm({String? store}) async {
-    if (WebViewHost.current == null) return;
+    if (WebViewHost.current == null || !hasUser) return;
     await _client.warm(store: store);
   }
 
@@ -202,20 +263,27 @@ class MealioCart {
   /// Clears every store login on this device and bumps the stored
   /// store-session epoch, which the next cart reports to Mealio.
   Future<void> signOutOfAllStores() async {
+    _client.cancelJobs();
     _client.resetSession();
-    final host = WebViewHost.current;
-    if (host != null) {
-      await host.clearStoreSessions();
-    } else {
-      try {
-        await WebViewCookieManager().clearCookies();
-      } catch (_) {
-        // No WebView platform; nothing to clear.
-      }
-    }
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt(_epochKey, (prefs.getInt(_epochKey) ?? 0) + 1);
+    await _clearStores();
   }
+
+  /// Nothing may keep running in, or remember, the old session's page.
+  /// Queued, so an add under way finishes first and the next cart waits.
+  Future<void> _clearStores() => _client.runExclusive(() async {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setInt(_epochKey, (prefs.getInt(_epochKey) ?? 0) + 1);
+        final host = WebViewHost.current;
+        if (host != null) {
+          await host.clearStoreSessions();
+        } else {
+          try {
+            await WebViewCookieManager().clearCookies();
+          } catch (_) {
+            // No WebView platform; nothing to clear.
+          }
+        }
+      });
 
   /// The signed-in user changed. Forget the session, so the next call asks
   /// your server for a new one. Signing out of the stores does this too.

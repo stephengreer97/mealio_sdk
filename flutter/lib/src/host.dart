@@ -3,6 +3,7 @@
 // does all checking (signature, allowlist, rate caps) before it calls a Host.
 
 import 'protocol.dart';
+import 'runner.dart' show CancelToken;
 
 /// What `openPage` reports.
 class PageLoad {
@@ -34,6 +35,7 @@ class LoginRequest {
     required this.doneWhenUrl,
     required this.timeoutMs,
     required this.allowNavigation,
+    this.cancel,
   });
   final String store;
   final String url;
@@ -46,6 +48,9 @@ class LoginRequest {
 
   /// Must be asked for every top-frame navigation; refuse it when false.
   final bool Function(String url) allowNavigation;
+
+  /// Close the sheet as `cancelled` when this fires.
+  final CancelToken? cancel;
 }
 
 /// What `showLogin` reports.
@@ -83,4 +88,11 @@ abstract class MealioHost {
 
   /// One HTTP request with the store's cookies.
   Future<HttpResult> fetch(String store, FetchRequest request, int timeoutMs, int maxBytes);
+}
+
+/// A Host whose hidden page can be replaced, as a remounted `MealioScope`
+/// does. The client offers a warm-up only to the page it ran on.
+abstract interface class MealioPageIdentity {
+  /// The hidden page now in use, compared by identity.
+  Object? get currentPage;
 }

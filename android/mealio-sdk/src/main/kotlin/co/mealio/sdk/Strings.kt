@@ -15,6 +15,7 @@ val DEFAULT_STRINGS: Map<String, String> = linkedMapOf(
     "somethingWrong" to "Something went wrong",
     "somethingWrongSentence" to "Something went wrong.",
     "couldNotAdd" to "Could not add to your cart.",
+    "addFailedNote" to "Some items may already be in your cart. Check it before adding again.",
     "signInClosed" to "Sign-in was closed before it finished.",
     "tryAgain" to "Try again",
     "yourStore" to "your store",

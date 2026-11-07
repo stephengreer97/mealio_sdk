@@ -3,6 +3,7 @@ package co.mealio.sdk
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withTimeoutOrNull
 
 // The relay loop: verify an envelope, check every URL against the allowlist,
 // run each instruction on the Host, and return the results. Port of
@@ -10,6 +11,50 @@ import kotlinx.coroutines.isActive
 
 /** Fetch instructions per store per minute (PROTOCOL.md "Rate caps"). */
 const val FETCH_PER_MINUTE = 120
+
+/**
+ * How long past an instruction's own timeout a Host may take to answer. A Host
+ * that never answers ends the step here, so no job can hang.
+ */
+const val HOST_GRACE_MS = 5_000L
+
+/** Stops a prepare or a search. See MealioClient.prepareCart. */
+class CancelToken {
+    @Volatile var cancelled = false
+        private set
+    private val listeners = ArrayList<() -> Unit>()
+
+    fun cancel() {
+        val list = synchronized(this) {
+            if (cancelled) return
+            cancelled = true
+            listeners.toList().also { listeners.clear() }
+        }
+        for (fn in list) {
+            try {
+                fn()
+            } catch (e: Exception) {
+                // one listener never stops the rest
+            }
+        }
+    }
+
+    /** Call `fn` on cancel, or now if already cancelled. Returns how to stop listening. */
+    fun onCancel(fn: () -> Unit): () -> Unit {
+        synchronized(this) {
+            if (!cancelled) {
+                listeners.add(fn)
+                return { synchronized(this) { listeners.remove(fn) } }
+            }
+        }
+        fn()
+        return {}
+    }
+}
+
+/** `block`, or `fallback` once `ms` passes. */
+private suspend fun <T : Any> bounded(ms: Long, fallback: T, block: suspend () -> T): T =
+    withTimeoutOrNull(ms) { block() } ?: fallback
 
 sealed class Terminal {
     /** `result` is a raw JSON value. */
@@ -21,6 +66,8 @@ data class StepOutcome(
     val payload: InstructionsPayload,
     val results: List<InstructionResult>,
     val terminal: Terminal?,
+    /** The cancel token fired before the envelope finished. */
+    val cancelled: Boolean = false,
 )
 
 class Runner @JvmOverloads constructor(
@@ -32,13 +79,15 @@ class Runner @JvmOverloads constructor(
 ) {
     private val fetchStamps = HashMap<String, ArrayDeque<Long>>()
 
+    @Volatile private var opens = 0
+
     /**
-     * How many times the hidden page has been told to load. A warm-up is only
-     * worth anything while the page it left behind is still the one showing,
-     * and this is how the client knows nothing has loaded over it since.
+     * How many times the hidden page has been told to load, or was lost (see
+     * Host.pagesLost). A warm-up is only worth anything while the page it left
+     * behind is still the one showing, and this is how the client knows nothing
+     * has loaded over it since.
      */
-    @Volatile var pageOpens = 0
-        private set
+    val pageOpens: Int get() = opens + host.pagesLost
 
     /**
      * Verify and run one envelope. Throws EnvelopeException when it must be refused.
@@ -63,6 +112,8 @@ class Runner @JvmOverloads constructor(
         /** False for a warm-up: show_login is refused without asking the host. */
         allowLogin: Boolean = true,
         onStep: ((Instruction) -> Unit)? = null,
+        /** Stops the run before its next step. A sign-in open when it fires is closed. */
+        cancel: CancelToken? = null,
     ): StepOutcome {
         val payload = checkInstructions(openEnvelope(env, keys, clock()), job, lastSeq)
         val results = ArrayList<InstructionResult>()
@@ -74,6 +125,8 @@ class Runner @JvmOverloads constructor(
             if (ins is Instruction.Fail) { terminal = Terminal.Fail(ins.code, ins.message); break }
             // After a failure the rest of the envelope is reported, not run.
             if (failed) { results.add(skipped(ins)); continue }
+            // Checked right before each step, so a cancelled job never opens sign-in.
+            if (cancel?.cancelled == true) return StepOutcome(payload, results, null, cancelled = true)
             if (onStep != null) {
                 try {
                     onStep(ins)
@@ -81,14 +134,14 @@ class Runner @JvmOverloads constructor(
                     // a progress callback never breaks a run
                 }
             }
-            val r = one(payload.store, ins, allowLogin)
+            val r = one(payload.store, ins, allowLogin, cancel)
             results.add(r)
             if (!r.ok) failed = true
         }
         return StepOutcome(payload, results, terminal)
     }
 
-    private suspend fun one(store: String, ins: Instruction, allowLogin: Boolean = true): InstructionResult {
+    private suspend fun one(store: String, ins: Instruction, allowLogin: Boolean = true, cancel: CancelToken? = null): InstructionResult {
         val t0 = clock()
         fun ms() = clock() - t0
         return when (ins) {
@@ -96,9 +149,11 @@ class Runner @JvmOverloads constructor(
                 if (!allowlist.check(store, ins.url, UrlUse.PAGE).ok) {
                     return InstructionResult.PageOpenResult(ins.id, ok = false, error = "blocked", ms = 0)
                 }
-                pageOpens += 1
+                opens += 1
                 try {
-                    val r = host.openPage(store, ins.url, ins.timeoutMs)
+                    val r = bounded(ins.timeoutMs + HOST_GRACE_MS, PageLoad(ok = false, error = "timeout")) {
+                        host.openPage(store, ins.url, ins.timeoutMs)
+                    }
                     InstructionResult.PageOpenResult(ins.id, r.ok, r.finalUrl, r.error, ms())
                 } catch (e: Throwable) {
                     rethrowIfCancelled(e)
@@ -107,7 +162,9 @@ class Runner @JvmOverloads constructor(
             }
             is Instruction.PageScript -> {
                 try {
-                    val r = host.runScript(store, GUARD_SCRIPT, ins.script, ins.until, ins.timeoutMs)
+                    val r = bounded(ins.timeoutMs + HOST_GRACE_MS, ScriptRun(emptyList(), timedOut = true)) {
+                        host.runScript(store, GUARD_SCRIPT, ins.script, ins.until, ins.timeoutMs)
+                    }
                     InstructionResult.PageScriptResult(ins.id, r.error == null, r.messages, r.timedOut, r.error, ms())
                 } catch (e: Throwable) {
                     rethrowIfCancelled(e)
@@ -117,20 +174,23 @@ class Runner @JvmOverloads constructor(
             is Instruction.ShowLogin -> {
                 // A warm-up runs before the user has tapped anything: it may check
                 // who is signed in, never put a sign-in sheet in front of them.
-                if (!allowLogin) {
+                if (!allowLogin || cancel?.cancelled == true) {
                     return InstructionResult.ShowLoginResult(ins.id, false, LoginOutcome.CANCELLED, emptyList(), "not_allowed", 0)
                 }
                 if (!allowlist.check(store, ins.url, UrlUse.LOGIN).ok) {
                     return InstructionResult.ShowLoginResult(ins.id, false, LoginOutcome.CANCELLED, emptyList(), "blocked", 0)
                 }
                 try {
-                    val r = host.showLogin(
-                        LoginRequest(
-                            store = store, url = ins.url, title = ins.title, guard = GUARD_SCRIPT, check = ins.check,
-                            doneWhen = ins.doneWhen, doneWhenUrl = ins.doneWhenUrl, timeoutMs = ins.timeoutMs,
-                            allowNavigation = { u -> allowlist.check(store, u, UrlUse.LOGIN).ok },
-                        ),
-                    )
+                    val r = bounded(ins.timeoutMs + HOST_GRACE_MS, LoginResult(LoginOutcome.TIMEOUT, emptyList())) {
+                        host.showLogin(
+                            LoginRequest(
+                                store = store, url = ins.url, title = ins.title, guard = GUARD_SCRIPT, check = ins.check,
+                                doneWhen = ins.doneWhen, doneWhenUrl = ins.doneWhenUrl, timeoutMs = ins.timeoutMs,
+                                allowNavigation = { u -> allowlist.check(store, u, UrlUse.LOGIN).ok },
+                                cancel = cancel,
+                            ),
+                        )
+                    }
                     InstructionResult.ShowLoginResult(ins.id, true, r.outcome, r.messages, null, ms())
                 } catch (e: Throwable) {
                     rethrowIfCancelled(e)
@@ -148,7 +208,9 @@ class Runner @JvmOverloads constructor(
                 }
                 if (overRate(store)) return InstructionResult.FetchResult(ins.id, ok = false, error = "rate", ms = 0)
                 try {
-                    val r = host.fetch(store, ins.request, ins.timeoutMs, ins.maxBytes)
+                    val r = bounded(ins.timeoutMs + HOST_GRACE_MS, FetchResponse(ok = false, error = "timeout")) {
+                        host.fetch(store, ins.request, ins.timeoutMs, ins.maxBytes)
+                    }
                     InstructionResult.FetchResult(ins.id, r.ok, r.status, r.headers, r.body, r.truncated, r.error, ms())
                 } catch (e: Throwable) {
                     rethrowIfCancelled(e)
@@ -177,7 +239,7 @@ class Runner @JvmOverloads constructor(
  * cancelled. A timeout thrown inside the host (while our coroutine is still
  * active) is just an error.
  */
-private suspend fun rethrowIfCancelled(e: Throwable) {
+internal suspend fun rethrowIfCancelled(e: Throwable) {
     if (e is CancellationException && !currentCoroutineContext().isActive) throw e
 }
 

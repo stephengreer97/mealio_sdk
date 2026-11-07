@@ -1,0 +1,424 @@
+// 0.6 in the drop-in and the WebView host: closing cancels, nothing closes
+// while adding, Try again keeps picks, the location step, users, the button's
+// warm-up, and the host's waits. Mirrors packages/react-native/test/flow.test.tsx
+// where the two meet. iOS only, as the drop-in is: run with xcodebuild, not `swift test`.
+
+#if canImport(SwiftUI) && canImport(UIKit) && canImport(WebKit)
+import SwiftUI
+import UIKit
+import XCTest
+@testable import MealioSDK
+
+final class FlowTests: XCTestCase {
+
+    override func tearDown() {
+        StubURLProtocol.handler = nil
+        StubURLProtocol.hangs = false
+        super.tearDown()
+    }
+
+    private let recipe = Recipe(id: "r1", ingredients: [])
+    private let cartsPath = "/api/v1/sdk/carts"
+
+    @MainActor
+    private func reset() {
+        MealioCart.client = nil
+        MealioCart.host = nil
+        MealioCart.onEvent = nil
+        MealioCart.onSignInRequired = nil
+        MealioCart.users.reset()
+    }
+
+    @MainActor
+    private func configure(_ given: MealioHost? = nil) {
+        let host: MealioHost = given ?? ScriptedHost()
+        let config = MealioClientConfig(publishableKey: "pk_test", sessionTokenProvider: { "tok" },
+                                        baseURL: URL(string: "https://mealio.test/")!,
+                                        epochProvider: { 0 }, keys: TestSigner.keys,
+                                        urlSession: StubURLProtocol.session(), sdkVersion: "0")
+        MealioCart.client = MealioClient(config: config, host: host)
+    }
+
+    @MainActor
+    private func waitFor(_ ready: () -> Bool) async throws {
+        for _ in 0..<300 {
+            if ready() { return }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTFail("timed out")
+    }
+
+    @MainActor
+    private func tick() async throws {
+        try await Task.sleep(nanoseconds: 30_000_000)
+    }
+
+    private func problem(_ code: String, status: Int = 400) -> (Int, Data) {
+        (status, jsonData(["error": ["code": .string(code), "message": "No"]]))
+    }
+
+    private func newCart() throws -> JSONValue {
+        try XCTUnwrap(JSONValue.parse(ClientTests.newCartJSON))
+    }
+
+    // MARK: closing
+
+    @MainActor
+    func testClosingCancelsThePrepareAndNeverShowsSignIn() async throws {
+        defer { reset() }
+        let server = JobServer()
+        StubURLProtocol.handler = { req, body in
+            server.rec.record(req, body: body)
+            return server.start([jobsOpen("o"), jobsLogin, jobsDone(jobsCart)])
+        }
+        let gate = Gate()
+        let host = ScriptedHost()
+        host.open = { url in
+            await gate.wait()
+            return PageOpenOutcome(ok: true, finalUrl: url)
+        }
+        configure(host)
+        var errors = 0
+        let model = MealioFlowModel()
+        model.open(recipes: [recipe], store: "heb", zip: nil, onAdded: nil, onError: { _ in errors += 1 })
+        try await waitFor { host.log.order == ["open"] }
+        model.close { _ in }
+        gate.release()
+        try await tick()
+        XCTAssertEqual(host.log.order, ["open"])
+        XCTAssertEqual(server.paths, ["/carts"])
+        XCTAssertEqual(errors, 0)
+    }
+
+    @MainActor
+    func testNothingClosesTheSheetWhileAdding() async throws {
+        defer { reset() }
+        let server = JobServer()
+        let hold = DispatchSemaphore(value: 0)
+        let cart = try newCart()
+        let added: JSONValue = ["cartId": "c/2", "store": "heb", "added": [], "skipped": [], "failed": []]
+        StubURLProtocol.handler = { req, body in
+            server.rec.record(req, body: body)
+            if req.url?.path.hasSuffix("/add") == true {
+                hold.wait()
+                return server.start([jobsDone(added)])
+            }
+            return server.start([jobsDone(cart)])
+        }
+        configure()
+        let model = MealioFlowModel()
+        model.open(recipes: [recipe], store: "heb", zip: nil, onAdded: nil, onError: nil)
+        try await waitFor { model.phase == .list }
+        XCTAssertTrue(model.canClose)
+        model.add()
+        XCTAssertEqual(model.phase, .adding)
+        XCTAssertFalse(model.canClose)
+        // A second tap starts nothing.
+        model.add()
+        hold.signal()
+        try await waitFor { model.phase == .done }
+        XCTAssertTrue(model.canClose)
+        XCTAssertEqual(server.paths.filter { $0.hasSuffix("/add") }.count, 1)
+        model.close { _ in }
+    }
+
+    @MainActor
+    func testAButtonReportsOnCloseAtOnceAndTheDoneActionWhenTheSheetHasGone() async throws {
+        defer { reset() }
+        let model = MealioFlowModel()
+        model.open(recipes: [], store: nil, zip: nil, onAdded: nil, onError: nil)
+        var order: [String] = []
+        model.afterClose { order.append("action") }
+        model.closeFromButton { _ in order.append("onClose") }
+        XCTAssertEqual(order, ["onClose"])
+        // The sheet goes away: onDisappear.
+        model.close { _ in order.append("again") }
+        XCTAssertEqual(order, ["onClose", "action"])
+    }
+
+    // MARK: after a failed add
+
+    @MainActor
+    func testTryAgainAfterAFailedAddKeepsWhatTheUserPickedAndSaysToCheckTheCart() async throws {
+        defer { reset() }
+        let server = JobServer()
+        let cart = try newCart()
+        let failed = problem("boom")
+        StubURLProtocol.handler = { req, body in
+            server.rec.record(req, body: body)
+            if req.url?.path.hasSuffix("/add") == true { return failed }
+            return server.start([jobsDone(cart)])
+        }
+        configure()
+        let model = MealioFlowModel()
+        model.open(recipes: [recipe], store: "heb", zip: nil, onAdded: nil, onError: nil)
+        try await waitFor { model.phase == .list }
+        let first = try XCTUnwrap(model.cart)
+        first.deselect(key: "onion")
+        try first.select(key: "garlic", productId: "g1")
+        model.add()
+        try await waitFor { model.phase == .error }
+        XCTAssertTrue(model.failedAdd === first)
+
+        model.start()
+        try await waitFor { model.phase == .list }
+        let again = try XCTUnwrap(model.cart)
+        XCTAssertFalse(again === first)
+        XCTAssertFalse(again.isSelected("onion"))
+        XCTAssertEqual(again.selectedId(for: "garlic"), "g1")
+        XCTAssertNil(model.failedAdd)
+        model.close { _ in }
+    }
+
+    @MainActor
+    func testTheAddFailedNoteIsInTheStrings() {
+        XCTAssertEqual(MealioCart.text.tr(.addFailedNote), "Some items may already be in your cart. Check it before adding again.")
+    }
+
+    // MARK: details
+
+    @MainActor
+    func testAnOptionTapThatTicksAnItemSaysItemChecked() throws {
+        defer { reset() }
+        configure()
+        let cart = try JSONDecoder().decode(PreparedCart.self, from: Data(ClientTests.newCartJSON.utf8))
+        let session = CartSession(client: try XCTUnwrap(MealioCart.client), cart: cart)
+        let log = HostLog()
+        MealioCart.onEvent = { log.order.append($0.type) }
+        let item = try XCTUnwrap(cart.items.first { $0.key == "garlic" })
+        let row = MealioItemRow(cart: session, item: item, t: .default, storeName: "H-E-B", isOpen: true,
+                                disabled: false, onToggleOpen: {})
+        let garlic = try XCTUnwrap(item.options.first)
+        row.pick(garlic, preferenceId: nil)
+        row.pick(garlic, preferenceId: nil)
+        XCTAssertTrue(session.isSelected("garlic"))
+        XCTAssertEqual(log.order, ["item_checked"])
+    }
+
+    @MainActor
+    func testALocationSavedAfterTheUserLeftTheStepStartsNothing() async throws {
+        defer { reset() }
+        let rec = Recorder()
+        let reply = problem("location_required", status: 409)
+        StubURLProtocol.handler = { req, body in rec.record(req, body: body); return reply }
+        configure()
+        let model = MealioFlowModel()
+        model.open(recipes: [recipe], store: "kroger", zip: nil, onAdded: nil, onError: nil)
+        try await waitFor { model.phase == .location }
+        let visit = model.locationVisit
+        // Back, while the save is still on its way.
+        model.openStores(from: .location)
+        model.locationPicked(visit: visit)
+        XCTAssertEqual(model.phase, .stores)
+        // Back on the step, a save from the earlier visit still starts nothing.
+        model.openLocation(from: .stores)
+        model.locationPicked(visit: visit)
+        XCTAssertEqual(model.phase, .location)
+        XCTAssertEqual(rec.paths.filter { $0 == cartsPath }.count, 1)
+        model.close { _ in }
+    }
+
+    @MainActor
+    func testAStoreChangeWhileLoadingMovesTheCartToIt() async throws {
+        defer { reset() }
+        let server = JobServer()
+        StubURLProtocol.handler = { req, body in
+            server.rec.record(req, body: body)
+            return server.start([jobsOpen("o"), jobsDone(jobsCart)])
+        }
+        let gate = Gate()
+        let host = ScriptedHost()
+        host.open = { url in
+            await gate.wait()
+            return PageOpenOutcome(ok: true, finalUrl: url)
+        }
+        configure(host)
+        let model = MealioFlowModel()
+        model.open(recipes: [recipe], store: "heb", zip: nil, onAdded: nil, onError: nil)
+        try await waitFor { host.log.order == ["open"] }
+        model.storeChanged("walmart")
+        gate.release()
+        try await waitFor { model.phase == .list }
+        XCTAssertEqual(server.rec.body(cartsPath)?["store"], .string("walmart"))
+        model.close { _ in }
+    }
+
+    @MainActor
+    func testAStoreListThatFailedLoadsAgainNextTime() async throws {
+        defer { reset() }
+        let rec = Recorder()
+        let down = problem("store_unavailable", status: 503)
+        StubURLProtocol.handler = { req, body in rec.record(req, body: body); return down }
+        configure()
+        let model = MealioFlowModel()
+        model.open(recipes: [recipe], store: "heb", zip: nil, onAdded: nil, onError: nil)
+        try await waitFor { model.phase == .error }
+        model.openStores(from: .error)
+        try await waitFor { model.stores != nil }
+        XCTAssertEqual(model.stores, [])
+        model.openStores(from: .error)
+        try await waitFor { rec.paths.filter { $0 == "/api/v1/stores" }.count == 2 }
+        model.close { _ in }
+    }
+
+    @MainActor
+    func testTheLatestCallbacksAreTheOnesCalled() async throws {
+        defer { reset() }
+        let reply = problem("boom")
+        StubURLProtocol.handler = { _, _ in reply }
+        configure()
+        var heard: [String] = []
+        let model = MealioFlowModel()
+        model.open(recipes: [recipe], store: "heb", zip: nil, onAdded: nil, onError: { _ in heard.append("first") })
+        model.latest(onAdded: nil, onError: { _ in heard.append("latest") })
+        try await waitFor { model.phase == .error }
+        XCTAssertEqual(heard, ["latest"])
+        model.close { _ in }
+    }
+
+    // MARK: users
+
+    @MainActor
+    func testANewUserClosesTheSheet() async throws {
+        defer { reset() }
+        let cart = try newCart()
+        let server = JobServer()
+        StubURLProtocol.handler = { req, body in
+            server.rec.record(req, body: body)
+            return server.start([jobsDone(cart)])
+        }
+        configure()
+        MealioCart.users.set("a")
+        let model = MealioFlowModel()
+        model.open(recipes: [recipe], store: "heb", zip: nil, onAdded: nil, onError: nil)
+        try await waitFor { model.phase == .list }
+        XCTAssertFalse(model.closeRequested)
+        MealioCart.users.set("b")
+        XCTAssertTrue(model.closeRequested)
+        model.close { _ in }
+    }
+
+    @MainActor
+    func testWithNobodySignedInTheButtonAsksForSignInOrIsDisabled() {
+        defer { reset() }
+        MealioCart.users.set(nil)
+        var asked = 0
+        let button = MealioCartButton(recipe: recipe, onSignInRequired: { asked += 1 })
+        XCTAssertFalse(button.disabled)
+        button.tap()
+        XCTAssertEqual(asked, 1)
+        XCTAssertFalse(button.warmKey.on)
+        XCTAssertTrue(MealioCartButton(recipe: recipe).disabled)
+        MealioCart.onSignInRequired = { asked += 1 }
+        XCTAssertFalse(MealioCartButton(recipe: recipe).disabled)
+    }
+
+    @MainActor
+    func testTheButtonWarmsWhenItBecomesEnabled() {
+        defer { reset() }
+        let off = MealioCartButton(recipe: recipe, store: "heb", disabled: true)
+        let on = MealioCartButton(recipe: recipe, store: "heb", disabled: false)
+        XCTAssertFalse(off.warmKey.on)
+        XCTAssertTrue(on.warmKey.on)
+        XCTAssertNotEqual(off.warmKey, on.warmKey)
+        // A new user warms again too.
+        let before = on.warmKey
+        MealioCart.users.set("a")
+        XCTAssertNotEqual(MealioCartButton(recipe: recipe, store: "heb").warmKey, before)
+    }
+
+    // MARK: the host
+
+    @MainActor
+    func testTheHiddenPageFailsClosedBeforeConfigure() {
+        let host = WebViewHost()
+        XCTAssertFalse(host.hiddenNavigationPolicy("heb", "https://evil.example/"))
+        XCTAssertFalse(host.hiddenNavigationPolicy("no_such_store", "https://www.heb.com/"))
+        XCTAssertTrue(host.hiddenNavigationPolicy("heb", "https://www.heb.com/"))
+    }
+
+    @MainActor
+    func testAWaiterIsSettledOnceAndItsOwnTimerGoesWithIt() async throws {
+        let waiter = JobWaiter<String>()
+        let t = Task { await waiter.wait { waiter.timer = after(10_000) { _ = waiter.settle("late") } } }
+        try await tick()
+        XCTAssertTrue(waiter.settle("superseded"))
+        XCTAssertFalse(waiter.settle("again"))
+        XCTAssertNil(waiter.timer)
+        let got = await t.value
+        XCTAssertEqual(got, "superseded")
+    }
+
+    @MainActor
+    func testResettingThePageAnswersAScriptStillWaiting() async throws {
+        let host = WebViewHost()
+        let wait = ScriptWait(until: [])
+        host.scriptWait = wait
+        let t = Task { () -> String? in
+            let outcome = await wait.waiter.wait {}
+            return outcome.error
+        }
+        try await tick()
+        host.resetHiddenPage()
+        let got = await t.value
+        XCTAssertEqual(got, "page_reset")
+        XCTAssertNil(host.scriptWait)
+    }
+
+    @MainActor
+    func testASignInIsClosedWhenItsJobIsCancelled() async throws {
+        let cancel = CancelToken()
+        let request = LoginRequest(store: "heb", url: "https://www.heb.com/login", title: "Sign in", guardScript: "",
+                                   check: nil, doneWhen: [], doneWhenUrl: nil, timeoutMs: 60_000,
+                                   allowNavigation: { _ in true }, cancel: cancel)
+        let sheet = LoginSheet(request: request)
+        let log = HostLog()
+        let url = try XCTUnwrap(URL(string: request.url))
+        let t = Task { () -> Bool in
+            let outcome = await sheet.run(url: url, mode: .inline({ shown in log.order.append(shown == nil ? "down" : "up") }))
+            return outcome.outcome == .cancelled
+        }
+        try await waitFor { log.order == ["up"] }
+        cancel.cancel()
+        let cancelled = await t.value
+        XCTAssertTrue(cancelled)
+        XCTAssertEqual(log.order, ["up", "down"])
+    }
+
+    @MainActor
+    func testASignInThatCannotBePresentedFailsAtOnce() async throws {
+        let host = WebViewHost(presenter: { UIViewController() })
+        let request = LoginRequest(store: "heb", url: "https://www.heb.com/login", title: "Sign in", guardScript: "",
+                                   check: nil, doneWhen: [], doneWhenUrl: nil, timeoutMs: 600_000,
+                                   allowNavigation: { _ in true })
+        do {
+            _ = try await host.showLogin(request)
+            XCTFail("expected the sign-in to fail")
+        } catch let e as MealioError {
+            XCTAssertEqual(e.code, MealioError.Code.unsupported)
+        }
+    }
+
+    @MainActor
+    func testReconfiguringTearsDownTheOldHost() throws {
+        defer { reset() }
+        MealioCart.configure(publishableKey: "pk_test", sessionTokenProvider: { "tok" })
+        let old = try XCTUnwrap(MealioCart.host)
+        _ = old.fetchSession
+        XCTAssertNotNil(old.madeFetchSession)
+        MealioCart.configure(publishableKey: "pk_test", sessionTokenProvider: { "tok" })
+        XCTAssertNil(old.madeFetchSession)
+        XCTAssertFalse(old === MealioCart.host)
+    }
+
+    @MainActor
+    func testABlockedRedirectIsSaidSoAndStoreCookiesNeverGoBack() throws {
+        let from = try XCTUnwrap(URL(string: "https://www.heb.com/api/cart"))
+        XCTAssertTrue(RedirectGuard.stopped(status: 302, location: "https://evil.example/x", from: from))
+        XCTAssertTrue(RedirectGuard.stopped(status: 301, location: "/checkout", from: from))
+        XCTAssertFalse(RedirectGuard.stopped(status: 302, location: "/api/cart/2", from: from))
+        XCTAssertFalse(RedirectGuard.stopped(status: 200, location: "https://evil.example/x", from: from))
+        XCTAssertEqual(WebViewHost.privateHeaders, ["set-cookie", "set-cookie2"])
+    }
+}
+#endif

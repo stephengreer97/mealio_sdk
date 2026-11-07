@@ -42,9 +42,12 @@ public struct LoginRequest {
     public let timeoutMs: Int
     /// Ask this for every top-frame navigation; cancel it when false.
     public let allowNavigation: (String) -> Bool
+    /// Close the sheet as `cancelled` when this fires.
+    public let cancel: CancelToken?
 
     public init(store: String, url: String, title: String, guardScript: String, check: LoginCheck?,
-                doneWhen: [Matcher], doneWhenUrl: String?, timeoutMs: Int, allowNavigation: @escaping (String) -> Bool) {
+                doneWhen: [Matcher], doneWhenUrl: String?, timeoutMs: Int, allowNavigation: @escaping (String) -> Bool,
+                cancel: CancelToken? = nil) {
         self.store = store
         self.url = url
         self.title = title
@@ -54,6 +57,7 @@ public struct LoginRequest {
         self.doneWhenUrl = doneWhenUrl
         self.timeoutMs = timeoutMs
         self.allowNavigation = allowNavigation
+        self.cancel = cancel
     }
 }
 

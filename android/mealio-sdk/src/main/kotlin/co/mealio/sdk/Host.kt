@@ -23,6 +23,8 @@ class LoginRequest(
     val timeoutMs: Long,
     /** Must be asked for every top-frame navigation. Cancel the navigation when false. */
     val allowNavigation: (String) -> Boolean,
+    /** Close the sheet as cancelled when this fires. */
+    val cancel: CancelToken? = null,
 )
 
 data class LoginResult(val outcome: LoginOutcome, val messages: List<JSONObject>)
@@ -37,6 +39,13 @@ data class FetchResponse(
 )
 
 interface Host {
+    /**
+     * How many times the hidden page was lost without being told to load, for
+     * example a WebView replaced after its renderer crashed. A warm-up left on a
+     * lost page is not offered to the next cart.
+     */
+    val pagesLost: Int get() = 0
+
     /** Load `url` in the hidden WebView. */
     suspend fun openPage(store: String, url: String, timeoutMs: Long): PageLoad
 

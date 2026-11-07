@@ -17,6 +17,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -56,6 +57,9 @@ import kotlinx.coroutines.launch
  *
  * @param onClose called when the user closes the sheet. Set `visible` to false here.
  * @param onChange called each time the user's store changes.
+ * @param onSignInRequired called instead of opening while [MealioCart.setUser]
+ *   says nobody is signed in (else MealioCart.onSignInRequired). The sheet then
+ *   closes at once.
  */
 @Composable
 fun MealioStoreSettings(
@@ -63,8 +67,19 @@ fun MealioStoreSettings(
     onClose: () -> Unit,
     onChange: (StorePreferences) -> Unit = {},
     theme: MealioTheme = LocalMealioTheme.current,
+    onSignInRequired: (() -> Unit)? = null,
 ) {
     if (!visible) return
+    val user by MealioCart.user.collectAsState()
+    if (!user.signedIn) {
+        val signIn by rememberUpdatedState(onSignInRequired ?: MealioCart.onSignInRequired)
+        val close by rememberUpdatedState(onClose)
+        LaunchedEffect(Unit) {
+            signIn?.invoke()
+            close()
+        }
+        return
+    }
     // Everything below lives only while the sheet is open, so each open starts fresh.
     SheetDialog(onDismiss = onClose) {
         SettingsSheet(theme, onClose, onChange)

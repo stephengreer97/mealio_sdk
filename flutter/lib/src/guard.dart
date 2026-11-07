@@ -6,7 +6,7 @@
 //
 // It must stay plain ES5 with no dependencies, because it is injected as text
 // into WebViews on four platforms. The text below is byte-for-byte the text
-// packages/core/src/guard.ts produces; test/guard_test.dart checks that
+// packages/core/src/guard.ts produces; test/vectors_test.dart checks that
 // against a fixture dumped from the TypeScript.
 
 import 'dart:convert';

@@ -92,6 +92,24 @@ class MyApp : Application() {
 }
 ```
 
+If `sessionTokenProvider` throws or takes over 30 seconds, the call fails with
+`session_failed`, and your exception's message is the error's `message`.
+
+### Who is signed in
+
+```kotlin
+MealioCart.setUser(user?.id)                       // at start-up and on every sign-in or sign-out
+MealioCart.onSignInRequired = { openYourSignIn() } // optional
+```
+
+When the id changes, a cart still loading stops, the next call gets a new
+session, and if the old value was a user, the device signs out of the stores
+(an add under way finishes first; a failed sign-out is never thrown). While it
+is null there is no session and no warm-up, and `MealioCartButton` calls
+`onSignInRequired` when tapped (its own parameter, else `MealioCart.onSignInRequired`).
+With neither, the button is disabled. `MealioStoreSettings` does the same.
+Without `setUser`, nothing changes from before.
+
 ## 3. Add the button
 
 ```kotlin
@@ -358,7 +376,7 @@ MealioCart.signOutOfStore("heb")
 MealioCart.signOutOfAllStores()
 ```
 
-Both clear the store's cookies and web storage on the device and bump a
+Both stop a cart still loading, wait for an add under way to end, then clear the store's cookies and web storage on the device and bump a
 device "epoch" the SDK sends to Mealio with every job, so the server forgets
 any session it held for this device.
 
@@ -375,7 +393,7 @@ WebView in your app, not only the stores'.
     onError: (Exception) -> Unit = {}, modifier: Modifier = Modifier, enabled: Boolean = true,
     theme: MealioTheme = LocalMealioTheme.current, variant: MealioButtonVariant = MealioButtonVariant.SOLID,
     button: (@Composable (onClick: () -> Unit, enabled: Boolean, label: String) -> Unit)? = null,
-    doneMessage: String? = null, doneAction: MealioDoneAction? = null)
+    doneMessage: String? = null, doneAction: MealioDoneAction? = null, onSignInRequired: (() -> Unit)? = null)
 @Composable fun MealioCartFlow(visible: Boolean, recipe: Recipe, store: String? = null, zip: String? = null,
     onClose: (AddResult?) -> Unit, onAdded: (AddResult) -> Unit = {}, onError: (Exception) -> Unit = {},
     theme: MealioTheme = LocalMealioTheme.current, doneMessage: String? = null, doneAction: MealioDoneAction? = null)
@@ -384,7 +402,7 @@ WebView in your app, not only the stores'.
     modifier: Modifier = Modifier, onChange: () -> Unit = {}, onChangeStore: (() -> Unit)? = null, theme: MealioTheme = ...,
     onChangeLocation: (() -> Unit)? = null)
 @Composable fun MealioStoreSettings(visible: Boolean, onClose: () -> Unit, onChange: (StorePreferences) -> Unit = {},
-    theme: MealioTheme = LocalMealioTheme.current)
+    theme: MealioTheme = LocalMealioTheme.current, onSignInRequired: (() -> Unit)? = null)
 data class MealioTheme(accent, onAccent, background, surface, text, muted, border, radius, fontFamily, warnBackground, warnText)
 MealioTheme.Default; MealioTheme.Dark
 data class MealioDarkTheme(accent, onAccent, background, surface, text, muted, border, radius, fontFamily, warnBackground, warnText) // every value nullable
@@ -410,6 +428,11 @@ object MealioCart {
     val client: MealioClient
     suspend fun prepareCart(store: String?, recipe: Recipe, zip: String? = null, onStep: StepListener? = null): CartSession
     suspend fun prepareCart(store: String?, recipes: List<Recipe>, zip: String? = null, onStep: StepListener? = null): CartSession
+    suspend fun prepareCart(store: String?, recipes: List<Recipe>, zip: String?, cancel: CancelToken, onStep: StepListener? = null): CartSession
+    fun setUser(id: String?)                       // null: nobody is signed in
+    val user: StateFlow<MealioUser>
+    var onSignInRequired: (() -> Unit)?
+    fun cancelJobs()                               // stop every cart still loading and every search; an add runs on
     suspend fun stores(): List<StoreInfo>
     suspend fun storeLocations(store: String, zip: String): List<StoreLocation>   // a Kroger family chain's stores near a zip
     suspend fun storePreferences(): StorePreferences                              // defaultStore, location
@@ -432,11 +455,17 @@ class CartSession {
     fun select(key: String, productId: String, preferenceId: String? = null)
     fun deselect(key: String)                       // this run only; the usual is kept
     suspend fun search(key: String, query: String, onStep: StepListener? = null): List<Product>
+    suspend fun search(key: String, query: String, cancel: CancelToken, onStep: StepListener? = null): List<Product>
+    val searching: Boolean                          // keep Add off while true
+    fun cancelSearches()
+    fun restorePicks(from: CartSession)             // after a failed add: same store, by item key
+    val warnings: List<CartWarning>                 // what the server changed or ignored; empty from older servers
+    fun quantity(key: String): Int                  // never over the product's cap; what is sent
     fun selections(): List<Selection>               // one per item
     fun estimate(): Estimate                        // total (null if any item is unpriced), count, estimated, unpriced
     fun addedTotal(result: AddResult): Estimate     // same rule, over what the store took
     fun addedPrice(a: AddedItem): LinePrice?        // one added line's price, or null
-    suspend fun addToCart(onStep: StepListener? = null): AddResult
+    suspend fun addToCart(onStep: StepListener? = null): AddResult   // a second call while one runs waits for that one
     // deprecated 0.1: ready, needsChoice, unavailable, choose(), skip(), pending(), selectionFor()
 }
 
@@ -457,6 +486,9 @@ open class TextTools(overrides: Map<String, String> = emptyMap()) {
     fun plural(base: String, count: Int, vararg vars: Pair<String, Any>): String
 }
 class MealioException(val code: String, message: String, cause: Throwable? = null) : Exception
+class CancelToken { val cancelled: Boolean; fun cancel(); fun onCancel(fn: () -> Unit): () -> Unit }
+data class CartWarning(val code: String, val message: String)   // ingredients_dropped, lines_dropped, servings_ignored
+data class MealioUser(val tracked: Boolean, val id: String?) { val signedIn: Boolean }
 sealed class MealioEvent(val type: String)                // one per step: SheetOpened, StorePicked, LocationAsked, SigninShown, ListShown,
                                                           // ItemUnchecked, ItemChecked, AddStarted, CartAdded, Error, SheetClosed
 enum class MealioSheetStep(val wire: String) { LOADING, STORES, LOCATION, SIGNIN, LIST, ADDING, DONE, ERROR }
@@ -477,12 +509,22 @@ read back.
 
 Error codes are the ones in PROTOCOL.md: `bad_envelope`, `blocked`,
 `store_unavailable`, `login_cancelled`, `session_expired`, `network`,
-`unsupported`, plus `store_required` (no store given and no default yet),
+`unsupported`, plus `session_failed` (your `sessionTokenProvider` threw or took
+over 30 seconds; 0.5 and earlier said `session_expired` for this),
+`not_signed_in` (`setUser(null)`), `cancelled` (a `CancelToken` fired),
+`store_required` (no store given and no default yet),
 `location_required` (a Kroger family store with no location chosen, before any
 sign-in),
-`server` (Mealio answered with an error), `unknown_item` /
+`server` (Mealio answered with an error, or with something that is not JSON), `unknown_item` /
 `unknown_product` from `select`, and `bad_recipe` / `too_many_recipes` from
 `prepareCart` with no recipes or more than 10.
+
+Every request to Mealio has 30 seconds, then fails with `network`. One job
+at a time drives the hidden page: prepare, search, add and warm-up queue
+behind each other. An add cannot be cancelled; every wait in it is bounded,
+so it ends by itself. While it runs the sheet cannot be closed. The sheet
+and its running job survive an activity recreation (rotation, dark mode);
+after process death the sheet closes instead of starting a new cart.
 
 There is no separate hello call. `prepareCart`, `search` and `addToCart` each
 send `sdk: {platform, version, core, ops}` and `epoch` in their body.

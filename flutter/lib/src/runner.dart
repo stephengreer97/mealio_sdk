@@ -11,6 +11,46 @@ import 'verify.dart';
 /// Fetch instructions per store per minute (PROTOCOL.md "Rate caps").
 const int fetchPerMinute = 120;
 
+/// How long past an instruction's own timeout a Host may take to answer. A
+/// Host that never answers ends the step here, so no job can hang.
+const int hostGraceMs = 5000;
+
+/// Stops a prepare or a search. See `MealioClient.prepareCart`.
+class CancelToken {
+  bool _cancelled = false;
+  List<void Function()> _listeners = <void Function()>[];
+
+  bool get cancelled => _cancelled;
+
+  void cancel() {
+    if (_cancelled) return;
+    _cancelled = true;
+    final list = _listeners;
+    _listeners = <void Function()>[];
+    for (final void Function() fn in list) {
+      try {
+        fn();
+      } catch (_) {
+        // One listener never stops the rest.
+      }
+    }
+  }
+
+  /// Call `fn` on cancel, or now if already cancelled. Returns how to stop listening.
+  void Function() onCancel(void Function() fn) {
+    if (_cancelled) {
+      fn();
+      return () {};
+    }
+    _listeners.add(fn);
+    return () => _listeners.remove(fn);
+  }
+}
+
+/// `f`, or `fallback` once `ms` passes.
+Future<T> _bounded<T>(Future<T> f, int ms, T fallback) =>
+    f.timeout(Duration(milliseconds: ms), onTimeout: () => fallback);
+
 /// The last instruction of a job.
 sealed class Terminal {
   const Terminal();
@@ -29,10 +69,13 @@ class TerminalFail extends Terminal {
 
 /// What one envelope produced.
 class StepOutcome {
-  const StepOutcome({required this.payload, required this.results, required this.terminal});
+  const StepOutcome({required this.payload, required this.results, required this.terminal, this.cancelled = false});
   final InstructionsPayload payload;
   final List<InstructionResult> results;
   final Terminal? terminal;
+
+  /// The cancel token fired before the envelope finished.
+  final bool cancelled;
 }
 
 int _now() => DateTime.now().millisecondsSinceEpoch;
@@ -66,12 +109,16 @@ class Runner {
   ///
   /// `allowLogin` false (a warm-up) refuses every `show_login` with
   /// `not_allowed` without showing anything.
+  ///
+  /// `cancel` stops the run before its next step, and closes a sign-in it
+  /// has open.
   Future<StepOutcome> run(
     Envelope env,
     String? job,
     int lastSeq, {
     void Function(Instruction ins)? onStep,
     bool allowLogin = true,
+    CancelToken? cancel,
   }) async {
     final payload = checkInstructions(await openEnvelope(env, _keys), job, lastSeq);
     final results = <InstructionResult>[];
@@ -92,19 +139,23 @@ class Runner {
         results.add(_skipped(ins));
         continue;
       }
+      // Checked right before each step, so a cancelled job never opens sign-in.
+      if (cancel != null && cancel.cancelled) {
+        return StepOutcome(payload: payload, results: results, terminal: null, cancelled: true);
+      }
       try {
         onStep?.call(ins);
       } catch (_) {
         // A progress callback never breaks a run.
       }
-      final r = await _one(payload.store, ins, allowLogin: allowLogin);
+      final r = await _one(payload.store, ins, allowLogin: allowLogin, cancel: cancel);
       results.add(r);
       if (!r.ok) failed = true;
     }
     return StepOutcome(payload: payload, results: results, terminal: terminal);
   }
 
-  Future<InstructionResult> _one(String store, Instruction ins, {bool allowLogin = true}) async {
+  Future<InstructionResult> _one(String store, Instruction ins, {bool allowLogin = true, CancelToken? cancel}) async {
     final t0 = _now();
     switch (ins) {
       case final PageOpen i: {
@@ -112,7 +163,11 @@ class Runner {
         if (!v.ok) return PageOpenResult(id: i.id, ok: false, error: 'blocked', ms: 0);
         _pageOpens += 1;
         try {
-          final r = await _host.openPage(store, i.url, i.timeoutMs);
+          final r = await _bounded(
+            _host.openPage(store, i.url, i.timeoutMs),
+            i.timeoutMs + hostGraceMs,
+            const PageLoad(ok: false, error: 'timeout'),
+          );
           return PageOpenResult(id: i.id, ok: r.ok, finalUrl: r.finalUrl, error: r.error, ms: _now() - t0);
         } catch (_) {
           return PageOpenResult(id: i.id, ok: false, error: 'load_failed', ms: _now() - t0);
@@ -120,7 +175,11 @@ class Runner {
       }
       case final PageScript i: {
         try {
-          final r = await _host.runScript(store, guardScript, i.script, i.until, i.timeoutMs);
+          final r = await _bounded(
+            _host.runScript(store, guardScript, i.script, i.until, i.timeoutMs),
+            i.timeoutMs + hostGraceMs,
+            const ScriptRun(messages: <JsonMessage>[], timedOut: true),
+          );
           return PageScriptResult(
             id: i.id,
             ok: r.error == null || r.error!.isEmpty,
@@ -143,7 +202,7 @@ class Runner {
       case final ShowLogin i: {
         // A warm-up runs before the user has tapped anything: it may check
         // who is signed in, never put a sign-in sheet in front of them.
-        if (!allowLogin) {
+        if (!allowLogin || (cancel != null && cancel.cancelled)) {
           return ShowLoginResult(
             id: i.id,
             ok: false,
@@ -165,7 +224,7 @@ class Runner {
           );
         }
         try {
-          final r = await _host.showLogin(LoginRequest(
+          final r = await _bounded(_host.showLogin(LoginRequest(
             store: store,
             url: i.url,
             title: i.title,
@@ -175,7 +234,8 @@ class Runner {
             doneWhenUrl: i.doneWhenUrl,
             timeoutMs: i.timeoutMs,
             allowNavigation: (String u) => allowlist.check(store, u, UrlUse.login).ok,
-          ));
+            cancel: cancel,
+          )), i.timeoutMs + hostGraceMs, const LoginResult(outcome: LoginOutcome.timeout, messages: <JsonMessage>[]));
           return ShowLoginResult(id: i.id, ok: true, outcome: r.outcome, messages: r.messages, ms: _now() - t0);
         } catch (e) {
           return ShowLoginResult(
@@ -196,7 +256,11 @@ class Runner {
         if (bodyBlocked(i.request.body)) return FetchResult(id: i.id, ok: false, error: 'blocked', ms: 0);
         if (_overRate(store)) return FetchResult(id: i.id, ok: false, error: 'rate', ms: 0);
         try {
-          final r = await _host.fetch(store, i.request, i.timeoutMs, i.maxBytes);
+          final r = await _bounded(
+            _host.fetch(store, i.request, i.timeoutMs, i.maxBytes),
+            i.timeoutMs + hostGraceMs,
+            const HttpResult(ok: false, error: 'timeout'),
+          );
           return FetchResult(
             id: i.id,
             ok: r.ok,

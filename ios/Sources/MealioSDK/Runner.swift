@@ -7,6 +7,77 @@ import Foundation
 /// Fetch instructions per store per minute (PROTOCOL.md "Rate caps").
 public let FETCH_PER_MINUTE = 120
 
+/// How long past an instruction's own timeout a Host may take to answer. A
+/// Host that never answers ends the step here, so no job can hang.
+public let HOST_GRACE_MS = 5_000
+
+/// Stops a prepare or a search. See `MealioClient.prepareCart`.
+@MainActor
+public final class CancelToken {
+    public private(set) var cancelled = false
+    private var listeners: [Int: () -> Void] = [:]
+    private var nextId = 0
+
+    public init() {}
+
+    public func cancel() {
+        if cancelled { return }
+        cancelled = true
+        let list = listeners.sorted { $0.key < $1.key }.map(\.value)
+        listeners = [:]
+        for fn in list { fn() }
+    }
+
+    /// Call `fn` on cancel, or now if already cancelled. Returns how to stop listening.
+    @discardableResult
+    public func onCancel(_ fn: @escaping () -> Void) -> () -> Void {
+        if cancelled {
+            fn()
+            return {}
+        }
+        nextId += 1
+        let id = nextId
+        listeners[id] = fn
+        return { [weak self] in self?.listeners[id] = nil }
+    }
+}
+
+/// `op`, or `fallback` once `ms` passes. A late `op` is left to finish on its own.
+@MainActor
+func bounded<T>(_ ms: Int, fallback: T, _ op: @escaping @MainActor () async throws -> T) async throws -> T {
+    try await withDeadline(ms, late: { .success(fallback) }, op)
+}
+
+/// `op`, or what `late` says once `ms` passes. The task running `op` is
+/// cancelled then, which stops a URLSession request.
+@MainActor
+func withDeadline<T>(_ ms: Int, late: @escaping @MainActor () -> Result<T, Error>,
+                     _ op: @escaping @MainActor () async throws -> T) async throws -> T {
+    let box = TaskBox()
+    let result: Result<T, Error> = await withCheckedContinuation { (cont: CheckedContinuation<Result<T, Error>, Never>) in
+        let once = ResumeOnce(cont)
+        let timer = Task { @MainActor in
+            do { try await Task.sleep(nanoseconds: nanoseconds(ms)) } catch { return }
+            if once.resume(late()) { box.task?.cancel() }
+        }
+        box.task = Task { @MainActor in
+            do {
+                let value = try await op()
+                once.resume(.success(value))
+            } catch {
+                once.resume(.failure(error))
+            }
+            timer.cancel()
+        }
+    }
+    return try result.get()
+}
+
+/// The task running a deadline's work, so the timer can cancel it.
+final class TaskBox: @unchecked Sendable {
+    var task: Task<Void, Never>?
+}
+
 /// How a job ended.
 public enum Terminal: Equatable {
     case done(JSONValue)
@@ -17,6 +88,8 @@ public struct StepOutcome {
     public let payload: InstructionsPayload
     public let results: [InstructionResult]
     public let terminal: Terminal?
+    /// The cancel token fired before the envelope finished.
+    public var cancelled = false
 }
 
 @MainActor
@@ -25,6 +98,9 @@ public final class Runner {
     private let host: MealioHost
     private let keys: [String: String]
     private var fetchStamps: [String: [TimeInterval]] = [:]
+    /// Added to every instruction's timeout before a silent Host ends the step.
+    /// Only tests shorten it.
+    var hostGraceMs = HOST_GRACE_MS
     /// How many times the hidden page has been told to load. A warm-up is only
     /// worth anything while the page it left behind is still the one showing,
     /// and this is how the client knows nothing has loaded over it since.
@@ -39,8 +115,10 @@ public final class Runner {
     /// Verify and run one envelope. Throws `EnvelopeError` when it must be refused.
     /// `onStep` is called before each instruction that actually runs (not for
     /// `done`, `fail` or skipped ones), for a progress screen. With
-    /// `allowLogin` false (a warm-up) every `show_login` is refused.
+    /// `allowLogin` false (a warm-up) every `show_login` is refused. Once
+    /// `cancel` fires, nothing more runs: the outcome says `cancelled`.
     public func run(_ env: Envelope?, job: String?, lastSeq: Int, allowLogin: Bool = true,
+                    cancel: CancelToken? = nil,
                     onStep: (@MainActor (Instruction) -> Void)? = nil) async throws -> StepOutcome {
         let payload = try checkInstructions(try openEnvelope(env, keys: keys), job: job, lastSeq: lastSeq)
         var results: [InstructionResult] = []
@@ -51,17 +129,23 @@ public final class Runner {
             if case .done(let d) = ins { terminal = .done(d.result); break }
             if case .fail(let f) = ins { terminal = .fail(code: f.code, message: f.message); break }
             if failed { results.append(Runner.skipped(ins)); continue }
+            // Checked right before each step, so a cancelled job never opens sign-in.
+            if cancel?.cancelled == true {
+                return StepOutcome(payload: payload, results: results, terminal: nil, cancelled: true)
+            }
             onStep?(ins)
-            let r = try await one(payload.store, ins, allowLogin: allowLogin)
+            let r = try await one(payload.store, ins, allowLogin: allowLogin, cancel: cancel)
             results.append(r)
             if !r.ok { failed = true }
         }
         return StepOutcome(payload: payload, results: results, terminal: terminal)
     }
 
-    private func one(_ store: String, _ ins: Instruction, allowLogin: Bool) async throws -> InstructionResult {
+    private func one(_ store: String, _ ins: Instruction, allowLogin: Bool, cancel: CancelToken?) async throws -> InstructionResult {
         let t0 = Runner.now()
         func ms() -> Int { Int((Runner.now() - t0) * 1000) }
+        let host = self.host
+        let grace = hostGraceMs
 
         switch ins {
         case .pageOpen(let op):
@@ -70,7 +154,9 @@ public final class Runner {
             }
             pageOpens += 1
             do {
-                let r = try await host.openPage(store: store, url: op.url, timeoutMs: op.timeoutMs)
+                let r = try await bounded(op.timeoutMs + grace, fallback: PageOpenOutcome(ok: false, error: "timeout")) {
+                    try await host.openPage(store: store, url: op.url, timeoutMs: op.timeoutMs)
+                }
                 return InstructionResult(id: op.id, ok: r.ok, ms: ms(), error: r.error, finalUrl: r.finalUrl)
             } catch {
                 return InstructionResult(id: op.id, ok: false, ms: ms(), error: "load_failed")
@@ -78,8 +164,10 @@ public final class Runner {
 
         case .pageScript(let op):
             do {
-                let r = try await host.runScript(store: store, guardScript: MealioScripts.guardScript, script: op.script,
-                                                 until: op.until, timeoutMs: op.timeoutMs)
+                let r = try await bounded(op.timeoutMs + grace, fallback: ScriptOutcome(messages: [], timedOut: true)) {
+                    try await host.runScript(store: store, guardScript: MealioScripts.guardScript, script: op.script,
+                                             until: op.until, timeoutMs: op.timeoutMs)
+                }
                 return InstructionResult(id: op.id, ok: r.error == nil, ms: ms(), error: r.error,
                                          messages: r.messages, timedOut: r.timedOut)
             } catch {
@@ -90,7 +178,7 @@ public final class Runner {
         case .showLogin(let op):
             // A warm-up runs before the user has tapped anything: it may check
             // who is signed in, never put a sign-in sheet in front of them.
-            guard allowLogin else {
+            guard allowLogin, cancel?.cancelled != true else {
                 return InstructionResult(id: op.id, ok: false, ms: 0, error: "not_allowed", messages: [], outcome: .cancelled)
             }
             guard allowlist.check(store, op.url, .login).ok else {
@@ -100,9 +188,11 @@ public final class Runner {
             let request = LoginRequest(
                 store: store, url: op.url, title: op.title, guardScript: MealioScripts.guardScript,
                 check: op.check, doneWhen: op.doneWhen, doneWhenUrl: op.doneWhenUrl, timeoutMs: op.timeoutMs,
-                allowNavigation: { url in allowlist.check(store, url, .login).ok })
+                allowNavigation: { url in allowlist.check(store, url, .login).ok }, cancel: cancel)
             do {
-                let r = try await host.showLogin(request)
+                let r = try await bounded(op.timeoutMs + grace, fallback: LoginOutcome(outcome: .timeout, messages: [])) {
+                    try await host.showLogin(request)
+                }
                 return InstructionResult(id: op.id, ok: true, ms: ms(), messages: r.messages, outcome: r.outcome)
             } catch {
                 return InstructionResult(id: op.id, ok: false, ms: ms(), error: Runner.short(error),
@@ -122,7 +212,9 @@ public final class Runner {
                 return InstructionResult(id: op.id, ok: false, ms: 0, error: "rate")
             }
             do {
-                let r = try await host.fetch(store: store, request: op.request, timeoutMs: op.timeoutMs, maxBytes: op.maxBytes)
+                let r = try await bounded(op.timeoutMs + grace, fallback: FetchOutcome(ok: false, error: "timeout")) {
+                    try await host.fetch(store: store, request: op.request, timeoutMs: op.timeoutMs, maxBytes: op.maxBytes)
+                }
                 return InstructionResult(id: op.id, ok: r.ok, ms: ms(), error: r.error, status: r.status,
                                          headers: r.headers, body: r.body, truncated: r.truncated)
             } catch {

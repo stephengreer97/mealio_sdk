@@ -118,6 +118,8 @@ final class Recorder: @unchecked Sendable {
 final class StubURLProtocol: URLProtocol {
     /// (request, body) -> (status, response body)
     static var handler: ((URLRequest, Data?) -> (Int, Data))?
+    /// True: no request is ever answered, as a server that never replies.
+    static var hangs = false
 
     static func session() -> URLSession {
         let config = URLSessionConfiguration.ephemeral
@@ -129,6 +131,7 @@ final class StubURLProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        if StubURLProtocol.hangs { return }
         // URLSession moves httpBody into a stream before it reaches a URLProtocol.
         let body = request.httpBody ?? StubURLProtocol.read(request.httpBodyStream)
         let (status, data) = StubURLProtocol.handler?(request, body) ?? (500, Data())

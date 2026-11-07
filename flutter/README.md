@@ -43,7 +43,8 @@ and your user's id, and returns the SDK session token it gets back. See
 `examples/partner-server` in this repo.
 
 The SDK calls your `sessionTokenProvider` when it needs a token, and calls it
-once more if Mealio answers 401.
+once more if Mealio answers 401. If it throws or takes over 30 seconds, the
+call fails with `session_failed`, carrying your error's message.
 
 ## 2. Configure once, place MealioScope, drop in the button
 
@@ -269,6 +270,20 @@ for hosting in your own sheet. `MealioCartSheet.show(context, session)` (the
 If your app already has classes named `Recipe` or `Product`, import with a
 prefix: `import 'package:mealio_sdk/mealio_sdk.dart' as mealio;`.
 
+## Users
+
+Tell the SDK who is signed in, at start and whenever it changes:
+
+```dart
+MealioCart.instance.setUser(user?.id); // null when nobody is signed in
+```
+
+A change stops any cart being prepared, starts a new session and signs the old
+user out of the stores, so a new user never sees the last one's cart. An add
+already under way finishes first. While it is null there is no session and no
+warm-up, and `MealioCartButton` calls `onSignInRequired` (on the button, or
+given to `configure`), or is disabled without one. Store settings do the same.
+
 ## Sign out of stores
 
 ```dart
@@ -294,7 +309,10 @@ Every failure is a `MealioException(code, message)`.
 | `location_required` | A Kroger family store with no store chosen yet. The drop-in asks the user |
 | `store_required` | No store was given and the user has no default store yet (the sheet shows the store picker) |
 | `session_expired` | The SDK session token expired; get a new one from your server |
-| `network` | Could not reach Mealio |
+| `session_failed` | Your `sessionTokenProvider` threw or took over 30 seconds. `message` is your error's |
+| `not_signed_in` | `setUser(null)`: nobody is signed in, so nothing was asked of your server |
+| `cancelled` | A prepare or search was stopped: the sheet closed, or the user changed |
+| `network` | Could not reach Mealio, or it did not answer within 30 seconds |
 | `unsupported` | An instruction `op` this SDK does not know |
 | `server` | Mealio answered with an error the protocol does not name |
 | `no_scope` | No `MealioScope` is mounted |

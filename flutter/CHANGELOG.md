@@ -1,3 +1,25 @@
+## Unreleased
+
+- One job at a time on the hidden page: prepare, search, add and warm-up queue
+  as whole jobs. Every request has a 30 second timeout (`network`), and every
+  page step ends at its own timeout plus 5 seconds, injection included.
+- `MealioCart.instance.setUser(id)`, `onSignInRequired` on `configure` and
+  `MealioCartButton`. New error codes `session_failed`, `not_signed_in` and
+  `cancelled`.
+- Closing the sheet stops the cart being prepared or searched, and a stopped
+  cart never shows sign-in. While adding, the sheet cannot be closed.
+- After a failed add, Try again keeps the user's picks and the sheet says to
+  check the cart (`addFailedNote`). `CartSession.restorePicks`, `searching`,
+  `cancelSearches`, `warnings`; `addToCart` called twice returns one future.
+- Totals add up in whole cents; the quantity shown is the one sent.
+- Blocked requests also cover operation and field names in any mutation,
+  snake_case and form-encoded bodies, and more order paths. The guard script
+  reads Request objects and Blob bodies.
+- The hidden page: a stale or replaced page's finish no longer answers a load,
+  a timed-out load is stopped, a blocked page that starts on its own is
+  replaced with a blank one, and an open sheet follows a remounted
+  `MealioScope`.
+
 ## 0.5.0
 
 - The sheet shows a clear message for the monthly cart cap and per-user cart limits.

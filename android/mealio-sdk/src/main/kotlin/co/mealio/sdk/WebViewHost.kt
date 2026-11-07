@@ -15,7 +15,10 @@ import android.webkit.WebViewClient
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withContext
@@ -143,6 +146,10 @@ class WebViewHost(context: Context) : Host {
     private var pendingLoad: CompletableDeferred<PageLoad>? = null
     private var loadStarted = false
 
+    /** Bumped when the hidden page is lost (a crashed renderer), so a warm-up on it is not used. */
+    @Volatile private var lost = 0
+    override val pagesLost: Int get() = lost
+
     /** The WebView's own User-Agent, reused for `fetch` so the store sees one browser. */
     @Volatile private var userAgent: String? = null
 
@@ -233,6 +240,7 @@ class WebViewHost(context: Context) : Host {
         override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
             if (view != null && view === webView) {
                 webView = null
+                lost += 1
                 pendingLoad?.complete(PageLoad(ok = false, error = "load_failed"))
                 view.destroy()
             }
@@ -302,6 +310,8 @@ class WebViewHost(context: Context) : Host {
     override suspend fun showLogin(request: LoginRequest): LoginResult {
         val session = LoginBroker.open(request)
         var inline: InlineLogin? = null
+        // A cancelled job closes its sign-in at once.
+        val stopListening = request.cancel?.onCancel { session.complete(LoginOutcome.CANCELLED) }
         try {
             onMain {
                 CookieManager.getInstance() // make sure the cookie store is up before the sheet
@@ -320,6 +330,7 @@ class WebViewHost(context: Context) : Host {
             return LoginResult(outcome, session.messages())
         } finally {
             // Closes the sheet if it is still up (timeout or a cancelled run).
+            stopListening?.invoke()
             session.complete(LoginOutcome.CANCELLED)
             LoginBroker.close(session.id)
             inline?.let { l -> withContext(NonCancellable + Dispatchers.Main) { MealioInlineLogin.clear(l) } }
@@ -336,7 +347,22 @@ class WebViewHost(context: Context) : Host {
         }
         val a = allowlist
         val hopAllowed = { u: String -> a.check(store, u, UrlUse.FETCH).ok }
-        return withContext(Dispatchers.IO) { StoreFetch(request, timeoutMs, maxBytes, ua, hopAllowed).run() }
+        return withContext(Dispatchers.IO) {
+            val f = StoreFetch(request, timeoutMs, maxBytes, ua, hopAllowed)
+            // A cancelled step (the runner's bound) disconnects, which unblocks the read.
+            val unblock = launch(start = CoroutineStart.UNDISPATCHED) {
+                try {
+                    awaitCancellation()
+                } finally {
+                    f.abort()
+                }
+            }
+            try {
+                f.run()
+            } finally {
+                unblock.cancel()
+            }
+        }
     }
 
     /** Leave the store page (after a sign-out). */
@@ -348,6 +374,7 @@ class WebViewHost(context: Context) : Host {
     /** Release the hidden WebView. The host can still be used; it makes a new one. */
     fun destroy() {
         Handler(Looper.getMainLooper()).post {
+            if (webView != null) lost += 1
             webView?.let {
                 it.stopLoading()
                 it.destroy()
@@ -373,6 +400,14 @@ private class StoreFetch(
     private val hopAllowed: (String) -> Boolean,
 ) {
     private val cookies = CookieManager.getInstance()
+    @Volatile private var open: HttpURLConnection? = null
+    @Volatile private var aborted = false
+
+    /** Stop now, from any thread. */
+    fun abort() {
+        aborted = true
+        open?.disconnect()
+    }
 
     fun run(): FetchResponse {
         var url = request.url
@@ -382,7 +417,9 @@ private class StoreFetch(
 
         try {
             for (hop in 0..MAX_REDIRECTS) {
+                if (aborted) return FetchResponse(ok = false, error = "timeout")
                 val conn = URL(url).openConnection() as HttpURLConnection
+                open = conn
                 try {
                     conn.instanceFollowRedirects = false
                     conn.connectTimeout = timeout

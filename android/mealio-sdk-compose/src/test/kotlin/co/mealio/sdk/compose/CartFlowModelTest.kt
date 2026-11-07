@@ -1,0 +1,439 @@
+package co.mealio.sdk.compose
+
+import co.mealio.sdk.AddResult
+import co.mealio.sdk.CancelToken
+import co.mealio.sdk.CartSession
+import co.mealio.sdk.Envelope
+import co.mealio.sdk.FetchRequest
+import co.mealio.sdk.FetchResponse
+import co.mealio.sdk.Host
+import co.mealio.sdk.HttpResponse
+import co.mealio.sdk.HttpTransport
+import co.mealio.sdk.LoginOutcome
+import co.mealio.sdk.LoginRequest
+import co.mealio.sdk.LoginResult
+import co.mealio.sdk.Matcher
+import co.mealio.sdk.MealioClient
+import co.mealio.sdk.MealioConfig
+import co.mealio.sdk.MealioEvent
+import co.mealio.sdk.MealioUser
+import co.mealio.sdk.PageLoad
+import co.mealio.sdk.Recipe
+import co.mealio.sdk.RecipeIngredient
+import co.mealio.sdk.ScriptRun
+import co.mealio.sdk.StepListener
+import co.mealio.sdk.StoreInfo
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
+import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters
+import org.bouncycastle.crypto.signers.Ed25519Signer
+import org.json.JSONArray
+import org.json.JSONObject
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import java.util.Base64
+
+// The drop-in's flow, outside composition. Mirrors the flow tests in
+// packages/react-native/test/flow.test.tsx where they apply, plus Android's
+// activity recreation (the audit's finding 1).
+@OptIn(ExperimentalCoroutinesApi::class)
+class CartFlowModelTest {
+
+    // ── a signed fake server ────────────────────────────────────────
+
+    private object Signer {
+        private val priv = Ed25519PrivateKeyParameters(ByteArray(32) { 7 }, 0)
+        val keys = mapOf("ktest" to Base64.getEncoder().encodeToString(priv.generatePublicKey().encoded))
+
+        fun envelope(job: String, seq: Int, instructions: List<JSONObject>): JSONObject {
+            val payload = JSONObject().put("v", 1).put("kind", "instructions").put("job", job).put("seq", seq)
+                .put("exp", 4102444800L).put("store", "heb").put("instructions", JSONArray(instructions)).toString()
+            val s = Ed25519Signer()
+            s.init(true, priv)
+            val b = payload.toByteArray(Charsets.UTF_8)
+            s.update(b, 0, b.size)
+            return JSONObject().put("payload", payload).put("sig", Base64.getEncoder().encodeToString(s.generateSignature())).put("kid", "ktest")
+        }
+    }
+
+    private fun done(result: JSONObject) = JSONObject().put("op", "done").put("id", "d").put("result", result)
+    private fun open(id: String = "o") = JSONObject().put("op", "page_open").put("id", id).put("url", "https://www.heb.com/robots.txt").put("timeoutMs", 1000)
+    private val login = JSONObject().put("op", "show_login").put("id", "l").put("url", "https://www.heb.com/login")
+        .put("title", "Sign in").put("doneWhen", JSONArray()).put("timeoutMs", 1000)
+
+    private fun cart(store: String = "heb", picked: String = "p1") = JSONObject().put("cartId", "c").put("store", store)
+        .put("ready", JSONArray()).put("needsChoice", JSONArray()).put("unavailable", JSONArray())
+        .put("items", JSONArray()
+            .put(item("milk", picked))
+            .put(item("eggs", "e1")))
+
+    private fun item(key: String, selected: String) = JSONObject().put("key", key).put("ingredient", key).put("quantity", 1)
+        .put("status", "remembered").put("selectedId", selected).put("remembered", JSONObject.NULL)
+        .put("options", JSONArray()
+            .put(JSONObject().put("id", "p1").put("name", "Milk").put("unitPrice", 3))
+            .put(JSONObject().put("id", "p2").put("name", "Oat milk").put("unitPrice", 4))
+            .put(JSONObject().put("id", "e1").put("name", "Eggs").put("unitPrice", 2)))
+
+    private val added = JSONObject().put("cartId", "c").put("store", "heb")
+        .put("added", JSONArray().put(JSONObject().put("key", "milk").put("productId", "p1").put("name", "Milk").put("quantity", 1)))
+        .put("skipped", JSONArray()).put("failed", JSONArray())
+
+    private class FakeLogin : FlowLogin {
+        var activeNow = false
+        override val active: Boolean get() = activeNow
+        var cancels = 0
+        var attached = 0
+        var detached = 0
+        override fun cancel() { cancels += 1; activeNow = false }
+        override fun goBack(): Boolean = false
+        override fun attachSheet(): () -> Unit { attached += 1; return { detached += 1 } }
+    }
+
+    /** Everything one flow test needs. */
+    private inner class Harness(val test: TestScope) {
+        val sent = mutableListOf<String>()
+        val bodies = mutableListOf<JSONObject>()
+        val opened = mutableListOf<String>()
+        var openGate: CompletableDeferred<Unit>? = null
+        var signIns = 0
+        var answer: (path: String, body: JSONObject) -> HttpResponse = { p, _ -> start(p, done(cart())) }
+        var storesAnswer: () -> List<StoreInfo> = { listOf(StoreInfo("heb", "H-E-B", "device")) }
+        var storeCalls = 0
+        private var jobs = 0
+
+        fun start(path: String, vararg ins: JSONObject): HttpResponse {
+            jobs += 1
+            val job = "job$jobs"
+            return HttpResponse(200, JSONObject().put("job", job).put("envelope", Signer.envelope(job, 1, ins.toList())).toString())
+        }
+
+        val host = object : Host {
+            override suspend fun openPage(store: String, url: String, timeoutMs: Long): PageLoad {
+                opened += url
+                openGate?.await()
+                return PageLoad(true, url)
+            }
+            override suspend fun runScript(store: String, guard: String, script: String, until: List<Matcher>, timeoutMs: Long) = ScriptRun(emptyList(), false)
+            override suspend fun showLogin(request: LoginRequest): LoginResult { signIns += 1; return LoginResult(LoginOutcome.SIGNED_IN, emptyList()) }
+            override suspend fun fetch(store: String, request: FetchRequest, timeoutMs: Long, maxBytes: Int) = FetchResponse(true, 200, body = "")
+        }
+        val transport = object : HttpTransport {
+            override suspend fun post(url: String, headers: Map<String, String>, body: String): HttpResponse {
+                val path = url.removePrefix("https://mealio.test").removePrefix("/api/v1/sdk")
+                sent += path
+                bodies += JSONObject(body)
+                return answer(path, JSONObject(body))
+            }
+        }
+        val client = MealioClient(MealioConfig("pk", { "tok" }, baseUrl = "https://mealio.test", keys = Signer.keys), host, transport)
+        var prepareThrows: Throwable? = null
+        val backend = object : FlowBackend {
+            override suspend fun prepareCart(store: String?, recipes: List<Recipe>, cancel: CancelToken, onStep: StepListener): CartSession {
+                prepareThrows?.let { throw it }
+                return client.prepareCart(store, recipes, null, cancel, onStep)
+            }
+            override suspend fun stores(): List<StoreInfo> { storeCalls += 1; return storesAnswer() }
+        }
+        val login = FakeLogin()
+        val events = mutableListOf<MealioEvent>()
+        val closed = mutableListOf<AddResult?>()
+        val addedResults = mutableListOf<AddResult>()
+        val errors = mutableListOf<Exception>()
+        val ui = MealioUi(onEvent = { events += it })
+        val dispatcher = StandardTestDispatcher(test.testScheduler)
+
+        fun model(store: String? = "heb", user: MealioUser = MealioUser()) = CartFlowModel(
+            listOf(Recipe("r", listOf(RecipeIngredient("milk")))), store, ui,
+            FlowCallbacks({ closed += it }, { addedResults += it }, { errors += it }),
+            backend, login, dispatcher, user,
+        ).also { it.attach() }
+    }
+
+    // ── recreation (audit finding 1) ────────────────────────────────
+
+    @Test
+    fun aRotationMidAddKeepsTheAddAndDoneKeepsItsResult() = runTest {
+        val h = Harness(this)
+        h.answer = { p, _ -> if (p.endsWith("/add")) h.start(p, open(), done(added)) else h.start(p, done(cart())) }
+        val m = FlowModels.obtain("rot", openedNow = true) { h.model() }!!
+        advanceUntilIdle()
+        assertEquals(Phase.LIST, m.phase)
+        h.openGate = CompletableDeferred()
+        m.add()
+        runCurrent()
+        // The activity is recreated: the composition goes, the model stays.
+        m.detach()
+        val again = FlowModels.obtain("rot", openedNow = false) { error("a new model would restart the flow") }
+        assertSame(m, again)
+        h.openGate!!.complete(Unit)
+        advanceUntilIdle()
+        // Nothing is said to the partner while no screen shows it ...
+        assertTrue(h.addedResults.isEmpty())
+        assertEquals(Phase.DONE, m.phase)
+        // ... and it is once the new screen attaches.
+        m.attach()
+        assertEquals(1, h.addedResults.size)
+        assertNotNull(m.result)
+        assertEquals(1, h.sent.count { it.endsWith("/add") })
+        assertEquals(1, h.sent.count { it.endsWith("/carts") })
+        m.close()
+        assertSame(m.result, h.closed.single())
+        assertNull(FlowModels.obtain("rot", openedNow = false) { error("closed") })
+    }
+
+    @Test
+    fun aSignInInProgressSurvivesRecreation() = runTest {
+        val h = Harness(this)
+        val m = h.model()
+        assertEquals(1, h.login.attached)
+        // Recreation detaches the composition, not the sheet: the sign-in is not cancelled.
+        m.detach()
+        m.attach()
+        assertEquals(0, h.login.detached)
+        assertEquals(0, h.login.cancels)
+        advanceUntilIdle()
+        m.close()
+        assertEquals(1, h.login.detached)
+    }
+
+    @Test
+    fun afterProcessDeathNoNewCartStarts() = runTest {
+        var made = 0
+        // A saved id with no model: the process died. Nothing is created.
+        assertNull(FlowModels.obtain("restored-${System.nanoTime()}", openedNow = false) { made += 1; Harness(this).model() })
+        assertEquals(0, made)
+    }
+
+    @Test
+    fun unmountingMidLoadReportsNothing() = runTest {
+        val h = Harness(this)
+        h.openGate = CompletableDeferred()
+        h.answer = { p, _ -> h.start(p, open(), login, done(cart())) }
+        val m = h.model()
+        runCurrent()
+        m.dispose()
+        h.openGate!!.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(0, h.signIns)
+        assertTrue(h.closed.isEmpty() && h.errors.isEmpty() && h.addedResults.isEmpty())
+        assertTrue(h.events.none { it is MealioEvent.ListShown || it is MealioEvent.SheetClosed })
+    }
+
+    // ── cancelling (audit finding 2) ────────────────────────────────
+
+    @Test
+    fun aPartnersCancellationExceptionShowsAnErrorNotASpinner() = runTest {
+        val h = Harness(this)
+        h.prepareThrows = CancellationException("partner timeout")
+        val m = h.model()
+        advanceUntilIdle()
+        assertEquals(Phase.ERROR, m.phase)
+        assertEquals(1, h.errors.size)
+    }
+
+    @Test
+    fun stopsTheJobNothingMoreIsSentAndSignInNeverShows() = runTest {
+        val h = Harness(this)
+        h.openGate = CompletableDeferred()
+        h.answer = { p, _ -> h.start(p, open(), login, done(cart())) }
+        val m = h.model()
+        runCurrent()
+        assertTrue(m.close())
+        h.openGate!!.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(0, h.signIns)
+        assertEquals(listOf("/carts"), h.sent)
+        assertEquals(listOf<AddResult?>(null), h.closed)
+        assertTrue(h.errors.isEmpty())
+    }
+
+    // ── no close while adding (audit finding 4) ─────────────────────
+
+    @Test
+    fun cannotBeClosedOnceTappedAndReportsTheAddWhenItEnds() = runTest {
+        val h = Harness(this)
+        h.answer = { p, _ -> if (p.endsWith("/add")) h.start(p, open(), done(added)) else h.start(p, done(cart())) }
+        val m = h.model()
+        advanceUntilIdle()
+        h.openGate = CompletableDeferred()
+        m.add()
+        runCurrent()
+        // X, back and the system back all land in close() or back().
+        assertFalse(m.close())
+        m.back()
+        assertEquals(Phase.ADDING, m.phase)
+        assertTrue(h.closed.isEmpty())
+        // A sign-in the add asked for can still be dismissed.
+        h.login.activeNow = true
+        assertFalse(m.close())
+        assertEquals(1 + 0, h.login.cancels)
+        h.openGate!!.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(Phase.DONE, m.phase)
+        assertEquals(1, h.addedResults.size)
+        assertTrue(m.close())
+    }
+
+    // ── double tap (audit finding 5) ────────────────────────────────
+
+    @Test
+    fun twoTapsBeforeARenderAddOnce() = runTest {
+        val h = Harness(this)
+        h.answer = { p, _ -> if (p.endsWith("/add")) h.start(p, done(added)) else h.start(p, done(cart())) }
+        val m = h.model()
+        advanceUntilIdle()
+        m.add()
+        m.add()
+        advanceUntilIdle()
+        assertEquals(1, h.sent.count { it.endsWith("/add") })
+        assertEquals(1, h.events.count { it is MealioEvent.AddStarted })
+    }
+
+    // ── the rest of 0.6 ─────────────────────────────────────────────
+
+    @Test
+    fun aFailedAddSaysToCheckTheCartAndTryAgainKeepsThePicks() = runTest {
+        val h = Harness(this)
+        h.answer = { p, _ ->
+            if (p.endsWith("/add")) HttpResponse(500, JSONObject().put("error", JSONObject().put("code", "store_unavailable").put("message", "down")).toString())
+            else h.start(p, done(cart()))
+        }
+        val m = h.model()
+        advanceUntilIdle()
+        m.cart!!.select("milk", "p2")
+        m.cart!!.deselect("eggs")
+        m.add()
+        advanceUntilIdle()
+        assertEquals(Phase.ERROR, m.phase)
+        assertNotNull(m.failedAdd)
+        m.retry()
+        advanceUntilIdle()
+        assertEquals(Phase.LIST, m.phase)
+        assertNull(m.failedAdd)
+        assertEquals("p2", m.cart!!.selectedId("milk"))
+        assertFalse(m.cart!!.isSelected("eggs"))
+    }
+
+    @Test
+    fun addIsOffWhileASearchRuns() = runTest {
+        val h = Harness(this)
+        val m = h.model()
+        advanceUntilIdle()
+        h.openGate = CompletableDeferred()
+        h.answer = { p, _ -> h.start(p, open(), done(JSONObject().put("key", "milk").put("options", JSONArray()))) }
+        val c = m.cart!!
+        val search = launch(h.dispatcher) { c.search("milk", "oat milk") }
+        runCurrent()
+        assertTrue(c.searching)
+        m.add()
+        assertEquals(Phase.LIST, m.phase)
+        h.openGate!!.complete(Unit)
+        search.join()
+        assertFalse(c.searching)
+    }
+
+    @Test
+    fun closingCancelsASearch() = runTest {
+        val h = Harness(this)
+        val m = h.model()
+        advanceUntilIdle()
+        h.openGate = CompletableDeferred()
+        h.answer = { p, _ -> h.start(p, open(), open("o2"), done(JSONObject().put("key", "milk").put("options", JSONArray()))) }
+        val c = m.cart!!
+        var outcome = ""
+        val job = launch(h.dispatcher) {
+            outcome = try { c.search("milk", "oat"); "found" } catch (e: co.mealio.sdk.MealioException) { e.code }
+        }
+        runCurrent()
+        m.close()
+        h.openGate!!.complete(Unit)
+        job.join()
+        assertEquals("cancelled", outcome)
+        assertEquals(1, h.opened.size)
+    }
+
+    @Test
+    fun tryAgainUsesTheStoreThePartnerPassesNow() = runTest {
+        val h = Harness(this)
+        h.answer = { p, _ -> HttpResponse(503, JSONObject().put("error", JSONObject().put("code", "store_unavailable").put("message", "down")).toString()) }
+        val m = h.model("heb")
+        advanceUntilIdle()
+        assertEquals(Phase.ERROR, m.phase)
+        m.propStoreChanged("aldi")
+        h.answer = { p, _ -> h.start(p, done(cart("aldi"))) }
+        m.retry()
+        advanceUntilIdle()
+        assertEquals("aldi", h.bodies.last().getString("store"))
+        assertEquals(Phase.LIST, m.phase)
+    }
+
+    @Test
+    fun aStoreListThatFailedToLoadIsAskedForAgain() = runTest {
+        val h = Harness(this)
+        val m = h.model()
+        advanceUntilIdle()
+        h.storesAnswer = { throw co.mealio.sdk.MealioException("network", "down") }
+        m.openStores(Phase.LIST)
+        advanceUntilIdle()
+        assertEquals(emptyList<StoreInfo>(), m.stores)
+        m.backToList()
+        h.storesAnswer = { listOf(StoreInfo("heb", "H-E-B", "device")) }
+        m.openStores(Phase.LIST)
+        advanceUntilIdle()
+        assertEquals(2, h.storeCalls)
+        assertEquals(1, m.stores!!.size)
+    }
+
+    @Test
+    fun callsTheLatestOnAdded() = runTest {
+        val h = Harness(this)
+        h.answer = { p, _ -> if (p.endsWith("/add")) h.start(p, done(added)) else h.start(p, done(cart())) }
+        val m = h.model()
+        advanceUntilIdle()
+        val latest = mutableListOf<AddResult>()
+        m.callbacks = FlowCallbacks({}, { latest += it }, {})
+        m.add()
+        advanceUntilIdle()
+        assertEquals(1, latest.size)
+        assertTrue(h.addedResults.isEmpty())
+    }
+
+    @Test
+    fun aNewUserClosesTheOpenSheetButAnAddFinishesFirst() = runTest {
+        val h = Harness(this)
+        h.answer = { p, _ -> if (p.endsWith("/add")) h.start(p, open(), done(added)) else h.start(p, done(cart())) }
+        val m = h.model(user = MealioUser(true, "a"))
+        advanceUntilIdle()
+        h.openGate = CompletableDeferred()
+        m.add()
+        runCurrent()
+        m.checkUser(MealioUser(true, "b"))
+        assertTrue(h.closed.isEmpty())
+        h.openGate!!.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(1, h.closed.size)
+        assertTrue(m.finished)
+    }
+
+    // ── the button ──────────────────────────────────────────────────
+
+    @Test
+    fun withNobodySignedInTheButtonAsksForSignInOrIsOffWithoutACallback() {
+        assertEquals(ButtonTap.OPEN, buttonTap(signedIn = true, enabled = true, onSignInRequired = null))
+        assertEquals(ButtonTap.SIGN_IN, buttonTap(signedIn = false, enabled = true, onSignInRequired = {}))
+        assertEquals(ButtonTap.OFF, buttonTap(signedIn = false, enabled = true, onSignInRequired = null))
+        assertEquals(ButtonTap.OFF, buttonTap(signedIn = true, enabled = false, onSignInRequired = {}))
+    }
+}

@@ -44,6 +44,8 @@ dependencies {
     implementation("org.bouncycastle:bcprov-jdk18on:1.77")
 
     testImplementation("junit:junit:4.13.2")
+    // Virtual time, for the 30 second and grace bounds.
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3")
     // android.jar's org.json is a stub that throws in JVM unit tests. The real
     // implementation on the test classpath takes its place.
     // VERIFY: AGP puts this ahead of the android.jar stub on the unit-test classpath.

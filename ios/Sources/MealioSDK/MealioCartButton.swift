@@ -33,6 +33,8 @@ public struct MealioCartButton: View {
     /// The partner's own button. AnyView keeps MealioCartButton a plain type,
     /// so code that names it still compiles.
     private let custom: ((@escaping () -> Void, Bool, String) -> AnyView)?
+    private let onSignInRequired: (() -> Void)?
+    @ObservedObject private var users: MealioUsers
     @State private var open = false
     @Environment(\.colorScheme) private var systemScheme
 
@@ -64,10 +66,11 @@ public struct MealioCartButton: View {
                 onClose: ((AddResult?) -> Void)? = nil,
                 onError: ((Error) -> Void)? = nil,
                 doneMessage: String? = nil,
-                doneAction: MealioDoneAction? = nil) {
+                doneAction: MealioDoneAction? = nil,
+                onSignInRequired: (() -> Void)? = nil) {
         self.init(recipes: [recipe], store: store, zip: zip, label: label, variant: variant, disabled: disabled,
                   onAdded: onAdded, onClose: onClose, onError: onError,
-                  doneMessage: doneMessage, doneAction: doneAction)
+                  doneMessage: doneMessage, doneAction: doneAction, onSignInRequired: onSignInRequired)
     }
 
     /// One cart from several recipes (at most `MAX_RECIPES`). Ingredients they
@@ -83,10 +86,11 @@ public struct MealioCartButton: View {
                 onClose: ((AddResult?) -> Void)? = nil,
                 onError: ((Error) -> Void)? = nil,
                 doneMessage: String? = nil,
-                doneAction: MealioDoneAction? = nil) {
+                doneAction: MealioDoneAction? = nil,
+                onSignInRequired: (() -> Void)? = nil) {
         self.init(recipes: recipes, store: store, zip: zip, label: label, variant: variant, disabled: disabled,
                   onAdded: onAdded, onClose: onClose, onError: onError,
-                  doneMessage: doneMessage, doneAction: doneAction, custom: nil)
+                  doneMessage: doneMessage, doneAction: doneAction, onSignInRequired: onSignInRequired, custom: nil)
     }
 
     /// Draw your own button. It keeps the whole flow and the warm-up.
@@ -108,10 +112,11 @@ public struct MealioCartButton: View {
                                onError: ((Error) -> Void)? = nil,
                                doneMessage: String? = nil,
                                doneAction: MealioDoneAction? = nil,
+                               onSignInRequired: (() -> Void)? = nil,
                                @ViewBuilder button: @escaping (_ action: @escaping () -> Void, _ disabled: Bool, _ label: String) -> Content) {
         self.init(recipes: [recipe], store: store, zip: zip, label: label, disabled: disabled,
                   onAdded: onAdded, onClose: onClose, onError: onError,
-                  doneMessage: doneMessage, doneAction: doneAction, button: button)
+                  doneMessage: doneMessage, doneAction: doneAction, onSignInRequired: onSignInRequired, button: button)
     }
 
     /// Your own button for a cart from several recipes.
@@ -126,10 +131,11 @@ public struct MealioCartButton: View {
                                onError: ((Error) -> Void)? = nil,
                                doneMessage: String? = nil,
                                doneAction: MealioDoneAction? = nil,
+                               onSignInRequired: (() -> Void)? = nil,
                                @ViewBuilder button: @escaping (_ action: @escaping () -> Void, _ disabled: Bool, _ label: String) -> Content) {
         self.init(recipes: recipes, store: store, zip: zip, label: label, variant: .solid, disabled: disabled,
                   onAdded: onAdded, onClose: onClose, onError: onError,
-                  doneMessage: doneMessage, doneAction: doneAction,
+                  doneMessage: doneMessage, doneAction: doneAction, onSignInRequired: onSignInRequired,
                   custom: { action, disabled, label in AnyView(button(action, disabled, label)) })
     }
 
@@ -144,6 +150,7 @@ public struct MealioCartButton: View {
                  onError: ((Error) -> Void)?,
                  doneMessage: String?,
                  doneAction: MealioDoneAction?,
+                 onSignInRequired: (() -> Void)?,
                  custom: ((@escaping () -> Void, Bool, String) -> AnyView)?) {
         self.recipes = recipes
         self.store = store
@@ -157,6 +164,8 @@ public struct MealioCartButton: View {
         self.doneMessage = doneMessage
         self.doneAction = doneAction
         self.custom = custom
+        self.onSignInRequired = onSignInRequired
+        self._users = ObservedObject(wrappedValue: MealioCart.users)
     }
 
     private var shownLabel: String {
@@ -164,13 +173,43 @@ public struct MealioCartButton: View {
         return MealioCart.text.tr(variant == .compact ? .addToCartShort : .addToCart)
     }
 
+    /// Who to tell when the button is tapped while nobody is signed in.
+    private var signIn: (() -> Void)? {
+        users.hasUser ? nil : (onSignInRequired ?? MealioCart.onSignInRequired)
+    }
+
+    /// Off when the partner says so, or while nobody is signed in and there
+    /// is no sign-in to send them to.
+    var disabled: Bool { isDisabled || (!users.hasUser && signIn == nil) }
+
+    /// What a tap does: open the sheet, or ask the app to sign the user in.
+    func tap() {
+        if disabled { return }
+        if let signIn = signIn {
+            signIn()
+        } else if users.hasUser {
+            open = true
+        }
+    }
+
+    /// The warm-up runs again when any of these change, so a button that
+    /// becomes enabled, or a new user, warms too.
+    struct WarmKey: Equatable {
+        let store: String?
+        let on: Bool
+        let user: Int
+    }
+
+    var warmKey: WarmKey { WarmKey(store: store, on: !disabled && users.hasUser, user: users.generation) }
+
     public var body: some View {
-        button(MealioCart.resolvedTheme(for: systemScheme), shownLabel)
+        let key = warmKey
+        return button(MealioCart.resolvedTheme(for: systemScheme), shownLabel)
             // WARM THE LOGIN CHECK while the user reads the recipe. Only for a known
             // user with a store on file: the server answers "nothing to warm"
             // otherwise. The client runs it at most once every few minutes.
-            .task(id: store) {
-                if !isDisabled { await MealioCart.warm(store: store) }
+            .task(id: key) {
+                if key.on { await MealioCart.warm(store: key.store) }
             }
             .mealioCartFlow(isPresented: $open, recipes: recipes, store: store, zip: zip,
                             onAdded: onAdded, onError: onError, onClose: onClose,
@@ -180,15 +219,15 @@ public struct MealioCartButton: View {
     @ViewBuilder
     private func button(_ t: MealioTheme, _ text: String) -> some View {
         if let custom = custom {
-            custom({ if !isDisabled { open = true } }, isDisabled, text)
+            custom({ tap() }, disabled, text)
         } else {
-            Button(action: { open = true }) {
+            Button(action: { tap() }) {
                 face(t, text)
-                    .opacity(isDisabled ? 0.5 : 1)
+                    .opacity(disabled ? 0.5 : 1)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .disabled(isDisabled)
+            .disabled(disabled)
             .accessibilityLabel(text)
         }
     }
