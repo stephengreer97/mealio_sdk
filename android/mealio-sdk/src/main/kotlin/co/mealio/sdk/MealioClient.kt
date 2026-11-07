@@ -1,8 +1,14 @@
 package co.mealio.sdk
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -284,7 +290,7 @@ class MealioClient @JvmOverloads constructor(
             val body = about(fields)
             stopIf(stop)
             takeWarm(store, body.optInt("epoch"))?.let { body.put("warm", it) }
-            val result = driveLoop(post("/api/v1/sdk/carts", body), onStep, cancel = stop)
+            val result = driveLoop(post("/api/v1/sdk/carts", body, cancel = stop), onStep, cancel = stop)
             val o = result as? JSONObject ?: throw MealioException("server", "Mealio returned no cart")
             val cart = PreparedCart.fromJson(o)
             if (config.debug) for (w in cart.warnings) debugLog("${w.code}: ${w.message}")
@@ -319,7 +325,7 @@ class MealioClient @JvmOverloads constructor(
                 stopIf(cancel)
                 val body = about(JSONObject().putIfNotNull("store", store))
                 stopIf(cancel)
-                val start = post("/api/v1/sdk/warm", body)
+                val start = post("/api/v1/sdk/warm", body, cancel = cancel)
                 val job = start.opt("job") as? String
                 if (job == null) { if (!cancel.cancelled) warmed = null; return@withLock }
                 val r = driveLoop(start, null, warm = true, cancel = cancel) as? JSONObject
@@ -387,29 +393,74 @@ class MealioClient @JvmOverloads constructor(
     /**
      * Run `block` with the hidden page to itself, in the queue with the jobs.
      * For work that must not land in the middle of one, like clearing store
-     * sessions. Fails with "network" after 30 seconds.
+     * sessions. Fails with "network" after 30 seconds, but the queue stays
+     * held until `block` has really ended (it is cancelled then), so the next
+     * job never lands in the middle of it.
+     *
+     * Its place in the queue is taken before the first suspension: called with
+     * CoroutineStart.UNDISPATCHED, it is ahead of any job started afterwards.
+     * A caller cancelled while it waits takes it out of the queue; one
+     * cancelled while it runs cancels it, and the queue waits for it to end.
      */
-    suspend fun <T> runExclusive(block: suspend () -> T): T = runLock.withLock {
-        val box = withTimeoutOrNull(REQUEST_TIMEOUT_MS) { Box(block()) }
-            ?: throw MealioException("network", "That took too long")
-        box.value
+    suspend fun <T> runExclusive(block: suspend () -> T): T {
+        val started = CompletableDeferred<Unit>()
+        // Owned by no caller: the lock is let go only when block ends.
+        val work = CoroutineScope(currentCoroutineContext().minusKey(Job)).async(start = CoroutineStart.UNDISPATCHED) {
+            runLock.withLock {
+                started.complete(Unit)
+                block()
+            }
+        }
+        try {
+            started.await()
+            val box = withTimeoutOrNull(REQUEST_TIMEOUT_MS) { Box(work.await()) }
+            if (box == null) {
+                work.cancel()
+                throw MealioException("network", "That took too long")
+            }
+            return box.value
+        } catch (e: CancellationException) {
+            work.cancel()
+            throw e
+        }
     }
 
     private class Box<T>(val value: T)
 
-    /** The current token. One that arrives after a reset belongs to the last user. */
-    private suspend fun sessionToken(): String {
+    /**
+     * The current token. One that arrives after a reset belongs to the last
+     * user. Inside a cancellable job (`cancel` set) a reset while the token was
+     * on its way ends the job with "cancelled": it never asks for the next
+     * user's token and never sends anything.
+     */
+    private suspend fun sessionToken(cancel: CancelToken? = null): String = sessionPin(cancel).token
+
+    /** A token and the session generation it belongs to. An add keeps both. */
+    private class Pin(@Volatile var token: String, val gen: Int)
+
+    private suspend fun sessionPin(cancel: CancelToken? = null): Pin {
         while (true) {
+            if (cancel != null) stopIf(cancel)
             if (signedOut) throw MealioException("not_signed_in", "Nobody is signed in")
-            token?.let { return it }
-            val gen = synchronized(this) { sessionGen }
+            val (have, gen) = synchronized(this) { token to sessionGen }
+            if (have != null) return Pin(have, gen)
             val fresh = try {
                 fetchToken()
             } catch (e: MealioException) {
-                if (synchronized(this) { gen != sessionGen }) continue
+                if (synchronized(this) { gen != sessionGen }) {
+                    if (cancel != null) throw MealioException("cancelled", "Cancelled")
+                    continue
+                }
                 throw e
             }
-            synchronized(this) { if (gen == sessionGen) token = fresh }
+            if (cancel != null) stopIf(cancel)
+            synchronized(this) {
+                if (gen == sessionGen) {
+                    token = fresh
+                    return Pin(fresh, gen)
+                }
+            }
+            if (cancel != null) throw MealioException("cancelled", "Cancelled")
         }
     }
 
@@ -440,7 +491,7 @@ class MealioClient @JvmOverloads constructor(
         return cartJob(stop) {
             val body = about(JSONObject().put("key", key).put("query", query))
             stopIf(stop)
-            val result = driveLoop(post("/api/v1/sdk/carts/${encodeUriComponent(cartId)}/search", body), onStep, cancel = stop)
+            val result = driveLoop(post("/api/v1/sdk/carts/${encodeUriComponent(cartId)}/search", body, cancel = stop), onStep, cancel = stop)
             val o = result as? JSONObject ?: throw MealioException("server", "Mealio returned no search result")
             SearchResult.fromJson(o)
         }
@@ -452,14 +503,23 @@ class MealioClient @JvmOverloads constructor(
      * user changes meanwhile. Every wait in it is bounded, so it does end.
      */
     @JvmOverloads
-    suspend fun addToCart(cartId: String, selections: List<Selection>, onStep: StepListener? = null): AddResult =
-        cartJob(null) {
-            val tok = sessionToken()
-            val body = about(JSONObject().put("selections", JSONArray(selections.map { it.toJson() })))
-            val result = driveLoop(post("/api/v1/sdk/carts/${encodeUriComponent(cartId)}/add", body, tok), onStep, token = tok)
-            val o = result as? JSONObject ?: throw MealioException("server", "Mealio returned no add result")
-            AddResult.fromJson(o)
+    suspend fun addToCart(cartId: String, selections: List<Selection>, onStep: StepListener? = null): AddResult {
+        // Counted from the call, so a warm-up cannot slip in while the token comes.
+        pending.incrementAndGet()
+        try {
+            // The session of whoever tapped, taken now and not after the wait
+            // in the queue: a user change meanwhile must not lend it theirs.
+            val pin = sessionPin()
+            return cartJob(null) {
+                val body = about(JSONObject().put("selections", JSONArray(selections.map { it.toJson() })))
+                val result = driveLoop(post("/api/v1/sdk/carts/${encodeUriComponent(cartId)}/add", body, pin = pin), onStep, pin = pin)
+                val o = result as? JSONObject ?: throw MealioException("server", "Mealio returned no add result")
+                AddResult.fromJson(o)
+            }
+        } finally {
+            pending.decrementAndGet()
         }
+    }
 
     /** There is no hello call any more; every job-starting call says who is calling. */
     @Deprecated("No hello call any more. Nothing to reset.")
@@ -515,14 +575,14 @@ class MealioClient @JvmOverloads constructor(
     /**
      * `warm` is true for a warm-up: it runs before the user has tapped
      * anything, so it may check who is signed in but never show a sign-in sheet.
-     * `token` pins the session (an add keeps the one it started with).
+     * `pin` pins the session (an add keeps the one it was called with).
      */
     private suspend fun driveLoop(
         start: JSONObject,
         onStep: StepListener?,
         warm: Boolean = false,
         cancel: CancelToken? = null,
-        token: String? = null,
+        pin: Pin? = null,
     ): Any? {
         val job = start.opt("job") as? String
         var env = Envelope.fromJson(start.opt("envelope"))
@@ -540,7 +600,7 @@ class MealioClient @JvmOverloads constructor(
                 is Terminal.Fail -> throw MealioException(t.code, t.message)
                 null -> Unit
             }
-            val next = post("/api/v1/sdk/jobs/${encodeUriComponent(job ?: "")}/step", StepRequest(seq, out.results).toJson(), token)
+            val next = post("/api/v1/sdk/jobs/${encodeUriComponent(job ?: "")}/step", StepRequest(seq, out.results).toJson(), pin = pin, cancel = cancel)
             env = Envelope.fromJson(next.opt("envelope"))
         }
         throw MealioException("server", "job did not finish")
@@ -562,8 +622,19 @@ class MealioClient @JvmOverloads constructor(
         return res ?: throw MealioException("network", "Could not reach Mealio")
     }
 
-    private suspend fun post(path: String, body: JSONObject, pinned: String? = null, retried: Boolean = false): JSONObject {
-        val tok = pinned ?: sessionToken()
+    /**
+     * `pin`: the add's session. On a 401 it is renewed only for the same
+     * user (no reset since it was taken), else the add fails with
+     * "session_expired". `cancel`: the job's token, for sessionToken.
+     */
+    private suspend fun post(
+        path: String,
+        body: JSONObject,
+        pin: Pin? = null,
+        cancel: CancelToken? = null,
+        retried: Boolean = false,
+    ): JSONObject {
+        val tok = pin?.token ?: sessionToken(cancel)
         val headers = LinkedHashMap<String, String>()
         headers["Content-Type"] = "application/json"
         headers["Authorization"] = "Bearer $tok"
@@ -582,8 +653,17 @@ class MealioClient @JvmOverloads constructor(
 
         val res = request { transport.post(base + path, headers, body.toString()) }
         if (res.status == 401 && !retried) {
+            if (pin != null) {
+                if (synchronized(this) { pin.gen != sessionGen }) throw MealioException("session_expired", "The Mealio session expired")
+                synchronized(this) { if (token == tok) token = null }
+                val fresh = sessionPin()
+                // The user changed while the new token came: it is not theirs.
+                if (fresh.gen != pin.gen) throw MealioException("session_expired", "The Mealio session expired")
+                pin.token = fresh.token
+                return post(path, body, pin, cancel, true)
+            }
             synchronized(this) { if (token == tok) token = null }
-            return post(path, body, null, true)
+            return post(path, body, null, cancel, true)
         }
         if (res.status == 401) throw MealioException("session_expired", "The Mealio session expired")
         return answer(res)

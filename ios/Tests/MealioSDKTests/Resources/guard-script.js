@@ -16,24 +16,63 @@
     return BLOCK.test(p) || BLOCK.test(decoded(p));
   }
   function mutationNames(doc) {
-    var text = doc.replace(/"""[\s\S]*?"""|"(?:[^"\\]|\\.)*"|#[^\n\r]*/g, ' ');
-    var tokens = text.match(/[A-Za-z_][A-Za-z0-9_]*|[{}()]/g) || [];
-    var names = [], braces = 0, parens = 0, kind = '', mutation = false, afterOn = false, i, t;
+    var text = doc.replace(/"""(?:\\"""|[\s\S])*?"""|"(?:[^"\\]|\\.)*"|#[^\n\r]*/g, ' ');
+    var tokens = text.match(/[A-Za-z_][A-Za-z0-9_]*|\.\.\.|[{}():@]/g) || [];
+    var defs = [], def = null, sets = [], parens = 0, inline = false, expect = '', pushed = false, was, root, i, t;
     for (i = 0; i < tokens.length; i++) {
-      t = tokens[i];
-      if (t === '(') parens++;
-      else if (t === ')') parens = Math.max(0, parens - 1);
-      else if (parens > 0) continue;
-      else if (t === '{') braces++;
-      else if (t === '}') { braces = Math.max(0, braces - 1); if (braces === 0) kind = ''; }
-      else if (braces === 0 && !kind && (t === 'mutation' || t === 'query' || t === 'subscription' || t === 'fragment')) {
-        kind = t;
-        if (t === 'mutation') mutation = true;
-      } else if (afterOn) afterOn = false;
-      else if (t === 'on') afterOn = true;
-      else if (kind === 'mutation' || kind === 'fragment') names.push(t);
+      t = tokens[i]; was = pushed; pushed = false;
+      if (t === '(') { parens++; continue; }
+      if (t === ')') { parens = Math.max(0, parens - 1); continue; }
+      if (parens > 0) continue;
+      if (t === '@') { expect = 'directive'; continue; }
+      if (t === '{') {
+        if (!def) { def = { kind: 'query', name: '', fields: [], spreads: [] }; defs.push(def); }
+        sets.push(sets.length === 0 || (inline && sets[sets.length - 1]));
+        inline = false; expect = '';
+        continue;
+      }
+      if (t === '}') {
+        sets.pop();
+        inline = false; expect = '';
+        if (sets.length === 0) def = null;
+        continue;
+      }
+      if (sets.length === 0) {
+        if (expect === 'directive') expect = '';
+        else if (!def && /^(query|mutation|subscription|fragment)$/.test(t)) { def = { kind: t, name: '', fields: [], spreads: [] }; defs.push(def); }
+        else if (def && !def.name && t !== 'on' && t !== ':' && t !== '...') def.name = t;
+        continue;
+      }
+      root = sets[sets.length - 1];
+      if (t === '...') { expect = 'spread'; inline = true; continue; }
+      if (t === ':') { if (was && def) def.fields.pop(); continue; }
+      if (expect === 'directive' || expect === 'type') { expect = ''; continue; }
+      if (expect === 'spread') {
+        expect = '';
+        if (t === 'on') { expect = 'type'; continue; }
+        inline = false;
+        if (root && def) def.spreads.push(t);
+        continue;
+      }
+      inline = false;
+      if (root && def) { def.fields.push(t); pushed = true; }
     }
-    return mutation ? names : [];
+    var fragments = {}, names = [], seen, j;
+    for (i = 0; i < defs.length; i++) if (defs[i].kind === 'fragment') fragments['f_' + defs[i].name] = defs[i];
+    function walk(x) {
+      names = names.concat(x.fields);
+      for (var k = 0; k < x.spreads.length; k++) {
+        var f = fragments['f_' + x.spreads[k]];
+        if (f && !seen['f_' + x.spreads[k]]) { seen['f_' + x.spreads[k]] = true; walk(f); }
+      }
+    }
+    for (j = 0; j < defs.length; j++) {
+      if (defs[j].kind !== 'mutation') continue;
+      if (defs[j].name) names.push(defs[j].name);
+      seen = {};
+      walk(defs[j]);
+    }
+    return names;
   }
   function bodyBlocked(b) {
     if (typeof b !== 'string' || !b) return false;
@@ -50,10 +89,12 @@
       }
     } catch (e) {
       docs.push(b);
-      var form = /(?:^|&)(operationName|query)=([^&]*)/g;
+      var form = /(?:^|&)(operationName|query|operations)=([^&]*)/g;
       while ((m = form.exec(b))) {
         var v = decoded(m[2].replace(/\+/g, ' '));
-        if (m[1] === 'query') docs.push(v); else names.push(v);
+        if (m[1] === 'query') docs.push(v);
+        else if (m[1] === 'operations') { if (bodyBlocked(v)) return true; }
+        else names.push(v);
       }
     }
     for (i = 0; i < docs.length; i++) names = names.concat(mutationNames(docs[i]));
@@ -64,7 +105,7 @@
     return typeof window[name] === 'function' && v instanceof window[name];
   }
   function fromForm(f) {
-    var q = [], keys = ['operationName', 'query'], i, k;
+    var q = [], keys = ['operationName', 'query', 'operations'], i, k;
     for (i = 0; i < keys.length; i++) { k = f.get(keys[i]); if (typeof k === 'string') q.push(keys[i] + '=' + encodeURIComponent(k)); }
     return q.join('&');
   }
@@ -83,7 +124,8 @@
     if (!input || typeof input !== 'object') return null;
     if (typeof input.body === 'string') return input.body;
     if (typeof input.clone !== 'function' || /^(GET|HEAD)$/i.test(input.method || 'GET')) return null;
-    return input.clone().text();
+    // A body already read, or a stream that cannot be cloned, cannot be judged: it goes through.
+    try { return input.clone().text(); } catch (e) { return null; }
   }
   // Text that cannot be read goes through: fetch itself will fail on it.
   function settled(text, go) {

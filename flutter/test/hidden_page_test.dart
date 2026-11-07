@@ -82,11 +82,11 @@ void main() {
       final r = h.openPage('heb', 'https://www.heb.com/', 3000).whenComplete(() => answered = true);
       await _settle();
       // A sign-out's about:blank reports finished while the store page loads.
-      c.d!.finished!('about:blank');
+      c.delegate!.onPageFinished!('about:blank');
       await _settle();
       expect(answered, isFalse);
-      c.d!.started!('https://www.heb.com/');
-      c.d!.finished!('https://www.heb.com/');
+      c.delegate!.onPageStarted!('https://www.heb.com/');
+      c.delegate!.onPageFinished!('https://www.heb.com/');
       expect((await r).ok, isTrue);
     });
 
@@ -97,11 +97,11 @@ void main() {
       var answered = false;
       final r = h.openPage('heb', 'https://www.heb.com/search', 3000).whenComplete(() => answered = true);
       await _settle();
-      c.d!.finished!('https://www.heb.com/old');
+      c.delegate!.onPageFinished!('https://www.heb.com/old');
       await _settle();
       expect(answered, isFalse);
-      c.d!.started!('https://www.heb.com/search');
-      c.d!.finished!('https://www.heb.com/search');
+      c.delegate!.onPageStarted!('https://www.heb.com/search');
+      c.delegate!.onPageFinished!('https://www.heb.com/search');
       expect((await r).ok, isTrue);
     });
 
@@ -121,16 +121,16 @@ void main() {
       var answered = false;
       final r = h.openPage('heb', 'https://www.heb.com/a', 3000).whenComplete(() => answered = true);
       await _settle();
-      c.d!.started!('https://www.heb.com/a');
+      c.delegate!.onPageStarted!('https://www.heb.com/a');
       // A redirect: the plugin cancels it and loads it again itself.
-      final decision = await c.d!.onNav!(const wv.NavigationRequest(url: 'https://www.heb.com/b', isMainFrame: true));
+      final decision = await c.delegate!.onNavigationRequest!(const wv.NavigationRequest(url: 'https://www.heb.com/b', isMainFrame: true));
       expect(decision, wv.NavigationDecision.navigate);
-      c.d!.finished!('https://www.heb.com/b');
-      c.d!.finished!('https://www.heb.com/a');
+      c.delegate!.onPageFinished!('https://www.heb.com/b');
+      c.delegate!.onPageFinished!('https://www.heb.com/a');
       await _settle();
       expect(answered, isFalse);
-      c.d!.started!('https://www.heb.com/b');
-      c.d!.finished!('https://www.heb.com/b');
+      c.delegate!.onPageStarted!('https://www.heb.com/b');
+      c.delegate!.onPageFinished!('https://www.heb.com/b');
       expect((await r).ok, isTrue);
     });
 
@@ -140,9 +140,9 @@ void main() {
       FakeController.onLoad = (FakeController _, String __) {};
       final r = h.openPage('heb', 'https://www.heb.com/a', 3000);
       await _settle();
-      c.d!.started!('https://www.heb.com/a');
-      await c.d!.onNav!(const wv.NavigationRequest(url: 'https://www.heb.com/b', isMainFrame: true));
-      c.d!.finished!('https://www.heb.com/b');
+      c.delegate!.onPageStarted!('https://www.heb.com/a');
+      await c.delegate!.onNavigationRequest!(const wv.NavigationRequest(url: 'https://www.heb.com/b', isMainFrame: true));
+      c.delegate!.onPageFinished!('https://www.heb.com/b');
       expect((await r).ok, isTrue);
     });
 
@@ -154,7 +154,7 @@ void main() {
       await _settle();
       c.loads.clear();
       // A form POST on Android never reaches shouldOverrideUrlLoading.
-      c.d!.started!('https://www.heb.com/checkout/place-order');
+      c.delegate!.onPageStarted!('https://www.heb.com/checkout/place-order');
       await _settle();
       expect(c.loads, <String>['about:blank']);
       final p = await r;

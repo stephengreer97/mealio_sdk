@@ -174,7 +174,7 @@ export class MealioClient {
       const about = await this.about();
       stopIf(cancel);
       const warm = this.takeWarm(input.store ?? null, about.epoch);
-      const start = await this.post<JobStart>('/api/v1/sdk/carts', { ...body, ...about, ...(warm ? { warm } : {}) });
+      const start = await this.post<JobStart>('/api/v1/sdk/carts', { ...body, ...about, ...(warm ? { warm } : {}) }, { cancel });
       const result = await this.driveLoop(start, opts.onStep, { cancel }) as unknown as PreparedCart;
       if (this.cfg.debug) {
         for (const w of result.warnings ?? []) console.warn(`[mealio] ${w.code}: ${w.message}`);
@@ -205,7 +205,7 @@ export class MealioClient {
         stopIf(cancel);
         const about = await this.about();
         stopIf(cancel);
-        const start = await this.post<JobStart | { warm: null }>('/api/v1/sdk/warm', { store: opts.store ?? undefined, ...about });
+        const start = await this.post<JobStart | { warm: null }>('/api/v1/sdk/warm', { store: opts.store ?? undefined, ...about }, { cancel });
         if (!('job' in start)) return;
         const r = await this.driveLoop(start, undefined, { warm: true, cancel }) as { store?: string; signedIn?: boolean | null };
         this.warmed = r && r.signedIn === true && typeof r.store === 'string'
@@ -259,25 +259,54 @@ export class MealioClient {
   /**
    * Run `fn` with the hidden page to itself, in the queue with the jobs. For
    * work that must not land in the middle of one, like clearing store sessions.
+   * After REQUEST_TIMEOUT_MS the caller gets `network` and `fn`'s cancel token
+   * fires, but the queue stays held until `fn` has really finished.
    */
-  runExclusive<T>(fn: () => Promise<T>): Promise<T> {
-    return this.queue.run(() => deadline(Promise.resolve().then(fn), REQUEST_TIMEOUT_MS, () => new MealioError('network', 'That took too long')));
+  runExclusive<T>(fn: (cancel: CancelToken) => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      void this.queue.run(async () => {
+        const cancel = new CancelToken();
+        const timer = setTimeout(() => { cancel.cancel(); reject(new MealioError('network', 'That took too long')); }, REQUEST_TIMEOUT_MS);
+        try {
+          resolve(await fn(cancel));
+        } catch (e) {
+          reject(e);
+        } finally {
+          clearTimeout(timer);
+        }
+      });
+    });
   }
 
-  /** The current token. One that arrives after a reset belongs to the last user. */
-  private async sessionToken(): Promise<string> {
+  /**
+   * The current token. One that arrives after a reset belongs to the last user,
+   * so it is never kept. What happens then depends on the job:
+   * - `cancel` (prepare, search, warm): the job is over, `cancelled`. It never
+   *   asks for the next user's token.
+   * - `gen` (an add): the add belongs to the session of that generation. If the
+   *   session changed before the call or while waiting, `session_expired`.
+   * - neither: ask again, for whoever is signed in now.
+   */
+  private async sessionToken(opts: { cancel?: CancelToken; gen?: number } = {}): Promise<string> {
+    if (opts.cancel) stopIf(opts.cancel);
+    if (opts.gen !== undefined && opts.gen !== this.sessionGen) throw sessionChanged();
     if (this.user === null) throw new MealioError('not_signed_in', 'Nobody is signed in');
     if (this.token) return this.token;
     const gen = this.sessionGen;
-    let token: string;
+    let token = '';
+    let failed: any = null;
     try {
       token = await deadline(Promise.resolve().then(() => this.cfg.getSessionToken()), REQUEST_TIMEOUT_MS,
         () => new Error('getSessionToken did not answer in time'));
     } catch (e: any) {
-      if (gen !== this.sessionGen) return this.sessionToken();
-      throw new MealioError('session_failed', e?.message || 'Could not start a Mealio session');
+      failed = e ?? new Error('Could not start a Mealio session');
     }
-    if (gen !== this.sessionGen) return this.sessionToken();
+    if (gen !== this.sessionGen) {
+      if (opts.cancel) throw new MealioError('cancelled', 'Cancelled');
+      if (opts.gen !== undefined) throw sessionChanged();
+      return this.sessionToken();
+    }
+    if (failed) throw new MealioError('session_failed', failed?.message || 'Could not start a Mealio session');
     this.token = token;
     return token;
   }
@@ -305,21 +334,28 @@ export class MealioClient {
     return this.cartJob(async () => {
       const about = await this.about();
       stopIf(cancel);
-      const start = await this.post<JobStart>(`/api/v1/sdk/carts/${encodeURIComponent(cartId)}/search`, { key, query, ...about });
+      const start = await this.post<JobStart>(`/api/v1/sdk/carts/${encodeURIComponent(cartId)}/search`, { key, query, ...about }, { cancel });
       return await this.driveLoop(start, opts.onStep, { cancel }) as unknown as SearchResult;
     }, cancel);
   }
 
   /**
    * Fill the store cart with the user's choices. It cannot be cancelled: once
-   * tapped it runs to its end under the session it started with, even if the
-   * user changes meanwhile. Every wait in it is bounded, so it does end.
+   * tapped it runs to its end under the session of the moment it was called,
+   * even if the user changes meanwhile; a 401 after such a change fails it with
+   * `session_expired`. Every wait in it is bounded, so it does end.
    */
   async addToCart(cartId: string, selections: Selection[], opts: { onStep?: StepListener } = {}): Promise<AddResult> {
+    // The session is the one of the moment the add was asked for, not of the
+    // moment it leaves the queue: a user change while it waits cannot hand it
+    // the next user's token.
+    const gen = this.sessionGen;
+    const first = this.sessionToken({ gen });
+    first.catch(() => { /* read in the job */ });
     return this.cartJob(async () => {
-      const token = await this.sessionToken();
-      const start = await this.post<JobStart>(`/api/v1/sdk/carts/${encodeURIComponent(cartId)}/add`, { selections, ...(await this.about()) }, { token });
-      return await this.driveLoop(start, opts.onStep, { token }) as unknown as AddResult;
+      const pin: Pin = { token: await first, gen };
+      const start = await this.post<JobStart>(`/api/v1/sdk/carts/${encodeURIComponent(cartId)}/add`, { selections, ...(await this.about()) }, { pin });
+      return await this.driveLoop(start, opts.onStep, { pin }) as unknown as AddResult;
     });
   }
 
@@ -363,7 +399,7 @@ export class MealioClient {
   }
 
   private async driveLoop(start: JobStart, onStep: StepListener | undefined,
-    opts: { warm?: boolean; cancel?: CancelToken; token?: string } = {}): Promise<unknown> {
+    opts: { warm?: boolean; cancel?: CancelToken; pin?: Pin } = {}): Promise<unknown> {
     let env = start.envelope;
     let seq = 0;
     for (let guard = 0; guard < 200; guard += 1) {
@@ -381,7 +417,7 @@ export class MealioClient {
         throw new MealioError(out.terminal.code, out.terminal.message);
       }
       const body: StepRequest = { seq, results: out.results };
-      const next = await this.post<{ envelope: Envelope }>(`/api/v1/sdk/jobs/${encodeURIComponent(start.job)}/step`, body, { token: opts.token });
+      const next = await this.post<{ envelope: Envelope }>(`/api/v1/sdk/jobs/${encodeURIComponent(start.job)}/step`, body, { cancel: opts.cancel, pin: opts.pin });
       env = next.envelope;
     }
     throw new MealioError('server', 'job did not finish');
@@ -403,8 +439,14 @@ export class MealioClient {
     }
   }
 
-  private async post<T>(path: string, body: unknown, opts: { token?: string; retried?: boolean } = {}): Promise<T> {
-    const token = opts.token ?? await this.sessionToken();
+  /**
+   * POST with the session. `cancel`: nothing is sent once it fires. `pin`: an
+   * add's own token. On a 401 it is renewed only while the session is still
+   * the one the add started in, else the add fails with `session_expired`.
+   */
+  private async post<T>(path: string, body: unknown, opts: { cancel?: CancelToken; pin?: Pin; retried?: boolean } = {}): Promise<T> {
+    const token = opts.pin ? opts.pin.token : await this.sessionToken({ cancel: opts.cancel });
+    if (opts.cancel) stopIf(opts.cancel);
     const headers: Record<string, string> = {
       'content-type': 'application/json',
       authorization: `Bearer ${token}`,
@@ -417,8 +459,10 @@ export class MealioClient {
     }
     const { status, ok, json } = await this.request(path, { method: 'POST', headers, body: JSON.stringify(body) });
     if (status === 401 && !opts.retried) {
+      if (opts.pin && opts.pin.gen !== this.sessionGen) throw sessionChanged();
       if (this.token === token) this.token = null;
-      return this.post<T>(path, body, { retried: true });
+      if (opts.pin) opts.pin.token = await this.sessionToken({ gen: opts.pin.gen });
+      return this.post<T>(path, body, { ...opts, retried: true });
     }
     if (status === 401) throw new MealioError('session_expired', 'The Mealio session expired');
     return answer<T>(status, ok, json);
@@ -431,6 +475,13 @@ function answer<T>(status: number, ok: boolean, json: any): T {
   // A captive portal or a proxy can answer 200 with a web page.
   if (json === null || typeof json !== 'object') throw new MealioError('server', 'Mealio sent an answer that could not be read');
   return json as T;
+}
+
+/** An add's token, fixed when it was asked for. Renewed only within its generation. */
+interface Pin { token: string; gen: number }
+
+function sessionChanged(): MealioError {
+  return new MealioError('session_expired', 'The signed-in user changed');
 }
 
 function stopIf(cancel: CancelToken): void {
@@ -645,6 +696,12 @@ export class CartSession {
     if (from.store !== this.store) return;
     for (const it of this.items) {
       if (!from.find(it.key)) continue;
+      // What the user found with search stays an option, so a searched pick survives.
+      const found = from.extra.get(it.key);
+      if (found?.length) {
+        const have = new Set(this.options(it.key).map((p) => p.id));
+        this.extra.set(it.key, [...(this.extra.get(it.key) || []), ...found.filter((p) => !have.has(p.id))]);
+      }
       const productId = from.selectedId(it.key);
       if (!productId) { this.deselect(it.key); continue; }
       const product = this.options(it.key).find((p) => p.id === productId);

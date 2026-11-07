@@ -121,14 +121,31 @@ CancelToken? _zoneCancel() {
 class JobQueue {
   Future<void> _tail = Future<void>.value();
 
+  /// Jobs queued and not yet ended.
+  int _inFlight = 0;
+
   /// Cart calls waiting or running. A warm-up does not start while any are.
   int pending = 0;
 
   Future<T> run<T>(Future<T> Function() job) {
-    final out = _tail.then((_) => job());
-    _tail = out.then<void>((_) {}, onError: (Object _) {});
+    // Idle: start from a fresh future in the caller's zone. The old tail may
+    // belong to a zone that no longer runs anything (a finished widget test),
+    // and chaining on it would never start this job.
+    final before = _inFlight == 0 ? Future<void>.value() : _tail;
+    _inFlight += 1;
+    final out = before.then((_) => job());
+    _tail = out.then<void>((_) {}, onError: (Object _) {}).whenComplete(() => _inFlight -= 1);
     return out;
   }
+}
+
+/// The session token an add was called with, kept for the whole add.
+class _Pin {
+  _Pin(this.token, this.gen);
+  String token;
+
+  /// The session generation it belongs to. A newer one means another user.
+  final int gen;
 }
 
 /// `f`, or `onLate()` thrown once `d` passes.
@@ -289,7 +306,7 @@ class MealioClient {
       _stopIf(stop);
       final warm = _takeWarm(store, input['epoch']);
       if (warm != null) input['warm'] = warm;
-      final start = _jobStart(await _post('/api/v1/sdk/carts', input));
+      final start = _jobStart(await _post('/api/v1/sdk/carts', input, cancel: stop));
       final prepared = PreparedCart.fromJson(await _driveLoop(start, onStep, cancel: stop));
       if (_cfg.debug) {
         for (final CartWarning w in prepared.warnings ?? const <CartWarning>[]) {
@@ -362,17 +379,44 @@ class MealioClient {
 
   /// Run `fn` with the hidden page to itself, in the queue with the jobs. For
   /// work that must not land in the middle of one, like clearing store sessions.
-  Future<T> runExclusive<T>(Future<T> Function() fn) => _queue.run(
-        () => _deadline(
-          Future<T>.sync(fn),
-          requestTimeout,
-          () => const MealioException(MealioErrorCode.network, 'That took too long'),
-        ),
-      );
+  /// After [requestTimeout] the caller gets `network`, but the queue stays
+  /// held until `fn` has really finished, so no job runs alongside it.
+  Future<T> runExclusive<T>(Future<T> Function() fn) {
+    final result = Completer<T>();
+    unawaited(_queue.run(() async {
+      final timer = Timer(requestTimeout, () {
+        if (!result.isCompleted) {
+          result.completeError(const MealioException(MealioErrorCode.network, 'That took too long'));
+        }
+      });
+      try {
+        final v = await Future<T>.sync(fn);
+        if (!result.isCompleted) result.complete(v);
+      } catch (e, s) {
+        if (!result.isCompleted) result.completeError(e, s);
+      } finally {
+        timer.cancel();
+      }
+    }));
+    return result.future;
+  }
 
-  /// The current token. One that arrives after a reset belongs to the last user.
-  Future<String> _sessionToken() async {
+  /// The current token. One that arrives after a reset belongs to the last
+  /// user. With `cancel` (a prepare or search), a user change while it waits
+  /// fails it with `cancelled`: it never takes the next user's token. With
+  /// `pinned` (an add being requested), the token fetched is returned even
+  /// if the user changed meanwhile, since it belongs to the user who tapped.
+  Future<String> _sessionToken({CancelToken? cancel, bool pinned = false}) async {
+    final first = _sessionGen;
+    void stopIfChanged() {
+      _stopIf(cancel);
+      if (cancel != null && _sessionGen != first) {
+        throw const MealioException(MealioErrorCode.cancelled, 'Cancelled');
+      }
+    }
+
     while (true) {
+      stopIfChanged();
       if (_nobody) throw const MealioException(MealioErrorCode.notSignedIn, 'Nobody is signed in');
       final current = _token;
       if (current != null) return current;
@@ -385,11 +429,19 @@ class MealioClient {
           () => TimeoutException('getSessionToken did not answer in time'),
         );
       } catch (e) {
-        if (gen != _sessionGen) continue;
+        if (gen != _sessionGen) {
+          stopIfChanged();
+          if (!pinned) continue;
+        }
         final m = _messageOf(e);
         throw MealioException(MealioErrorCode.sessionFailed, m.isEmpty ? 'Could not start a Mealio session' : m);
       }
-      if (gen == _sessionGen) _token = fresh;
+      if (gen == _sessionGen) {
+        _token = fresh;
+      } else {
+        stopIfChanged();
+        if (pinned) return fresh;
+      }
     }
   }
 
@@ -403,7 +455,7 @@ class MealioClient {
       _stopIf(cancel);
       final about = await _about();
       _stopIf(cancel);
-      final res = await _post('/api/v1/sdk/warm', <String, Object?>{if (store != null) 'store': store, ...about});
+      final res = await _post('/api/v1/sdk/warm', <String, Object?>{if (store != null) 'store': store, ...about}, cancel: cancel);
       if (res['job'] is! String) {
         _warmed = null;
         return;
@@ -443,26 +495,33 @@ class MealioClient {
       final start = _jobStart(await _post(
         '/api/v1/sdk/carts/${Uri.encodeComponent(cartId)}/search',
         <String, Object?>{'key': key, 'query': query, ...about},
+        cancel: stop,
       ));
       return SearchResult.fromJson(await _driveLoop(start, onStep, cancel: stop));
     }, stop);
   }
 
   /// Fill the store cart with the user's choices. It cannot be cancelled:
-  /// once tapped it runs to its end under the session it started with, even
-  /// if the user changes meanwhile. Every wait in it is bounded, so it does end.
+  /// once tapped it runs to its end under the session it was called with,
+  /// even if the user changes while it waits or runs. If that session expires
+  /// after a user change it fails with `session_expired`; it never switches
+  /// to the next user's session. Every wait in it is bounded, so it does end.
   Future<AddResult> addToCart(String cartId, List<Selection> selections, {StepListener? onStep}) {
+    // Taken now, not when the add reaches the front of the queue.
+    final gen = _sessionGen;
+    final token = _sessionToken(pinned: true);
+    token.ignore();
     return _cartJob(() async {
-      final token = await _sessionToken();
+      final pin = _Pin(await token, gen);
       final start = _jobStart(await _post(
         '/api/v1/sdk/carts/${Uri.encodeComponent(cartId)}/add',
         <String, Object?>{
           'selections': selections.map((Selection s) => s.toJson()).toList(),
           ...await _about(),
         },
-        token: token,
+        pin: pin,
       ));
-      return AddResult.fromJson(await _driveLoop(start, onStep, token: token));
+      return AddResult.fromJson(await _driveLoop(start, onStep, pin: pin));
     });
   }
 
@@ -527,7 +586,7 @@ class MealioClient {
     StepListener? onStep, {
     bool warm = false,
     CancelToken? cancel,
-    String? token,
+    _Pin? pin,
   }) async {
     var env = start.envelope;
     var seq = 0;
@@ -554,7 +613,7 @@ class MealioClient {
       if (terminal is TerminalDone) return terminal.result;
       if (terminal is TerminalFail) throw MealioException(terminal.code, terminal.message);
       final body = StepRequest(seq: seq, results: out.results).toJson();
-      final next = await _post('/api/v1/sdk/jobs/${Uri.encodeComponent(start.job)}/step', body, token: token);
+      final next = await _post('/api/v1/sdk/jobs/${Uri.encodeComponent(start.job)}/step', body, cancel: cancel, pin: pin);
       env = Envelope.fromJson(next['envelope']);
     }
     throw const MealioException(MealioErrorCode.server, 'job did not finish');
@@ -580,8 +639,15 @@ class MealioClient {
     return (status: res.statusCode, json: json);
   }
 
-  Future<Map<Object?, Object?>> _post(String path, Object? body, {String? token, bool retried = false}) async {
-    final bearer = token ?? await _sessionToken();
+  /// `cancel` belongs to a prepare, search or warm-up; `pin` to an add.
+  Future<Map<Object?, Object?>> _post(
+    String path,
+    Object? body, {
+    CancelToken? cancel,
+    _Pin? pin,
+    bool retried = false,
+  }) async {
+    final bearer = pin?.token ?? await _sessionToken(cancel: cancel);
     final headers = <String, String>{
       'Content-Type': 'application/json',
       'Authorization': 'Bearer $bearer',
@@ -603,7 +669,19 @@ class MealioClient {
     final res = await _request(() => _http.post(Uri.parse(_base + path), headers: headers, body: utf8.encode(jsonEncode(body))));
     if (res.status == 401 && !retried) {
       if (_token == bearer) _token = null;
-      return _post(path, body, retried: true);
+      if (pin != null) {
+        // The add belongs to the user it was called for. Another user's
+        // session must never carry it.
+        if (pin.gen != _sessionGen) {
+          throw const MealioException(MealioErrorCode.sessionExpired, 'The Mealio session expired');
+        }
+        final fresh = await _sessionToken(pinned: true);
+        if (pin.gen != _sessionGen) {
+          throw const MealioException(MealioErrorCode.sessionExpired, 'The Mealio session expired');
+        }
+        pin.token = fresh;
+      }
+      return _post(path, body, cancel: cancel, pin: pin, retried: true);
     }
     if (res.status == 401) {
       throw const MealioException(MealioErrorCode.sessionExpired, 'The Mealio session expired');

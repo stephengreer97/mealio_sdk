@@ -267,54 +267,137 @@ const String blockedGraphqlOperation =
 
 final RegExp _opsRe = RegExp(blockedGraphqlOperation, caseSensitive: false);
 final RegExp _rawOperationRe = RegExp(r'"operationName"\s*:\s*"([^"]*)"');
-final RegExp _ignoredRe = RegExp(r'"""[\s\S]*?"""|"(?:[^"\\]|\\.)*"|#[^\n\r]*');
-final RegExp _tokenRe = RegExp(r'[A-Za-z_][A-Za-z0-9_]*|[{}()]');
-final RegExp _formRe = RegExp(r'(?:^|&)(operationName|query)=([^&]*)');
+final RegExp _ignoredRe = RegExp(r'"""(?:\\"""|[\s\S])*?"""|"(?:[^"\\]|\\.)*"|#[^\n\r]*');
+final RegExp _tokenRe = RegExp(r'[A-Za-z_][A-Za-z0-9_]*|\.\.\.|[{}():@]');
+final RegExp _formRe = RegExp(r'(?:^|&)(operationName|query|operations)=([^&]*)');
 const Set<String> _definitions = <String>{'mutation', 'query', 'subscription', 'fragment'};
 
-/// Every name a GraphQL document's mutations use: the operation's name and the
-/// fields it selects at any depth, aliases included, plus the fields of its
-/// fragments. Arguments and `on Type` conditions are not fields. Empty when the
-/// document has no mutation, so a query may read a field called paymentMethods.
+class _Def {
+  _Def(this.kind);
+  final String kind;
+  String name = '';
+  final List<String> fields = <String>[];
+  final List<String> spreads = <String>[];
+}
+
+/// The names a GraphQL document's mutations are judged by: each mutation's own
+/// name, and its ROOT fields. A root field is a field in the mutation's top
+/// selection set, in an inline fragment at that level (`... on Mutation { x }`),
+/// or at the top of a fragment spread there (followed through further spreads).
+/// Aliases, nested fields, arguments, variables, directives, strings and
+/// comments are never names. A query, subscription or fragment on its own gives
+/// none, so a mutation may select `cart { checkoutUrl }` and a query may read
+/// `paymentMethods`. Mirrors mutationNames in packages/core/src/allowlist.ts.
 List<String> mutationNames(String doc) {
   final text = doc.replaceAll(_ignoredRe, ' ');
-  final names = <String>[];
-  var braces = 0, parens = 0;
-  var kind = '';
-  var mutation = false, afterOn = false;
+  final defs = <_Def>[];
+  _Def? def;
+  // One entry per open selection set: true when it is at its definition's root.
+  final sets = <bool>[];
+  var parens = 0;
+  var inline = false, pushed = false;
+  var expect = '';
   for (final Match m in _tokenRe.allMatches(text)) {
     final t = m.group(0)!;
+    final was = pushed;
+    pushed = false;
     if (t == '(') {
       parens += 1;
-    } else if (t == ')') {
-      parens = parens > 0 ? parens - 1 : 0;
-    } else if (parens > 0) {
       continue;
-    } else if (t == '{') {
-      braces += 1;
-    } else if (t == '}') {
-      braces = braces > 0 ? braces - 1 : 0;
-      if (braces == 0) kind = '';
-    } else if (braces == 0 && kind.isEmpty && _definitions.contains(t)) {
-      kind = t;
-      if (t == 'mutation') mutation = true;
-    } else if (afterOn) {
-      afterOn = false;
-    } else if (t == 'on') {
-      afterOn = true;
-    } else if (kind == 'mutation' || kind == 'fragment') {
-      names.add(t);
+    }
+    if (t == ')') {
+      parens = parens > 0 ? parens - 1 : 0;
+      continue;
+    }
+    if (parens > 0) continue;
+    if (t == '@') {
+      expect = 'directive';
+      continue;
+    }
+    if (t == '{') {
+      if (def == null) defs.add(def = _Def('query'));
+      sets.add(sets.isEmpty || (inline && sets.last));
+      inline = false;
+      expect = '';
+      continue;
+    }
+    if (t == '}') {
+      if (sets.isNotEmpty) sets.removeLast();
+      inline = false;
+      expect = '';
+      if (sets.isEmpty) def = null;
+      continue;
+    }
+    if (sets.isEmpty) {
+      // A definition's header: its keyword, its name, and nothing else counts.
+      if (expect == 'directive') {
+        expect = '';
+      } else if (def == null && _definitions.contains(t)) {
+        defs.add(def = _Def(t));
+      } else if (def != null && def.name.isEmpty && t != 'on' && t != ':' && t != '...') {
+        def.name = t;
+      }
+      continue;
+    }
+    final root = sets.last;
+    if (t == '...') {
+      expect = 'spread';
+      inline = true;
+      continue;
+    }
+    if (t == ':') {
+      if (was && def != null) def.fields.removeLast();
+      continue;
+    }
+    if (expect == 'directive' || expect == 'type') {
+      expect = '';
+      continue;
+    }
+    if (expect == 'spread') {
+      expect = '';
+      if (t == 'on') {
+        expect = 'type';
+        continue;
+      }
+      inline = false;
+      if (root && def != null) def.spreads.add(t);
+      continue;
+    }
+    inline = false;
+    if (root && def != null) {
+      def.fields.add(t);
+      pushed = true;
     }
   }
-  return mutation ? names : const <String>[];
+  final fragments = <String, _Def>{
+    for (final _Def d in defs)
+      if (d.kind == 'fragment') d.name: d,
+  };
+  final names = <String>[];
+  for (final _Def d in defs) {
+    if (d.kind != 'mutation') continue;
+    if (d.name.isNotEmpty) names.add(d.name);
+    final seen = <String>{};
+    void walk(_Def x) {
+      names.addAll(x.fields);
+      for (final String sp in x.spreads) {
+        final f = fragments[sp];
+        if (f != null && seen.add(sp)) walk(f);
+      }
+    }
+
+    walk(d);
+  }
+  return names;
 }
 
 /// Does a request body name a blocked operation? Reads `operationName` the way
 /// the server will (after JSON parsing, so `\u004f` escapes do not hide it),
-/// for a single request or a batch, or form-encoded, and every name in any
-/// mutation (see [mutationNames]). A persisted query that sends only an
-/// innocent name and a hash cannot be read here; the signature on the
-/// envelope covers it. The guard script applies the same rule to requests a
+/// for a single request or a batch, or form-encoded, and the names of every
+/// mutation it carries (see [mutationNames]). A GraphQL multipart upload's
+/// `operations` field is JSON and is judged like a JSON body. A persisted
+/// query that sends only an innocent name and a hash cannot be read here; the
+/// signature on the envelope covers it. The guard script applies the same rule to requests a
 /// page script makes; this applies it to the runner's own `fetch` op, which
 /// never passes through the page.
 bool bodyBlocked(String? body) {
@@ -346,6 +429,8 @@ bool bodyBlocked(String? body) {
       final v = decodePercent(m.group(2)!.replaceAll('+', ' '));
       if (m.group(1) == 'query') {
         docs.add(v);
+      } else if (m.group(1) == 'operations') {
+        if (bodyBlocked(v)) return true;
       } else {
         names.add(v);
       }

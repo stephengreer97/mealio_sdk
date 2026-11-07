@@ -395,15 +395,26 @@ beacon, returns false) instead of leaving the device. It also caps requests at
 240 per minute per page. This is defense in depth. The signature is the
 primary control.
 
-A body is a blocked operation when its `operationName`, or the name or any
-selected field of any `mutation` in its `query` (named or anonymous, at any
-depth, including fragments), matches `BLOCKED_GRAPHQL_OPERATION`:
+A body is a blocked operation when any of these match
+`BLOCKED_GRAPHQL_OPERATION` (case-insensitive): its `operationName` (JSON,
+single or batched, or form-encoded), the declared name of any `mutation` in
+its `query`, or any root field of any mutation. A root field sits directly in
+the mutation's top selection set, or inside an inline fragment or a fragment
+spread at that level (spreads followed through other spreads). Aliases are
+looked through (`a: placeOrder` counts as `placeOrder`). Nested fields,
+arguments, variables and directives are never tested, so an add that reads
+back `maxPurchaseQuantity` or `checkoutUrl` is allowed. Strings, block strings
+(with `\"""` escapes) and comments are stripped before parsing.
 
 ```
 check_?out|place_?order|submit_?order|confirm_?order|create_?order|purchase|payment
 ```
 
-Form-encoded `operationName` counts too. `Request`, `Blob`, `ArrayBuffer`,
+A GraphQL multipart upload's `operations` field is judged as a JSON body.
+A body that cannot be read, such as a stream, is allowed, but its path is
+still checked.
+
+`Request`, `Blob`, `ArrayBuffer`,
 `URLSearchParams` and `FormData` bodies are read before the check. A beacon
 cannot wait for a body to be read, so a beacon whose body is not text is
 refused. The cases every SDK must agree on are in `protocol/test-vectors.json`

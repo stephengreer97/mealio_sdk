@@ -10,7 +10,8 @@ data class PageLoad(val ok: Boolean, val finalUrl: String? = null, val error: St
 
 data class ScriptRun(val messages: List<JSONObject>, val timedOut: Boolean, val error: String? = null)
 
-class LoginRequest(
+// @JvmOverloads keeps 0.5's constructor (no `cancel`) for callers built against it.
+class LoginRequest @JvmOverloads constructor(
     val store: String,
     val url: String,
     val title: String,

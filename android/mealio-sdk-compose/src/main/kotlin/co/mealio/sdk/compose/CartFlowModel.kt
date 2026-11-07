@@ -21,9 +21,11 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
@@ -82,6 +84,8 @@ internal class CartFlowModel(
     dispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
     /** Who was signed in when the sheet opened. */
     private val openedFor: MealioUser = MealioCart.user.value,
+    /** Who is signed in now. */
+    private val userNow: () -> MealioUser = { MealioCart.user.value },
 ) {
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
 
@@ -121,6 +125,17 @@ internal class CartFlowModel(
 
     private var detachSheet: (() -> Unit)? = null
     private var attached = 0
+    /** Ends this model when no screen takes it back after a recreation. */
+    private var reclaim: Job? = null
+    /** Prepares restarted in a row after a cancel the user did not ask for. */
+    private var restarts = 0
+
+    /**
+     * The partner set `visible` to false. The sheet stays up while an add
+     * runs; when it ends, its result is reported (onAdded or onError) and the
+     * sheet closes with onClose.
+     */
+    var hidden = false
     private val queued = ArrayList<() -> Unit>()
     var finished by mutableStateOf(false)
         private set
@@ -136,14 +151,27 @@ internal class CartFlowModel(
     /** A composition shows this model. */
     fun attach() {
         attached += 1
+        reclaim?.cancel()
+        reclaim = null
         val now = queued.toList()
         queued.clear()
         for (fn in now) fn()
     }
 
-    /** The composition went away for an activity recreation. The job runs on. */
+    /**
+     * The composition went away for an activity recreation. The job runs on,
+     * for the new screen to take back. When none does within [RECLAIM_MS]
+     * (the new activity does not show the sheet again), the model is disposed,
+     * so it and its sheet attachment do not live on.
+     */
     fun detach() {
         attached = (attached - 1).coerceAtLeast(0)
+        if (attached > 0 || finished) return
+        reclaim?.cancel()
+        reclaim = scope.launch {
+            delay(RECLAIM_MS)
+            if (attached == 0) dispose()
+        }
     }
 
     /** A partner callback now, or when a composition shows this again. */
@@ -221,6 +249,7 @@ internal class CartFlowModel(
             try {
                 val c = backend.prepareCart(storeId, recipes, cancel) { s, _ -> if (run == id) step = s }
                 if (run != id) return@launch
+                restarts = 0
                 failedAdd?.let { c.restorePicks(it); failedAdd = null; version += 1 }
                 store = c.store
                 cart = c
@@ -235,6 +264,14 @@ internal class CartFlowModel(
                 if (run != id) return@launch
                 val ex = e as? Exception ?: return@launch
                 when ((ex as? MealioException)?.code) {
+                    // Stopped by something other than closing (a store sign-out,
+                    // cancelJobs, a user change): never an error. Load again
+                    // while the sheet is open, or close quietly when what it
+                    // showed was another user's.
+                    "cancelled" -> {
+                        if (userNow() != openedFor || restarts >= MAX_RESTARTS) close()
+                        else { restarts += 1; start(storeId) }
+                    }
                     "store_required", "store_not_allowed" -> {
                         store = null
                         openStores(Phase.ERROR)
@@ -279,6 +316,8 @@ internal class CartFlowModel(
             } finally {
                 adding = false
                 if (run == id) userCheck?.let { checkUser(it) }
+                // Hidden by the partner meanwhile: the result is out, now close.
+                if (run == id && hidden && !finished) close()
             }
         }
     }
@@ -358,6 +397,12 @@ internal class CartFlowModel(
         if (!adding) scope.cancel()
     }
 }
+
+/** How long a model waits for a recreated screen to show it again. */
+internal const val RECLAIM_MS = 5_000L
+
+/** Restarts after an outside cancel before the sheet gives up and closes. */
+private const val MAX_RESTARTS = 3
 
 /**
  * Flow models by the sheet's saveable id. They live as long as the process, so

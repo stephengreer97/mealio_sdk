@@ -382,7 +382,7 @@
     },
     {
       "body": "{\"query\":\"mutation Go { cart { submitOrder { id } } }\"}",
-      "blocked": true
+      "blocked": false
     },
     {
       "body": "{\"query\":\"mutation Go { done: place_order { id } }\"}",
@@ -418,6 +418,102 @@
     },
     {
       "body": "operationName=Search&query=query+Search+%7B+a+%7D",
+      "blocked": false
+    },
+    {
+      "body": "{\"query\":\"mutation AddToCart($id: ID!) { addItemsToCart(items: [{id: $id}]) { cart { id items { id quantity maxPurchaseQuantity } } } }\"}",
+      "blocked": false
+    },
+    {
+      "body": "{\"query\":\"mutation UpdateCartItems($i: [CartItemInput!]!) { updateCartItems(items: $i) { cart { id itemCount checkoutUrl } } }\"}",
+      "blocked": false
+    },
+    {
+      "body": "{\"query\":\"mutation addToCart { addToCart(sku: \\\"1\\\") { ...Cart } } fragment Cart on Cart { id total paymentMethodRequired }\"}",
+      "blocked": false
+    },
+    {
+      "body": "{\"query\":\"mutation AddItem { addItem(id: 1) { product { id isPurchasable purchaseLimit } } }\"}",
+      "blocked": false
+    },
+    {
+      "body": "{\"query\":\"query Search { search(q: \\\"milk\\\") { ...P } } fragment P on Product { purchaseLimit } mutation Track { track(e: \\\"x\\\") }\"}",
+      "blocked": false
+    },
+    {
+      "body": "{\"query\":\"mutation Add($checkoutId: ID, $purchase: Int) { addItem(checkoutId: $checkoutId, purchase: $purchase) { id } }\"}",
+      "blocked": false
+    },
+    {
+      "body": "{\"query\":\"mutation Add { addItem @include(if: true) { id } placed: addItem(placeOrder: true) { id } }\"}",
+      "blocked": false
+    },
+    {
+      "body": "{\"query\":\"mutation { checkout: addItem { id } }\"}",
+      "blocked": false
+    },
+    {
+      "body": "{\"query\":\"query { placeOrder { id } }\"}",
+      "blocked": false
+    },
+    {
+      "body": "{\"query\":\"mutation { a: placeOrder { id } }\"}",
+      "blocked": true
+    },
+    {
+      "body": "{\"query\":\"mutation { addItem { id } ... on Mutation { placeOrder { id } } }\"}",
+      "blocked": true
+    },
+    {
+      "body": "{\"query\":\"mutation { ... @include(if: true) { ... on Mutation { checkout { id } } } }\"}",
+      "blocked": true
+    },
+    {
+      "body": "{\"query\":\"mutation M { addItem { id } ...F } fragment F on Mutation { ...G } fragment G on Mutation { checkoutComplete { id } }\"}",
+      "blocked": true
+    },
+    {
+      "body": "{\"query\":\"fragment F on Mutation { submitOrder { id } } mutation M @trace { ...F }\"}",
+      "blocked": true
+    },
+    {
+      "body": "{\"query\":\"mutation PlaceOrder { addItem { id } }\"}",
+      "blocked": true
+    },
+    {
+      "body": "{\"operationName\":\"Checkout\",\"query\":\"query Checkout { cart { id } }\"}",
+      "blocked": true
+    },
+    {
+      "body": "{\"query\":\"mutation M { addItem(note: \\\"a\\\") { id } # x\\n placeOrder { id } }\"}",
+      "blocked": true
+    },
+    {
+      "body": "{\"query\":\"mutation M { addItem(note: \\\"\\\"\\\"a\\\\\\\"\\\"\\\" b\\\"\\\"\\\") { id } placeOrder { id } x: addItem(n: \\\"y\\\") { id } }\"}",
+      "blocked": true
+    },
+    {
+      "body": "{\"query\":\"mutation M { addItem(note: \\\"\\\"\\\"a\\\\\\\"\\\"\\\" placeOrder { id } \\\"\\\"\\\") { id } }\"}",
+      "blocked": false
+    },
+    {
+      "body": "{\"query\":\"mutation M { addItem(note: \\\"a \\\\\\\" placeOrder { id } \\\\\\\"\\\") { id } }\"}",
+      "blocked": false
+    },
+    {
+      "body": "{\"query\":\"mutation M { addItem(note: \\\"a \\\\\\\\\\\") { id } placeOrder { id } }\"}",
+      "blocked": true
+    },
+    {
+      "body": "operations=%7B%22query%22%3A%22mutation%20%7B%20placeOrder(id%3A%201)%20%7B%20id%20%7D%20%7D%22%2C%22variables%22%3A%7B%7D%7D&map=%7B%7D",
+      "blocked": true
+    },
+    {
+      "body": "operations=%5B%7B%22operationName%22%3A%22Search%22%7D%2C%7B%22operationName%22%3A%22submit_order%22%7D%5D",
+      "blocked": true
+    },
+    {
+      "body": "operations=%7B%22query%22%3A%22mutation%20Upload(%24f%3A%20Upload!)%20%7B%20uploadPhoto(file%3A%20%24f)%20%7B%20id%20%7D%20%7D%22%2C%22variables%22%3A%7B%22f%22%3Anull%7D%7D&map=%7B%7D",
       "blocked": false
     },
     {

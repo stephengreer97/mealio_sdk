@@ -39,13 +39,15 @@ const fences = [...skill.matchAll(/```(\w+)\n([\s\S]*?)```/g)].map(([, lang, cod
 // Argument names, per language. Strings and comments do not count.
 const LABELS = { swift: /\b(\w+):\s/g, kotlin: /\b(\w+) = /g, dart: /\b(\w+):\s/g, tsx: /\s(\w+)=\{/g };
 const SOURCE_FOR = { swift: 'swift', kotlin: 'kotlin', dart: 'dart', tsx: 'ts' };
+// Argument names that belong to the app's own frameworks in the examples (go_router, Flutter), not to the SDK.
+const FRAMEWORK = new Set(['routes', 'routerConfig']);
 const clean = (c) => c.replace(/\/\/.*$/gm, '').replace(/#.*$/gm, '').replace(/'[^'\n]*'|"[^"\n]*"/g, '""');
 
 for (const { lang, code } of fences) {
   const pattern = LABELS[lang];
   if (!pattern) continue;
   for (const [, label] of clean(code).matchAll(pattern)) {
-    if (!SOURCES[SOURCE_FOR[lang]].has(label)) problems.push(`${lang} example uses "${label}", which is not in the ${lang} SDK`);
+    if (!FRAMEWORK.has(label) && !SOURCES[SOURCE_FOR[lang]].has(label)) problems.push(`${lang} example uses "${label}", which is not in the ${lang} SDK`);
   }
 }
 

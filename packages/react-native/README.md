@@ -29,6 +29,8 @@ In Jest tests, use the ready mock:
 jest.mock('@mealio/react-native-cart', () => require('@mealio/react-native-cart/jest'));
 ```
 
+`mockCart()` gives a cart with every CartSession member. To test a guest, call `setMockUser(null)` from `@mealio/react-native-cart/jest`: `hasUser` is false and the button calls `onSignInRequired`.
+
 Get keys and read the full guide at https://developers.mealio.co.
 
 Use of this package is subject to the [Mealio Cart SDK License](./LICENSE).

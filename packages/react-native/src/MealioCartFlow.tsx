@@ -67,9 +67,9 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
   const adding = useRef(false);
   /** The cart of a failed add, so Try again keeps the user's picks. */
   const failedAdd = useRef<CartSession | null>(null);
-  /** The latest props and cart, for callbacks that outlive a render. */
-  const latest = useRef({ props, cart });
-  latest.current = { props, cart };
+  /** The latest props, cart and user, for callbacks that outlive a render. */
+  const latest = useRef({ props, cart, userId: mealio.userId });
+  latest.current = { props, cart, userId: mealio.userId };
   const [store, setStore] = useState<string | null>(props.store ?? null);
   const [stores, setStores] = useState<StoreInfo[] | null>(null);
   const backTo = useRef<Phase>('list');
@@ -79,12 +79,15 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
   const photos = useMemo(() => recipes.map((r) => r.photoUrl).filter((u): u is string => !!u && u.startsWith('https://')).slice(0, 3), [recipes]);
   const lineCount = useMemo(() => recipes.reduce((n, r) => n + r.ingredients.length, 0), [recipes]);
 
+  // The sheet hosts sign-in while it is up, including an add the partner hid:
+  // it stays up until the add ends, so its sign-in shows here and only here.
+  const shown = visible || phase === 'adding';
   useEffect(() => {
-    if (!visible) return;
+    if (!shown) return;
     internal.hostLogin(true);
     return () => internal.hostLogin(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible]);
+  }, [shown]);
 
   const stepNow = (): MealioSheetStep => (internal.login ? 'signin' : phase === 'adding' ? 'adding' : phase);
   const signingIn = !!internal.login;
@@ -120,7 +123,14 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
       setStore(c.store); setCart(c); setPhase('list');
       ui.emit({ type: 'list_shown', store: c.store, items: c.items.length });
     } catch (e: any) {
-      if (run.current !== id || e?.code === 'cancelled') return;
+      if (run.current !== id) return;
+      if (e?.code === 'cancelled') {
+        // Stopped by something other than this sheet, like a store sign-out or
+        // cancelJobs. Still open for the same user: load again. Never an error.
+        const now = latest.current;
+        if (now.props.visible && now.userId === openedFor.current) start(storeId);
+        return;
+      }
       if (e?.code === 'store_required' || e?.code === 'store_not_allowed') { setStore(null); openStores('error'); return; }
       if (e?.code === 'location_required') {
         // Which store the user shops at is theirs to say. With no store named
@@ -167,6 +177,15 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
     else if (phase === 'error') setStore(props.store ?? null);
   }, [props.store]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // The partner hid the sheet while it was adding: it stayed up for the add,
+  // and now the add has ended it closes, reporting as a close would.
+  const closedWhileAdding = (step: MealioSheetStep, r: AddResult | null) => {
+    if (latest.current.props.visible) return;
+    stop();
+    ui.emit({ type: 'sheet_closed', step, added: r ? r.added.length : 0 });
+    latest.current.props.onClose(r);
+  };
+
   const add = useCallback(async () => {
     if (!cart || adding.current || cart.searching) return;
     adding.current = true;
@@ -180,6 +199,7 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
       setResult(r); setPhase('done');
       ui.emit({ type: 'cart_added', store: r.store, added: r.added.length, failed: r.failed.length });
       latest.current.props.onAdded?.(r);
+      closedWhileAdding('done', r);
     } catch (e: any) {
       if (run.current !== id) return;
       failedAdd.current = cart;
@@ -187,6 +207,7 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
       setPhase('error');
       ui.emit({ type: 'error', code: e?.code || 'error', step: 'adding' });
       latest.current.props.onError?.(e);
+      closedWhileAdding('error', null);
     } finally {
       adding.current = false;
     }

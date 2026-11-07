@@ -190,40 +190,92 @@ export const BLOCKED_GRAPHQL_OPERATION = 'check_?out|place_?order|submit_?order|
 const OPS_RE = new RegExp(BLOCKED_GRAPHQL_OPERATION, 'i');
 
 /**
- * Every name a GraphQL document's mutations use: the operation's name and the
- * fields it selects at any depth, aliases included, plus the fields of its
- * fragments. Arguments and `on Type` conditions are not fields. Empty when the
- * document has no mutation, so a query may read a field called paymentMethods.
+ * The names a GraphQL document's mutations are judged by: each mutation's own
+ * name, and its ROOT fields. A root field is a field in the mutation's top
+ * selection set, in an inline fragment at that level (`... on Mutation { x }`),
+ * or at the top of a fragment spread there (followed through further spreads).
+ * Aliases, nested fields, arguments, variables, directives, strings and
+ * comments are never names. A query, subscription or fragment on its own gives
+ * none, so a mutation may select `cart { checkoutUrl }` and a query may read
+ * `paymentMethods`.
  */
 export function mutationNames(doc: string): string[] {
-  const text = doc.replace(/"""[\s\S]*?"""|"(?:[^"\\]|\\.)*"|#[^\n\r]*/g, ' ');
-  const tokens = text.match(/[A-Za-z_][A-Za-z0-9_]*|[{}()]/g) || [];
-  const names: string[] = [];
-  let braces = 0, parens = 0, kind = '', mutation = false, afterOn = false;
+  const text = doc.replace(/"""(?:\\"""|[\s\S])*?"""|"(?:[^"\\]|\\.)*"|#[^\n\r]*/g, ' ');
+  const tokens = text.match(/[A-Za-z_][A-Za-z0-9_]*|\.\.\.|[{}():@]/g) || [];
+  type Def = { kind: string; name: string; fields: string[]; spreads: string[] };
+  const defs: Def[] = [];
+  let def: Def | null = null;
+  // One entry per open selection set: true when it is at its definition's root.
+  const sets: boolean[] = [];
+  let parens = 0, inline = false, expect = '', pushed = false;
   for (const t of tokens) {
-    if (t === '(') parens += 1;
-    else if (t === ')') parens = Math.max(0, parens - 1);
-    else if (parens > 0) continue;
-    else if (t === '{') braces += 1;
-    else if (t === '}') { braces = Math.max(0, braces - 1); if (braces === 0) kind = ''; }
-    else if (braces === 0 && !kind && ['mutation', 'query', 'subscription', 'fragment'].includes(t)) {
-      kind = t;
-      if (t === 'mutation') mutation = true;
-    } else if (afterOn) afterOn = false;
-    else if (t === 'on') afterOn = true;
-    else if (kind === 'mutation' || kind === 'fragment') names.push(t);
+    const was = pushed;
+    pushed = false;
+    if (t === '(') { parens += 1; continue; }
+    if (t === ')') { parens = Math.max(0, parens - 1); continue; }
+    if (parens > 0) continue;
+    if (t === '@') { expect = 'directive'; continue; }
+    if (t === '{') {
+      if (!def) { def = { kind: 'query', name: '', fields: [], spreads: [] }; defs.push(def); }
+      sets.push(sets.length === 0 || (inline && sets[sets.length - 1]));
+      inline = false; expect = '';
+      continue;
+    }
+    if (t === '}') {
+      sets.pop();
+      inline = false; expect = '';
+      if (sets.length === 0) def = null;
+      continue;
+    }
+    if (sets.length === 0) {
+      // A definition's header: its keyword, its name, and nothing else counts.
+      if (expect === 'directive') expect = '';
+      else if (!def && /^(query|mutation|subscription|fragment)$/.test(t)) { def = { kind: t, name: '', fields: [], spreads: [] }; defs.push(def); }
+      else if (def && !def.name && t !== 'on' && t !== ':' && t !== '...') def.name = t;
+      continue;
+    }
+    const root = sets[sets.length - 1];
+    if (t === '...') { expect = 'spread'; inline = true; continue; }
+    if (t === ':') { if (was && def) def.fields.pop(); continue; }
+    if (expect === 'directive' || expect === 'type') { expect = ''; continue; }
+    if (expect === 'spread') {
+      expect = '';
+      if (t === 'on') { expect = 'type'; continue; }
+      inline = false;
+      if (root && def) def.spreads.push(t);
+      continue;
+    }
+    inline = false;
+    if (root && def) { def.fields.push(t); pushed = true; }
   }
-  return mutation ? names : [];
+  const fragments = new Map(defs.filter((d) => d.kind === 'fragment').map((d) => [d.name, d] as const));
+  const names: string[] = [];
+  for (const d of defs) {
+    if (d.kind !== 'mutation') continue;
+    if (d.name) names.push(d.name);
+    const seen = new Set<string>();
+    const walk = (x: Def) => {
+      names.push(...x.fields);
+      for (const s of x.spreads) {
+        const f = fragments.get(s);
+        if (f && !seen.has(s)) { seen.add(s); walk(f); }
+      }
+    };
+    walk(d);
+  }
+  return names;
 }
 
 /**
  * Does a request body name a blocked operation? Reads `operationName` the way
  * the server will (after JSON parsing, so `\\u004f` escapes do not hide it),
- * for a single request or a batch, or form-encoded, and every name in any
- * mutation (see mutationNames). A persisted query that sends only an innocent
- * name and a hash cannot be read here; the signature on the envelope covers it.
- * The guard script applies the same rule to requests a page script makes; this
- * applies it to the runner's own `fetch` op, which never passes through the page.
+ * for a single request or a batch, or form-encoded, and the names of every
+ * mutation it carries (see mutationNames). A GraphQL multipart upload's
+ * `operations` field is JSON and is judged like a JSON body. A persisted query
+ * that sends only an innocent name and a hash cannot be read here; the
+ * signature on the envelope covers it. The guard script applies the same rule
+ * to requests a page script makes; this applies it to the runner's own `fetch`
+ * op, which never passes through the page.
  */
 export function bodyBlocked(body: string | null | undefined): boolean {
   if (typeof body !== 'string' || !body) return false;
@@ -241,10 +293,12 @@ export function bodyBlocked(body: string | null | undefined): boolean {
   } catch {
     // Not JSON: form-encoded, or a bare GraphQL document.
     docs.push(body);
-    const form = /(?:^|&)(operationName|query)=([^&]*)/g;
+    const form = /(?:^|&)(operationName|query|operations)=([^&]*)/g;
     for (let m = form.exec(body); m; m = form.exec(body)) {
       const v = decodePercent(m[2].replace(/\+/g, ' '));
-      if (m[1] === 'query') docs.push(v); else names.push(v);
+      if (m[1] === 'query') docs.push(v);
+      else if (m[1] === 'operations') { if (bodyBlocked(v)) return true; }
+      else names.push(v);
     }
   }
   for (const d of docs) names.push(...mutationNames(d));

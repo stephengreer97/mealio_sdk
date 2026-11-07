@@ -490,10 +490,16 @@ class JobsTest {
     @Test
     fun namesEveryFieldOfAMutationAndNothingOfAQuery() {
         assertEquals(
-            listOf("Go", "x", "placeOrder", "message"),
+            listOf("Go", "placeOrder"),
             mutationNames("mutation Go(\$a: ID!) { x: placeOrder(id: \$a, note: \"checkout\") { ... on Err { message } } } # payment"),
         )
         assertEquals(emptyList<String>(), mutationNames("query Q { paymentMethods { id } }"))
+    }
+
+    @Test
+    fun judgesAMutationByItsNameAndRootFieldsOnly() {
+        assertEquals(listOf("AddToCart", "addItemsToCart"), mutationNames("mutation AddToCart { addItemsToCart { cart { items { maxPurchaseQuantity } } } }"))
+        assertEquals(listOf("placeOrder", "checkout"), mutationNames("mutation { a: placeOrder { id } ... on Mutation { ...F } } fragment F on Mutation { checkout { id } }"))
     }
 
     @Test
@@ -501,5 +507,186 @@ class JobsTest {
         val long = "a\\\"".repeat(50_000)
         assertFalse(bodyBlocked("""{"query":"mutation Add { addItem(note: \"$long\") { id } }"}"""))
         assertTrue(bodyBlocked("mutation Go { note(x: \"$long\") placeOrder { id } }"))
+    }
+
+    // ── 0.6 round 2 ─────────────────────────────────────────────────
+
+    @Test
+    fun aUserChangeWhileAPrepareWaitsForItsTokenEndsItAsCancelledAndSendsNothing() = runTest {
+        for (next in listOf<String?>("b", null)) {
+            val gate = CompletableDeferred<Unit>()
+            var asked = 0
+            val t = Setup(token = { asked += 1; gate.await(); "tok$asked" }) { _, _ -> start(doneOp("d", cartJson)) }
+            t.client.setUser("a")
+            val p = async { code { t.client.prepareCart(null, recipe) } }
+            runCurrent()
+            t.client.setUser(next)
+            gate.complete(Unit)
+            assertEquals("next=$next", "cancelled", p.await())
+            assertEquals("never asks for the next user's token", 1, asked)
+            assertTrue(t.sent.isEmpty())
+        }
+    }
+
+    @Test
+    fun anAddKeepsTheTokenItWasCalledWithThroughTheWaitInTheQueue() = runTest {
+        var who = "alice"
+        val t = Setup(token = { who }) { p, _ -> if (p.endsWith("/add")) start(doneOp("d", JSONObject().put("added", JSONArray()))) else ok(JSONObject()) }
+        t.client.setUser("a")
+        t.client.storePreferences()
+        val gate = CompletableDeferred<Unit>()
+        val held = async { t.client.runExclusive { gate.await() } }
+        runCurrent()
+        val add = async { t.client.addToCart("c", emptyList()) }
+        runCurrent()
+        who = "bob"
+        t.client.setUser("b")
+        gate.complete(Unit)
+        held.await(); add.await()
+        assertEquals("Bearer alice", t.sent.last { it.path.endsWith("/add") }.auth)
+    }
+
+    @Test
+    fun a401AfterTheUserChangedFailsTheAddAsSessionExpired() = runTest {
+        var who = "alice"
+        var asked = 0
+        val gate = CompletableDeferred<Unit>()
+        val host = object : Host0() { override suspend fun open(url: String): PageLoad { gate.await(); return PageLoad(true, url) } }
+        val t = Setup(host, token = { asked += 1; who }) { p, _ -> if (p.endsWith("/add")) start(open("o")) else HttpResponse(401, "{}") }
+        t.client.setUser("a")
+        val add = async { code { t.client.addToCart("c", emptyList()) } }
+        runCurrent()
+        who = "bob"
+        t.client.setUser("b")
+        gate.complete(Unit)
+        assertEquals("session_expired", add.await())
+        assertEquals(1, asked)
+        assertEquals(listOf("Bearer alice", "Bearer alice"), t.sent.map { it.auth })
+    }
+
+    @Test
+    fun a401ForTheSameUserRenewsTheAddsTokenForTheRestOfIt() = runTest {
+        val tokens = ArrayDeque(listOf("t1", "t2"))
+        var steps = 0
+        lateinit var t: Setup
+        t = Setup(token = { tokens.removeFirst() }) { p, _ ->
+            when {
+                p.endsWith("/add") -> start(open("o"))
+                // The t1 session has expired on the server.
+                t.sent.last().auth == "Bearer t1" -> HttpResponse(401, "{}")
+                else -> { steps += 1; if (steps == 1) step(jobOf(p), open("o2")) else ok(JSONObject().put("envelope", TestSigner.instructions(3, listOf(doneOp("d", JSONObject().put("added", JSONArray()))), job = jobOf(p)).toJson())) }
+            }
+        }
+        t.client.addToCart("c", emptyList())
+        assertEquals(listOf("Bearer t1", "Bearer t1", "Bearer t2", "Bearer t2"), t.sent.map { it.auth })
+    }
+
+    @Test
+    fun runExclusiveReportsItsDeadlineButHoldsTheQueueUntilTheWorkEnds() = runTest {
+        val order = mutableListOf<String>()
+        val t = Setup { _, _ -> ok(JSONObject()) }
+        val slow = async {
+            code {
+                t.client.runExclusive {
+                    try { delay(60_000) } finally { kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { delay(10_000) }; order += "slow ended" }
+                }
+            }
+        }
+        runCurrent()
+        val next = async { t.client.runExclusive { order += "next" } }
+        testScheduler.advanceTimeBy(30_001)
+        runCurrent()
+        assertTrue("the caller hears of the deadline at 30 seconds", slow.isCompleted)
+        assertEquals("network", slow.await())
+        assertEquals(emptyList<String>(), order)
+        advanceUntilIdle()
+        next.await()
+        assertEquals(listOf("slow ended", "next"), order)
+    }
+
+    @Test
+    fun aSignOutQueuedOnAUserChangeRunsBeforeTheNextUsersCart() = runTest {
+        val log = mutableListOf<String>()
+        val t = Setup { p, _ -> log += p; start(doneOp("d", cartJson)) }
+        t.client.setUser("a")
+        // MealioCart's scope is Main: its work runs a frame later.
+        val main = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.test.StandardTestDispatcher(testScheduler))
+        if (t.client.setUser("b")) MealioCart.queueExclusive(main, t.client) { log += "signout" }
+        // The app starts b's cart right after setUser, on Main.immediate.
+        launch(kotlinx.coroutines.test.UnconfinedTestDispatcher(testScheduler)) { t.client.prepareCart(null, recipe) }
+        advanceUntilIdle()
+        assertEquals(listOf("signout", "/api/v1/sdk/carts"), log)
+    }
+
+    @Test
+    fun aCancelledCallerDoesNotStopTheAddAndAnotherCallerGetsItsResult() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val host = object : Host0() { override suspend fun open(url: String): PageLoad { gate.await(); return PageLoad(true, url) } }
+        val t = Setup(host) { p, _ -> if (p.endsWith("/add")) start(open("o")) else step(jobOf(p), doneOp("d", JSONObject().put("added", JSONArray()))) }
+        val c = session(emptyList(), client = t.client)
+        val first = launch { c.addToCart() }
+        runCurrent()
+        val second = async { c.addToCart() }
+        runCurrent()
+        first.cancel()
+        gate.complete(Unit)
+        second.await()
+        assertEquals(1, t.paths().count { it.endsWith("/add") })
+        assertEquals(1, t.paths().count { it.endsWith("/step") })
+        assertFalse(c.isAdding)
+    }
+
+    @Test
+    fun aCancelledSoleCallerStillLetsTheAddFinish() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val host = object : Host0() { override suspend fun open(url: String): PageLoad { gate.await(); return PageLoad(true, url) } }
+        val t = Setup(host) { p, _ -> if (p.endsWith("/add")) start(open("o")) else step(jobOf(p), doneOp("d", JSONObject().put("added", JSONArray()))) }
+        val c = session(emptyList(), client = t.client)
+        val first = launch { c.addToCart() }
+        runCurrent()
+        first.cancel()
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(1, t.paths().count { it.endsWith("/step") })
+        assertFalse(c.isAdding)
+    }
+
+    @Test
+    fun restorePicksKeepsAProductTheUserFoundWithSearch() = runTest {
+        val found = prod("found") { it.put("unitPrice", 5) }
+        val t = Setup { p, _ -> if (p.endsWith("/search")) start(doneOp("d", JSONObject().put("key", "a").put("options", JSONArray().put(found)))) else error("no") }
+        val opts = listOf(prod("p1"))
+        val old = session(listOf(item("a", "p1", opts)), client = t.client)
+        old.search("a", "oat milk")
+        old.select("a", "found")
+        old.setQuantity("a", 3)
+        val fresh = session(listOf(item("a", "p1", opts)), client = t.client)
+        fresh.restorePicks(old)
+        assertEquals("found", fresh.selectedId("a"))
+        assertEquals(3, fresh.quantity("a"))
+        assertEquals(listOf("p1", "found"), fresh.options("a").map { it.id })
+    }
+
+    @Test
+    fun javaCanImplementHostAndCodeBuiltAgainst05StillLinks() {
+        // A Java Host implements only the abstract methods: the defaults must be real JVM defaults.
+        assertTrue(Host::class.java.getMethod("getPagesLost").isDefault)
+        assertTrue(HttpTransport::class.java.getMethod("get", String::class.java, Map::class.java, kotlin.coroutines.Continuation::class.java).isDefault)
+        // 0.5's constructors, before LoginRequest.cancel and PreparedCart.warnings.
+        val l = List::class.java
+        LoginRequest::class.java.getConstructor(String::class.java, String::class.java, String::class.java, String::class.java,
+            LoginCheck::class.java, l, String::class.java, Long::class.javaPrimitiveType, Function1::class.java)
+        val c = PreparedCart::class.java
+        val old = arrayOf(String::class.java, String::class.java, l, l, l, l, String::class.java, l, StoreLocation::class.java)
+        c.getConstructor(*old)
+        // What PreparedCart("c", "heb", ready, none, none) compiled against 0.5 calls.
+        val item = CartItem.fromJson(item(options = listOf(prod())), null)
+        val made = c.getDeclaredConstructor(*old, Int::class.javaPrimitiveType, kotlin.jvm.internal.DefaultConstructorMarker::class.java)
+            .newInstance("c", "heb", listOf(item), emptyList<CartItem>(), emptyList<CartItem>(), null, null, null, null, 0x1E0, null) as PreparedCart
+        assertEquals(listOf(item), made.items)
+        assertEquals(emptyList<CartRecipe>(), made.recipes)
+        assertEquals(emptyList<CartWarning>(), made.warnings)
+        c.getMethod("copy", *old)
+        c.getMethod("copy\$default", c, *old, Int::class.javaPrimitiveType, Any::class.java)
     }
 }

@@ -137,9 +137,27 @@ class MealioCart {
     // The hidden page checks its own navigations against the same list.
     WebViewHost.sharedAllowlist = client.allowlist;
     // Whatever the old configuration had under way stops with it.
-    _instance?._client.cancelJobs();
-    return _instance = MealioCart._(client, onSignInRequired);
+    final old = _instance;
+    old?._client.cancelJobs();
+    final next = MealioCart._(client, onSignInRequired);
+    // The app's user is still signed in: the new configuration knows them
+    // too, without signing out of the stores.
+    if (old != null && old._tracking) {
+      next._tracking = true;
+      next._user = old._user;
+      client.setUser(old._user);
+    }
+    _instance = next;
+    // Widgets on screen move to the new instance.
+    _changes.notify();
+    return next;
   }
+
+  /// Notifies on [configure] and on every change of [setUser], whichever
+  /// instance is current. Widgets listen here, so a second [configure]
+  /// does not leave them on the old instance.
+  static Listenable get changes => _changes;
+  static final _Notifier _changes = _Notifier();
 
   /// The configured SDK. Throws [MealioException] `not_configured` before
   /// [configure].
@@ -155,7 +173,6 @@ class MealioCart {
 
   final MealioClient _client;
   final VoidCallback? _onSignInRequired;
-  final _Notifier _userChanges = _Notifier();
   bool _tracking = false;
   String? _user;
 
@@ -171,8 +188,9 @@ class MealioCart {
   /// False while [setUser] says nobody is signed in. True until it is first called.
   bool get hasUser => !_tracking || _user != null;
 
-  /// Notifies on every change of [setUser].
-  Listenable get userChanges => _userChanges;
+  /// Notifies on every change of [setUser], and when [configure] replaces
+  /// this instance (the same as [changes]).
+  Listenable get userChanges => _changes;
 
   /// Tell the SDK who is signed in to your app, or null for nobody. Call it
   /// at start and whenever that changes.
@@ -189,7 +207,7 @@ class MealioCart {
     if (_client.setUser(id)) {
       unawaited(_clearStores().then<void>((_) {}, onError: (Object _) {}));
     }
-    _userChanges.notify();
+    _changes.notify();
   }
 
   /// Stop every cart being prepared or searched. An add under way runs on.

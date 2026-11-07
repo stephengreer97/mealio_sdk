@@ -574,12 +574,30 @@ void main() {
   });
 
   group('blocked mutations', () {
-    test('names every field of a mutation, and nothing of a query', () {
+    test('names a mutation and its root fields, and nothing of a query', () {
       expect(
         mutationNames('mutation Go(\$a: ID!) { x: placeOrder(id: \$a, note: "checkout") { ... on Err { message } } } # payment'),
-        <String>['Go', 'x', 'placeOrder', 'message'],
+        <String>['Go', 'placeOrder'],
       );
       expect(mutationNames('query Q { paymentMethods { id } }'), isEmpty);
+    });
+
+    test('judges only a mutation root: nested fields and aliases pass, root fields block', () {
+      expect(
+        mutationNames('mutation AddToCart { addItemsToCart { cart { items { maxPurchaseQuantity } } } }'),
+        <String>['AddToCart', 'addItemsToCart'],
+      );
+      expect(
+        mutationNames('mutation { a: placeOrder { id } ... on Mutation { ...F } } fragment F on Mutation { checkout { id } }'),
+        <String>['placeOrder', 'checkout'],
+      );
+      expect(mutationNames('mutation M { a { b(note: "say \\"placeOrder\\"") } } # checkout'), <String>['M', 'a']);
+      expect(mutationNames('mutation M { x(d: """ a \\""" placeOrder { """) { id } }'), <String>['M', 'x']);
+    });
+
+    test('a multipart body is judged by its operations field', () {
+      expect(bodyBlocked('operations=${Uri.encodeQueryComponent('{"query":"mutation { placeOrder { id } }"}')}&map=%7B%7D'), isTrue);
+      expect(bodyBlocked('operations=${Uri.encodeQueryComponent('{"query":"mutation { addItemsToCart { id } }"}')}'), isFalse);
     });
 
     test('the runner refuses a fetch whose body names a blocked mutation', () async {
@@ -591,7 +609,7 @@ void main() {
           'request': <String, Object?>{
             'method': 'POST',
             'url': 'https://www.heb.com/graphql',
-            'body': '{"query":"mutation Go { cart { submitOrder { id } } }"}',
+            'body': '{"query":"mutation Go { submitOrder { id } }"}',
           },
           'timeoutMs': 1000,
           'maxBytes': 1000,

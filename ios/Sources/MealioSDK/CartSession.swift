@@ -344,11 +344,18 @@ public final class CartSession: ObservableObject {
     /// Take the user's picks from an earlier cart, after a failed add. Works
     /// by item key, on the same store: what they unticked stays unticked, and
     /// a product still offered comes back with its quantity, weight and
-    /// preference. A product no longer offered leaves the item as this cart set it.
+    /// preference. Products the user found with `search` come along as
+    /// options, so a searched pick stays. A product no longer offered leaves
+    /// the item as this cart set it.
     public func restorePicks(from old: CartSession) {
         guard old.store == store else { return }
         for it in items {
             guard old.find(it.key) != nil else { continue }
+            // What the user found with search stays an option, so a searched pick survives.
+            if let found = old.extra[it.key], !found.isEmpty {
+                let have = Set(options(for: it.key).map(\.id))
+                extra[it.key] = (extra[it.key] ?? []) + found.filter { !have.contains($0.id) }
+            }
             guard let productId = old.selectedId(for: it.key) else {
                 deselect(key: it.key)
                 continue

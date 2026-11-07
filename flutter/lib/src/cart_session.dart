@@ -357,10 +357,18 @@ class CartSession extends ChangeNotifier {
   /// item key, on the same store: what they unticked stays unticked, and a
   /// product still offered comes back with its quantity, weight and
   /// preference. A product no longer offered leaves the item as this cart set it.
+  /// Products the user found with [search] come along as options, so a pick
+  /// made from a search stays, with its quantity.
   void restorePicks(CartSession from) {
     if (from.store != store) return;
     for (final CartItem it in items) {
       if (from._find(it.key) == null) continue;
+      final found = from._extra[it.key];
+      if (found != null && found.isNotEmpty) {
+        final mine = _extra[it.key] ?? const <Product>[];
+        final seen = mine.map((Product p) => p.id).toSet();
+        _extra[it.key] = <Product>[...mine, ...found.where((Product p) => !seen.contains(p.id))];
+      }
       final productId = from.selectedId(it.key);
       if (productId == null) {
         deselect(it.key);

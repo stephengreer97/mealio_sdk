@@ -184,6 +184,24 @@ public final class JobQueue {
         return try await job()
     }
 
+    /// Wait for the page, then hold it until the returned `release` is
+    /// called. Calling `release` again does nothing.
+    func acquire() async -> @MainActor () -> Void {
+        if busy {
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                waiting.append(c)
+            }
+        } else {
+            busy = true
+        }
+        var released = false
+        return { [weak self] in
+            if released { return }
+            released = true
+            self?.next()
+        }
+    }
+
     /// Hand the page to the next job in line, or free it.
     private func next() {
         if waiting.isEmpty {
@@ -191,6 +209,20 @@ public final class JobQueue {
         } else {
             waiting.removeFirst().resume()
         }
+    }
+}
+
+/// An add's token, fixed when the add was asked for. Renewed on a 401 only
+/// while the session is still the one of that moment (`gen`).
+@MainActor
+final class SessionPin {
+    var token: String
+    /// The session generation the add was asked for in.
+    let gen: Int
+
+    init(token: String, gen: Int) {
+        self.token = token
+        self.gen = gen
     }
 }
 
@@ -327,9 +359,9 @@ public final class MealioClient {
             // One recipe goes as `recipe`, so a server from before multi-recipe still understands it.
             let start: JSONValue
             if recipes.count == 1 {
-                start = try await self.post("/api/v1/sdk/carts", body: One(store: store, recipe: recipes[0], zip: zip, sdk: a.sdk, epoch: a.epoch, warm: warm))
+                start = try await self.post("/api/v1/sdk/carts", body: One(store: store, recipe: recipes[0], zip: zip, sdk: a.sdk, epoch: a.epoch, warm: warm), cancel: token)
             } else {
-                start = try await self.post("/api/v1/sdk/carts", body: Many(store: store, recipes: recipes, zip: zip, sdk: a.sdk, epoch: a.epoch, warm: warm))
+                start = try await self.post("/api/v1/sdk/carts", body: Many(store: store, recipes: recipes, zip: zip, sdk: a.sdk, epoch: a.epoch, warm: warm), cancel: token)
             }
             return try await self.drive(start, onStep: onStep, cancel: token)
         }
@@ -385,7 +417,7 @@ public final class MealioClient {
             try await queue.run { () async throws -> Void in
                 try MealioClient.stopIf(cancel)
                 let a = self.about()
-                let start = try await self.post("/api/v1/sdk/warm", body: Body(store: store, sdk: a.sdk, epoch: a.epoch))
+                let start = try await self.post("/api/v1/sdk/warm", body: Body(store: store, sdk: a.sdk, epoch: a.epoch), cancel: cancel)
                 guard let job = start["job"]?.stringValue else { return }
                 let r = try await self.drive(start, onStep: nil, warm: true, cancel: cancel)
                 if r["signedIn"]?.boolValue == true, let s = r["store"]?.stringValue {
@@ -437,36 +469,60 @@ public final class MealioClient {
 
     /// Run `fn` with the hidden page to itself, in the queue with the jobs. For
     /// work that must not land in the middle of one, like clearing store
-    /// sessions. It gets 30 seconds, then fails with `network`.
+    /// sessions. It gets 30 seconds, then fails with `network`. The page stays
+    /// held until `fn` has really ended, even after that (it is cancelled then).
     public func runExclusive<T>(_ fn: @escaping @MainActor () async throws -> T) async throws -> T {
         let ms = config.requestTimeoutMs
-        return try await queue.run { () async throws -> T in
-            try await withDeadline(ms, late: { .failure(MealioError(code: MealioError.Code.network, message: "That took too long")) }, fn)
+        // Its place in the queue is taken now, before the first suspension.
+        let release = await queue.acquire()
+        // The page is let go when `fn` really ends, never at the deadline:
+        // only the caller hears about the deadline.
+        let work = Task { @MainActor () async throws -> T in
+            defer { release() }
+            return try await fn()
         }
+        return try await withDeadline(ms, late: {
+            work.cancel()
+            return .failure(MealioError(code: MealioError.Code.network, message: "That took too long"))
+        }, { try await work.value })
     }
 
-    /// The current token. One that arrives after a reset belongs to the last user.
-    private func sessionToken() async throws -> String {
+    /// The current token. One that arrives after a reset belongs to the last
+    /// user, so it is never kept. What happens then depends on the job:
+    /// - `cancel` (prepare, search, warm): the job is over, `cancelled`. It
+    ///   never asks for the next user's token.
+    /// - `gen` (an add): the add belongs to the session of that generation. If
+    ///   the session changed before the call or while waiting, `session_expired`.
+    /// - neither: ask again, for whoever is signed in now.
+    private func sessionToken(cancel: CancelToken? = nil, gen pinned: Int? = nil) async throws -> String {
         while true {
+            if let c = cancel { try MealioClient.stopIf(c) }
+            if let p = pinned, p != sessionGen { throw MealioClient.sessionChanged }
             if user == .nobody {
                 throw MealioError(code: MealioError.Code.notSignedIn, message: "Nobody is signed in")
             }
             if let t = token { return t }
             let gen = sessionGen
             let provider = config.sessionTokenProvider
-            let t: String
+            var t = ""
+            var failed: Error?
             do {
                 t = try await withDeadline(config.requestTimeoutMs,
                                            late: { .failure(MealioError(code: MealioError.Code.sessionFailed, message: "The session function did not answer in time")) },
                                            { try await provider() })
             } catch {
-                if gen != sessionGen { continue }
-                throw MealioError(code: MealioError.Code.sessionFailed, message: MealioClient.message(of: error))
+                failed = error
             }
-            if gen == sessionGen {
-                token = t
-                return t
+            if gen != sessionGen {
+                if cancel != nil { throw MealioClient.cancelledError }
+                if pinned != nil { throw MealioClient.sessionChanged }
+                continue
             }
+            if let failed = failed {
+                throw MealioError(code: MealioError.Code.sessionFailed, message: MealioClient.message(of: failed))
+            }
+            token = t
+            return t
         }
     }
 
@@ -504,7 +560,7 @@ public final class MealioClient {
             let a = self.about()
             try MealioClient.stopIf(token)
             let start = try await self.post("/api/v1/sdk/carts/\(MealioClient.encodeComponent(cartId))/search",
-                                            body: Body(key: key, query: query, sdk: a.sdk, epoch: a.epoch))
+                                            body: Body(key: key, query: query, sdk: a.sdk, epoch: a.epoch), cancel: token)
             return try await self.drive(start, onStep: onStep, cancel: token)
         }
         do {
@@ -515,17 +571,24 @@ public final class MealioClient {
     }
 
     /// Fill the store cart with the user's choices. It cannot be cancelled:
-    /// once tapped it runs to its end under the session it started with, even
-    /// if the user changes meanwhile. Every wait in it is bounded, so it does end.
+    /// once tapped it runs to its end under the session it was called with
+    /// (taken now, not after a wait in the queue), even if the user changes
+    /// meanwhile. A 401 after the user changed fails with `session_expired`.
+    /// Every wait in it is bounded, so it does end.
     public func addToCart(cartId: String, selections: [Selection],
                           onStep: StepListener? = nil) async throws -> AddResult {
         struct Body: Encodable { let selections: [Selection]; let sdk: SDKInfo; let epoch: Int }
+        // Pending while its session is fetched too, so a warm-up cannot slip in.
+        queue.pending += 1
+        defer { queue.pending -= 1 }
+        let gen = sessionGen
+        let token = try await sessionToken(gen: gen)
+        let pin = SessionPin(token: token, gen: gen)
         let result: JSONValue = try await cartJob(cancel: nil) { () async throws -> JSONValue in
-            let token = try await self.sessionToken()
             let a = self.about()
             let start = try await self.post("/api/v1/sdk/carts/\(MealioClient.encodeComponent(cartId))/add",
-                                            body: Body(selections: selections, sdk: a.sdk, epoch: a.epoch), token: token)
-            return try await self.drive(start, onStep: onStep, token: token)
+                                            body: Body(selections: selections, sdk: a.sdk, epoch: a.epoch), pin: pin)
+            return try await self.drive(start, onStep: onStep, pin: pin)
         }
         do {
             return try result.decode(AddResult.self)
@@ -563,13 +626,16 @@ public final class MealioClient {
     }
 
     static func stopIf(_ cancel: CancelToken) throws {
-        if cancel.cancelled { throw MealioError(code: MealioError.Code.cancelled, message: "Cancelled") }
+        if cancel.cancelled { throw cancelledError }
     }
 
-    /// Drive a job to its end. A warm-up job may never show sign-in. `token`
-    /// pins the session an add started with.
+    static let cancelledError = MealioError(code: MealioError.Code.cancelled, message: "Cancelled")
+    static let sessionChanged = MealioError(code: MealioError.Code.sessionExpired, message: "The signed-in user changed")
+
+    /// Drive a job to its end. A warm-up job may never show sign-in. `pin`
+    /// holds the session an add was called with.
     private func drive(_ start: JSONValue, onStep: StepListener?, warm: Bool = false,
-                       cancel: CancelToken? = nil, token: String? = nil) async throws -> JSONValue {
+                       cancel: CancelToken? = nil, pin: SessionPin? = nil) async throws -> JSONValue {
         guard let job = start["job"]?.stringValue else {
             throw MealioError(code: MealioError.Code.server, message: "Mealio did not start a job")
         }
@@ -596,7 +662,7 @@ public final class MealioClient {
                 }
             }
             let next = try await post("/api/v1/sdk/jobs/\(MealioClient.encodeComponent(job))/step",
-                                      body: StepRequest(seq: seq, results: out.results), token: token)
+                                      body: StepRequest(seq: seq, results: out.results), pin: pin, cancel: cancel)
             env = Envelope(json: next["envelope"])
         }
         throw MealioError(code: MealioError.Code.server, message: "job did not finish")
@@ -630,7 +696,9 @@ public final class MealioClient {
         return body
     }
 
-    private func post<B: Encodable>(_ path: String, body: B, token: String? = nil) async throws -> JSONValue {
+    /// `pin`: an add's own session. `cancel`: the job's, checked once its session arrives.
+    private func post<B: Encodable>(_ path: String, body: B, pin: SessionPin? = nil,
+                                    cancel: CancelToken? = nil) async throws -> JSONValue {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.withoutEscapingSlashes]
         let data: Data
@@ -639,16 +707,18 @@ public final class MealioClient {
         } catch {
             throw MealioError(code: MealioError.Code.server, message: "Could not encode the request")
         }
-        return try await post(path, data: data, token: token, retried: false)
+        return try await post(path, data: data, pin: pin, cancel: cancel, retried: false)
     }
 
-    private func post(_ path: String, data: Data, token pinned: String?, retried: Bool) async throws -> JSONValue {
+    private func post(_ path: String, data: Data, pin: SessionPin?, cancel: CancelToken?,
+                      retried: Bool) async throws -> JSONValue {
         let token: String
-        if let pinned = pinned {
-            token = pinned
+        if let pin = pin {
+            token = pin.token
         } else {
-            token = try await sessionToken()
+            token = try await sessionToken(cancel: cancel)
         }
+        if let c = cancel { try MealioClient.stopIf(c) }
         guard let url = URL(string: base + path) else {
             throw MealioError(code: MealioError.Code.network, message: "Could not reach Mealio")
         }
@@ -668,8 +738,12 @@ public final class MealioClient {
 
         let answer = try await request(req)
         if answer.status == 401 && !retried {
+            // An add never moves to another session than the one it was asked
+            // for in. Within it, it may get a fresh token.
+            if let pin = pin, pin.gen != sessionGen { throw MealioClient.sessionChanged }
             if self.token == token { self.token = nil }
-            return try await post(path, data: data, token: nil, retried: true)
+            if let pin = pin { pin.token = try await sessionToken(gen: pin.gen) }
+            return try await post(path, data: data, pin: pin, cancel: cancel, retried: true)
         }
         if answer.status == 401 {
             throw MealioError(code: MealioError.Code.sessionExpired, message: "The Mealio session expired")

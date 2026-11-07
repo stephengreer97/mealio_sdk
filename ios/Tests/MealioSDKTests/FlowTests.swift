@@ -136,6 +136,106 @@ final class FlowTests: XCTestCase {
         XCTAssertEqual(order, ["onClose", "action"])
     }
 
+    // MARK: hidden mid-add, cancelled prepares (0.6 round 2)
+
+    @MainActor
+    func testAnAddThePartnerHidRunsOnAndReportsThroughOnAddedAndOnClose() async throws {
+        defer { reset() }
+        let server = JobServer()
+        let hold = DispatchSemaphore(value: 0)
+        let cart = try newCart()
+        let added: JSONValue = ["cartId": "c/2", "store": "heb", "added": [], "skipped": [], "failed": []]
+        StubURLProtocol.handler = { req, body in
+            server.rec.record(req, body: body)
+            if req.url?.path.hasSuffix("/add") == true {
+                hold.wait()
+                return server.start([jobsDone(added)])
+            }
+            return server.start([jobsDone(cart)])
+        }
+        configure()
+        var heard: [String] = []
+        var closedWith: AddResult?
+        let model = MealioFlowModel()
+        model.open(recipes: [recipe], store: "heb", zip: nil,
+                   onAdded: { _ in heard.append("onAdded") }, onError: { _ in heard.append("onError") })
+        try await waitFor { model.phase == .list }
+        model.add()
+        try await waitFor { server.paths.contains { $0.hasSuffix("/add") } }
+        // The partner sets isPresented = false: onDisappear.
+        model.close { r in
+            heard.append("onClose")
+            closedWith = r
+        }
+        XCTAssertEqual(heard, [])
+        hold.signal()
+        try await waitFor { heard.count == 2 }
+        XCTAssertEqual(heard, ["onAdded", "onClose"])
+        XCTAssertEqual(closedWith?.cartId, "c/2")
+        // Gone already: a second close reports nothing.
+        model.close { _ in heard.append("again") }
+        try await tick()
+        XCTAssertEqual(heard, ["onAdded", "onClose"])
+    }
+
+    @MainActor
+    func testAnAddThePartnerHidThatFailsReportsOnErrorAndOnCloseWithNothing() async throws {
+        defer { reset() }
+        let server = JobServer()
+        let hold = DispatchSemaphore(value: 0)
+        let cart = try newCart()
+        let failed = problem("boom")
+        StubURLProtocol.handler = { req, body in
+            server.rec.record(req, body: body)
+            if req.url?.path.hasSuffix("/add") == true {
+                hold.wait()
+                return failed
+            }
+            return server.start([jobsDone(cart)])
+        }
+        configure()
+        var heard: [String] = []
+        let model = MealioFlowModel()
+        model.open(recipes: [recipe], store: "heb", zip: nil,
+                   onAdded: { _ in heard.append("onAdded") }, onError: { _ in heard.append("onError") })
+        try await waitFor { model.phase == .list }
+        model.add()
+        try await waitFor { server.paths.contains { $0.hasSuffix("/add") } }
+        model.close { r in heard.append(r == nil ? "onClose(nil)" : "onClose(result)") }
+        hold.signal()
+        try await waitFor { heard.count == 2 }
+        XCTAssertEqual(heard, ["onError", "onClose(nil)"])
+    }
+
+    @MainActor
+    func testAPrepareCancelledFromOutsideTheSheetLoadsAgainWhileTheSheetIsOpenAndReportsNoError() async throws {
+        defer { reset() }
+        let server = JobServer()
+        StubURLProtocol.handler = { req, body in
+            server.rec.record(req, body: body)
+            return server.start([jobsOpen("o"), jobsDone(jobsCart)])
+        }
+        let gate = Gate()
+        let host = ScriptedHost()
+        host.open = { url in
+            await gate.wait()
+            return PageOpenOutcome(ok: true, finalUrl: url)
+        }
+        configure(host)
+        var errors = 0
+        let model = MealioFlowModel()
+        model.open(recipes: [recipe], store: "heb", zip: nil, onAdded: nil, onError: { _ in errors += 1 })
+        try await waitFor { host.log.order == ["open"] }
+        // As signOutOfStore does.
+        MealioCart.client?.cancelJobs()
+        gate.release()
+        try await waitFor { model.phase == .list }
+        XCTAssertEqual(server.paths, ["/carts", "/carts"])
+        XCTAssertEqual(errors, 0)
+        XCTAssertNil(model.error)
+        model.close { _ in }
+    }
+
     // MARK: after a failed add
 
     @MainActor

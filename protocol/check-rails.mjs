@@ -34,6 +34,39 @@ for (const file of files) {
   }
 }
 
+// GraphQL documents written inline in a rail's script text, like the clear
+// write in heb-network-search.ts: a quoted string that starts with `query` or
+// `mutation`, joined with `+` to the quoted strings after it (comments between
+// them allowed). A part that is not a quoted string ends the document there.
+const LIT = String.raw`'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"`;
+const GAP = String.raw`(?:\s|\/\/[^\n]*\n)*`;
+const unquote = (q) => q.slice(1, -1).replace(/\\(.)/g, (_, c) => (c === 'n' ? '\n' : c));
+function inlineDocs(text) {
+  const out = [];
+  const head = new RegExp(String.raw`(['"])(?:query|mutation)\b`, 'g');
+  for (let m = head.exec(text); m; m = head.exec(text)) {
+    const first = new RegExp(LIT, 'y');
+    first.lastIndex = m.index;
+    const f = first.exec(text);
+    if (!f) continue;
+    let doc = unquote(f[0]), end = first.lastIndex;
+    const next = new RegExp(GAP + String.raw`\+` + GAP + '(' + LIT + ')', 'y');
+    next.lastIndex = first.lastIndex;
+    for (let n = next.exec(text); n; n = next.exec(text)) { doc += unquote(n[1]); end = next.lastIndex; }
+    // A bare 'query' or 'mutation' is an argument naming the kind, not a document.
+    if (/[{(]/.test(doc)) out.push(doc);
+    head.lastIndex = end;
+  }
+  return out;
+}
+
+for (const file of files) {
+  for (const doc of inlineDocs(fs.readFileSync(file, 'utf8'))) {
+    docs += 1;
+    if (bodyBlocked(JSON.stringify({ query: doc }))) bad.push(`${path.relative(dir, file)}: inline ${doc.slice(0, 60)}`);
+  }
+}
+
 // The GraphQL documents themselves: every exported string that holds one, and
 // every exported *Doc builder, run for a few lines with a weight line among them.
 for (const file of files) {

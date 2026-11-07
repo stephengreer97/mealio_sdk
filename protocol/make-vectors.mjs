@@ -98,11 +98,12 @@ const vectors = {
     { body: '{"query":"query Search { products { id } }"}', blocked: false },
     { body: 'q=checkout+guide', blocked: false },
     { body: '', blocked: false },
-    // Any mutation: its name, and every field it selects, at any depth.
+    // Any mutation: its name, and its root fields.
     { body: '{"query":"mutation Go { placeOrder(input:{}) { id } }"}', blocked: true },
     { body: '{"query":"mutation { placeOrder { id } }"}', blocked: true },
     { body: '{"query":"mutation($a:ID!){ checkoutComplete(id:$a){id} }"}', blocked: true },
-    { body: '{"query":"mutation Go { cart { submitOrder { id } } }"}', blocked: true },
+    // 0.6 round 2: a nested field is not a root field, so this one passes now.
+    { body: '{"query":"mutation Go { cart { submitOrder { id } } }"}', blocked: false },
     { body: '{"query":"mutation Go { done: place_order { id } }"}', blocked: true },
     { body: '{"query":"mutation Go { ...F } fragment F on Mutation { placeOrder { id } }"}', blocked: true },
     { body: '{"operationName":"place_order"}', blocked: true },
@@ -113,6 +114,38 @@ const vectors = {
     { body: '{"query":"query Wallet { me { paymentMethods { id } } }"}', blocked: false },
     { body: '{"query":"mutation Add($p: String!) { addItem(note: \\"checkout\\", purchasePreferenceId: $p) { ... on PaymentError { message } } } # placeOrder"}', blocked: false },
     { body: 'operationName=Search&query=query+Search+%7B+a+%7D', blocked: false },
+    // 0.6 round 2. Only operation names and a mutation's ROOT fields count:
+    // fields in its top selection set, in inline fragments at that level, and
+    // at the top of fragments spread there. Aliases, nested fields, arguments
+    // and variables never count.
+    { body: JSON.stringify({ query: 'mutation AddToCart($id: ID!) { addItemsToCart(items: [{id: $id}]) { cart { id items { id quantity maxPurchaseQuantity } } } }' }), blocked: false },
+    { body: JSON.stringify({ query: 'mutation UpdateCartItems($i: [CartItemInput!]!) { updateCartItems(items: $i) { cart { id itemCount checkoutUrl } } }' }), blocked: false },
+    { body: JSON.stringify({ query: 'mutation addToCart { addToCart(sku: "1") { ...Cart } } fragment Cart on Cart { id total paymentMethodRequired }' }), blocked: false },
+    { body: JSON.stringify({ query: 'mutation AddItem { addItem(id: 1) { product { id isPurchasable purchaseLimit } } }' }), blocked: false },
+    { body: JSON.stringify({ query: 'query Search { search(q: "milk") { ...P } } fragment P on Product { purchaseLimit } mutation Track { track(e: "x") }' }), blocked: false },
+    { body: JSON.stringify({ query: 'mutation Add($checkoutId: ID, $purchase: Int) { addItem(checkoutId: $checkoutId, purchase: $purchase) { id } }' }), blocked: false },
+    { body: JSON.stringify({ query: 'mutation Add { addItem @include(if: true) { id } placed: addItem(placeOrder: true) { id } }' }), blocked: false },
+    { body: JSON.stringify({ query: 'mutation { checkout: addItem { id } }' }), blocked: false },
+    { body: JSON.stringify({ query: 'query { placeOrder { id } }' }), blocked: false },
+    { body: JSON.stringify({ query: 'mutation { a: placeOrder { id } }' }), blocked: true },
+    { body: JSON.stringify({ query: 'mutation { addItem { id } ... on Mutation { placeOrder { id } } }' }), blocked: true },
+    { body: JSON.stringify({ query: 'mutation { ... @include(if: true) { ... on Mutation { checkout { id } } } }' }), blocked: true },
+    { body: JSON.stringify({ query: 'mutation M { addItem { id } ...F } fragment F on Mutation { ...G } fragment G on Mutation { checkoutComplete { id } }' }), blocked: true },
+    { body: JSON.stringify({ query: 'fragment F on Mutation { submitOrder { id } } mutation M @trace { ...F }' }), blocked: true },
+    { body: JSON.stringify({ query: 'mutation PlaceOrder { addItem { id } }' }), blocked: true },
+    { body: JSON.stringify({ operationName: 'Checkout', query: 'query Checkout { cart { id } }' }), blocked: true },
+    { body: JSON.stringify({ query: 'mutation M { addItem(note: "a") { id } # x\n placeOrder { id } }' }), blocked: true },
+    // Strings are not fields, block strings with \""" inside them included.
+    { body: JSON.stringify({ query: 'mutation M { addItem(note: """a\\""" b""") { id } placeOrder { id } x: addItem(n: "y") { id } }' }), blocked: true },
+    { body: JSON.stringify({ query: 'mutation M { addItem(note: """a\\""" placeOrder { id } """) { id } }' }), blocked: false },
+    { body: JSON.stringify({ query: 'mutation M { addItem(note: "a \\" placeOrder { id } \\"") { id } }' }), blocked: false },
+    { body: JSON.stringify({ query: 'mutation M { addItem(note: "a \\\\") { id } placeOrder { id } }' }), blocked: true },
+    // GraphQL multipart: the guard reads a FormData body's operationName, query
+    // and operations fields as this form-encoded text. operations is JSON, one
+    // operation or a batch, judged like a JSON body.
+    { body: 'operations=' + encodeURIComponent(JSON.stringify({ query: 'mutation { placeOrder(id: 1) { id } }', variables: {} })) + '&map=%7B%7D', blocked: true },
+    { body: 'operations=' + encodeURIComponent(JSON.stringify([{ operationName: 'Search' }, { operationName: 'submit_order' }])), blocked: true },
+    { body: 'operations=' + encodeURIComponent(JSON.stringify({ query: 'mutation Upload($f: Upload!) { uploadPhoto(file: $f) { id } }', variables: { f: null } })) + '&map=%7B%7D', blocked: false },
     // The store rails' own writes (lib/cart-relay/stores) must pass.
     { body: JSON.stringify({ operationName: 'cartItemV2', variables: {}, query: 'mutation cartItemV2($productId: String!, $skuId: String!, $quantity: Int, $purchasePreferenceId: String) { addItemToCartV2(productId: $productId, skuId: $skuId, quantity: $quantity, purchasePreferenceId: $purchasePreferenceId) { __typename ... on Cart { id } ... on AddOnsCart { id cart { id } } ... on AddItemToCartV2Error { message title code } ... on AddItemToCartV2TimeslotError { message title errorCode: code } } }' }), blocked: false },
     { body: JSON.stringify({ operationName: 'cartItemsV2', variables: {}, query: 'mutation cartItemsV2($p0: String!, $s0: String!, $w0: Float, $r0: String) { a0: addItemToCartV2(productId: $p0, skuId: $s0, weight: $w0, purchasePreferenceId: $r0) { __typename ... on Cart { id } } }' }), blocked: false },

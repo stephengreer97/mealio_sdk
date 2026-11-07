@@ -30,6 +30,11 @@ android {
 
     kotlinOptions {
         jvmTarget = "17"
+        // Interface defaults (Host.pagesLost, HttpTransport.get) as real JVM
+        // default methods, so a Java class implementing Host needs only the
+        // abstract ones. "-compatibility" keeps the DefaultImpls that Kotlin
+        // code built against 0.5 calls.
+        freeCompilerArgs += "-Xjvm-default=all-compatibility"
     }
 }
 

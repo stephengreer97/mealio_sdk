@@ -137,15 +137,15 @@ public final class Allowlist {
     /// Strings, block strings and comments, which hold no GraphQL names.
     private static let gqlNoiseRegex: NSRegularExpression = {
         // Starts with a group: a raw string may not open with three quotes.
-        try! NSRegularExpression(pattern: #"(?:"""[\s\S]*?""")|"(?:[^"\\]|\\.)*"|#[^\n\r]*"#, options: [])
+        try! NSRegularExpression(pattern: #"(?:"""(?:\\"""|[\s\S])*?""")|"(?:[^"\\]|\\.)*"|#[^\n\r]*"#, options: [])
     }()
 
     private static let gqlTokenRegex: NSRegularExpression = {
-        try! NSRegularExpression(pattern: #"[A-Za-z_][A-Za-z0-9_]*|[{}()]"#, options: [])
+        try! NSRegularExpression(pattern: #"[A-Za-z_][A-Za-z0-9_]*|\.\.\.|[{}():@]"#, options: [])
     }()
 
     private static let formFieldRegex: NSRegularExpression = {
-        try! NSRegularExpression(pattern: #"(?:^|&)(operationName|query)=([^&]*)"#, options: [])
+        try! NSRegularExpression(pattern: #"(?:^|&)(operationName|query|operations)=([^&]*)"#, options: [])
     }()
 
     /// A URL split into scheme, host and path + query, or nil if it is not one
@@ -208,40 +208,111 @@ public final class Allowlist {
         }
     }
 
-    /// Every name a GraphQL document's mutations use: the operation's name and
-    /// the fields it selects at any depth, aliases included, plus the fields of
-    /// its fragments. Arguments and `on Type` conditions are not fields. Empty
-    /// when the document has no mutation, so a query may read a field called
-    /// paymentMethods. Mirrors `mutationNames` in allowlist.ts.
+    /// The names a GraphQL document's mutations are judged by: each
+    /// mutation's own name, and its ROOT fields. A root field is a field in the
+    /// mutation's top selection set, in an inline fragment at that level
+    /// (`... on Mutation { x }`), or at the top of a fragment spread there
+    /// (followed through further spreads). Aliases, nested fields, arguments,
+    /// variables, directives, strings and comments are never names. A query,
+    /// subscription or fragment on its own gives none, so a mutation may select
+    /// `cart { checkoutUrl }` and a query may read `paymentMethods`. Mirrors
+    /// `mutationNames` in allowlist.ts.
     public static func mutationNames(_ doc: String) -> [String] {
         let dn = doc as NSString
         let text = gqlNoiseRegex.stringByReplacingMatches(in: doc, options: [], range: NSRange(location: 0, length: dn.length), withTemplate: " ")
         let tn = text as NSString
         let tokens = gqlTokenRegex.matches(in: text, options: [], range: NSRange(location: 0, length: tn.length)).map { tn.substring(with: $0.range) }
-        var names: [String] = []
-        var braces = 0, parens = 0
-        var kind = ""
-        var mutation = false, afterOn = false
+        var defs: [GraphQLDefinition] = []
+        var def: GraphQLDefinition?
+        // One entry per open selection set: true when it is at its definition's root.
+        var sets: [Bool] = []
+        var parens = 0
+        var inline = false, pushed = false
+        var expect = ""
         for t in tokens {
-            if t == "(" { parens += 1 }
-            else if t == ")" { parens = max(0, parens - 1) }
-            else if parens > 0 { continue }
-            else if t == "{" { braces += 1 }
-            else if t == "}" { braces = max(0, braces - 1); if braces == 0 { kind = "" } }
-            else if braces == 0 && kind.isEmpty && ["mutation", "query", "subscription", "fragment"].contains(t) {
-                kind = t
-                if t == "mutation" { mutation = true }
-            } else if afterOn { afterOn = false }
-            else if t == "on" { afterOn = true }
-            else if kind == "mutation" || kind == "fragment" { names.append(t) }
+            let was = pushed
+            pushed = false
+            if t == "(" { parens += 1; continue }
+            if t == ")" { parens = max(0, parens - 1); continue }
+            if parens > 0 { continue }
+            if t == "@" { expect = "directive"; continue }
+            if t == "{" {
+                if def == nil {
+                    let d = GraphQLDefinition(kind: "query")
+                    def = d
+                    defs.append(d)
+                }
+                sets.append(sets.isEmpty || (inline && sets[sets.count - 1]))
+                inline = false
+                expect = ""
+                continue
+            }
+            if t == "}" {
+                _ = sets.popLast()
+                inline = false
+                expect = ""
+                if sets.isEmpty { def = nil }
+                continue
+            }
+            if sets.isEmpty {
+                // A definition's header: its keyword, its name, and nothing else counts.
+                if expect == "directive" {
+                    expect = ""
+                } else if def == nil && ["query", "mutation", "subscription", "fragment"].contains(t) {
+                    let d = GraphQLDefinition(kind: t)
+                    def = d
+                    defs.append(d)
+                } else if let d = def, d.name.isEmpty, t != "on", t != ":", t != "..." {
+                    d.name = t
+                }
+                continue
+            }
+            let root = sets[sets.count - 1]
+            if t == "..." { expect = "spread"; inline = true; continue }
+            if t == ":" {
+                if was, let d = def { _ = d.fields.popLast() }
+                continue
+            }
+            if expect == "directive" || expect == "type" { expect = ""; continue }
+            if expect == "spread" {
+                expect = ""
+                if t == "on" { expect = "type"; continue }
+                inline = false
+                if root, let d = def { d.spreads.append(t) }
+                continue
+            }
+            inline = false
+            if root, let d = def {
+                d.fields.append(t)
+                pushed = true
+            }
         }
-        return mutation ? names : []
+        // A later fragment of the same name wins, as in the TS Map.
+        var fragments: [String: GraphQLDefinition] = [:]
+        for d in defs where d.kind == "fragment" { fragments[d.name] = d }
+        var names: [String] = []
+        for d in defs where d.kind == "mutation" {
+            if !d.name.isEmpty { names.append(d.name) }
+            var seen = Set<String>()
+            func walk(_ x: GraphQLDefinition) {
+                names.append(contentsOf: x.fields)
+                for s in x.spreads {
+                    if let f = fragments[s], !seen.contains(s) {
+                        seen.insert(s)
+                        walk(f)
+                    }
+                }
+            }
+            walk(d)
+        }
+        return names
     }
 
     /// Does a request body name a blocked operation? Reads `operationName` the
     /// way the server will (after JSON parsing, so `\u004f` escapes do not hide
-    /// it), for a single request or a batch, or form-encoded, and every name in
-    /// any mutation (see `mutationNames`). A persisted query that sends only an
+    /// it), for a single request or a batch, or form-encoded, and the names of
+    /// every mutation it carries (see `mutationNames`). A GraphQL multipart
+    /// upload's `operations` field is JSON and is judged like a JSON body. A persisted query that sends only an
     /// innocent name and a hash cannot be read here; the signature on the
     /// envelope covers it. The guard script applies the same rule to requests a
     /// page script makes; this applies it to the runner's own `fetch` op, which
@@ -267,7 +338,14 @@ public final class Allowlist {
             docs.append(body)
             for m in formFieldRegex.matches(in: body, options: [], range: NSRange(location: 0, length: ns.length)) {
                 let v = decodePercent(ns.substring(with: m.range(at: 2)).replacingOccurrences(of: "+", with: " "))
-                if ns.substring(with: m.range(at: 1)) == "query" { docs.append(v) } else { names.append(v) }
+                let field = ns.substring(with: m.range(at: 1))
+                if field == "query" {
+                    docs.append(v)
+                } else if field == "operations" {
+                    if bodyBlocked(v) { return true }
+                } else {
+                    names.append(v)
+                }
             }
         }
         for d in docs { names.append(contentsOf: mutationNames(d)) }
@@ -343,5 +421,19 @@ public final class Allowlist {
         if !own && !auth { return .refused(.host) }
         if Allowlist.isBlockedPath(rest) { return .refused(.blockedPath) }
         return .allowed
+    }
+}
+
+/// One definition of a GraphQL document, for `Allowlist.mutationNames`.
+private final class GraphQLDefinition {
+    let kind: String
+    var name = ""
+    /// Root fields, in order.
+    var fields: [String] = []
+    /// Fragment spreads at the root.
+    var spreads: [String] = []
+
+    init(kind: String) {
+        self.kind = kind
     }
 }

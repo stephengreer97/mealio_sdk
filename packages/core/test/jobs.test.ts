@@ -295,9 +295,9 @@ describe('cart session', () => {
 });
 
 describe('blocked mutations', () => {
-  it('names every field of a mutation, and nothing of a query', () => {
+  it("names a mutation and its root fields, and nothing of a query", () => {
     expect(mutationNames('mutation Go($a: ID!) { x: placeOrder(id: $a, note: "checkout") { ... on Err { message } } } # payment'))
-      .toEqual(['Go', 'x', 'placeOrder', 'message']);
+      .toEqual(['Go', 'placeOrder']);
     expect(mutationNames('query Q { paymentMethods { id } }')).toEqual([]);
   });
 
@@ -342,5 +342,158 @@ describe('blocked mutations', () => {
     x.send(new Blob(['{"operationName":"submit_order"}']));
     await tick();
     expect(sent).toEqual(['aborted']);
+  });
+});
+
+describe('round 2: sessions and users', () => {
+  it('a user change while a prepare waits for its token sends nothing and is cancelled', async () => {
+    let asked = 0;
+    let give!: (s: string) => void;
+    const t = setup((p) => (p.endsWith('/carts') ? t.start([done(CART)]) : ok({})), {}, {
+      userId: 'A', getSessionToken: () => { asked += 1; return asked === 1 ? new Promise<string>((r) => { give = r; }) : Promise.resolve('tokB'); },
+    });
+    const p = t.client.prepareCart({ recipe }).catch((e) => e);
+    await tick();
+    t.client.setUser('B');
+    give('tokA');
+    expect(await p).toMatchObject({ code: 'cancelled' });
+    expect(t.sent).toEqual([]);
+    expect(asked).toBe(1);
+  });
+
+  it('to nobody: cancelled, not not_signed_in', async () => {
+    let give!: (s: string) => void;
+    const t = setup((p) => (p.endsWith('/carts') ? t.start([done(CART)]) : ok({})), {}, {
+      userId: 'A', getSessionToken: () => new Promise<string>((r) => { give = r; }),
+    });
+    const p = t.client.prepareCart({ recipe }).catch((e) => e);
+    await tick();
+    t.client.setUser(null);
+    give('tokA');
+    expect(await p).toMatchObject({ code: 'cancelled' });
+    expect(t.sent).toEqual([]);
+  });
+
+  it("an add's 401 after a user change fails as session_expired, never with the new user's token", async () => {
+    const tokens = ['tokA', 'tokB'];
+    let steps = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const t = setup((p) => {
+      if (p.endsWith('/add')) return t.start([open('o')]);
+      if (p.includes('/step')) { steps += 1; return steps === 1 ? { ok: false, status: 401, json: async () => ({}) } : ok({ envelope: env('job1', 2, [done({ added: [] })]) }); }
+      return ok({});
+    }, { async openPage(_s, url) { await gate; return { ok: true, finalUrl: url }; } }, { userId: 'A', getSessionToken: async () => tokens.shift()! });
+    const a = t.client.addToCart('c', []).catch((e) => e);
+    await tick();
+    t.client.setUser('B');
+    release();
+    expect(await a).toMatchObject({ code: 'session_expired' });
+    expect(t.sent.map((s) => s.auth)).toEqual(['Bearer tokA', 'Bearer tokA']);
+  });
+
+  it('an add keeps the token of the moment it was asked for, even after a queue wait', async () => {
+    const tokens = ['tokA', 'tokB'];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const t = setup((p) => (p.endsWith('/carts') ? t.start([open('o'), done(CART)]) : p.endsWith('/add') ? t.start([done({ added: [] })]) : ok({})),
+      { async openPage(_s, url) { await gate; return { ok: true, finalUrl: url }; } },
+      { userId: 'A', getSessionToken: async () => tokens.shift()! });
+    const prep = t.client.prepareCart({ recipe }).catch((e) => e);
+    await tick();
+    const add = t.client.addToCart('c', []);
+    await tick();
+    t.client.setUser('B');
+    release();
+    await prep;
+    await add;
+    expect(t.sent.filter((s) => s.path.endsWith('/add')).map((s) => s.auth)).toEqual(['Bearer tokA']);
+  });
+
+  it("an add's 401 with the same user renews the token once", async () => {
+    const tokens = ['t1', 't2'];
+    let steps = 0;
+    const t = setup((p) => {
+      if (p.endsWith('/add')) return t.start([open('o')]);
+      steps += 1;
+      return steps === 1 ? { ok: false, status: 401, json: async () => ({}) } : ok({ envelope: env('job1', 2, [done({ added: [] })]) });
+    }, {}, { userId: 'A', getSessionToken: async () => tokens.shift()! });
+    await t.client.addToCart('c', []);
+    expect(t.sent.map((s) => s.auth)).toEqual(['Bearer t1', 'Bearer t1', 'Bearer t2']);
+  });
+});
+
+describe('round 2: runExclusive', () => {
+  it('a late function gets network, but the queue stays held until it really ends', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let finish!: () => void;
+    let seen: CancelToken | undefined;
+    const t = setup((p) => (p.endsWith('/carts') ? t.start([done(CART)]) : ok({})));
+    const ex = t.client.runExclusive((cancel) => { seen = cancel; return new Promise<void>((r) => { finish = r; }); }).catch((e) => e);
+    const prep = t.client.prepareCart({ recipe });
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 10);
+    expect(await ex).toMatchObject({ code: 'network' });
+    expect(seen!.cancelled).toBe(true);
+    expect(t.sent).toEqual([]);
+    finish();
+    await prep;
+    expect(paths(t.sent)).toEqual(['/carts']);
+  });
+});
+
+describe('round 2: restorePicks', () => {
+  it('keeps a product the user found with search, with its quantity', async () => {
+    const mk = () => ({ cartId: 'c', store: 'heb', ready: [], needsChoice: [], unavailable: [], items: [
+      { key: 'g', ingredient: 'garlic', quantity: 1, status: 'remembered', selectedId: 'p1', options: [{ id: 'p1', name: 'Garlic bulb', unitPrice: 1 }] }] } as any);
+    const client = { search: async () => ({ options: [{ id: 'p9', name: 'Minced garlic jar', unitPrice: 4 }] }) } as any;
+    const a = new CartSession(client, mk());
+    await a.search('g', 'minced garlic jar');
+    a.select('g', 'p9');
+    a.setQuantity('g', 2);
+    const b = new CartSession(client, mk());
+    b.restorePicks(a);
+    expect(b.selections()).toEqual([{ key: 'g', productId: 'p9', quantity: 2, remember: true, preferenceId: null }]);
+    expect(b.options('g').map((p) => p.id)).toEqual(['p1', 'p9']);
+  });
+});
+
+describe('round 2: guard', () => {
+  function guard() {
+    const sent: string[] = [];
+    const win: any = { location: { href: 'https://www.heb.com/' }, Blob, ArrayBuffer, URLSearchParams, FormData, ReadableStream, Request, encodeURIComponent };
+    win.fetch = (u: any) => { sent.push(String(u?.url ?? u)); return Promise.resolve('ok'); };
+    win.window = win;
+    vm.createContext(win);
+    vm.runInContext(GUARD_SCRIPT, win);
+    return { win, sent };
+  }
+  const outcome = (p: Promise<unknown>) => p.then(() => 'sent', () => 'refused');
+  const stream = () => new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('{"operationName":"PlaceOrder"}')); c.close(); } });
+
+  it('reads a multipart FormData upload by its operations field', async () => {
+    const { win, sent } = guard();
+    const fd = new FormData();
+    fd.append('operations', JSON.stringify({ query: 'mutation { placeOrder(id: 1) { id } }', variables: {} }));
+    fd.append('map', '{}');
+    expect(await outcome(win.fetch('https://www.heb.com/graphql', { method: 'POST', body: fd }))).toBe('refused');
+    const ok2 = new FormData();
+    ok2.append('operations', JSON.stringify([{ operationName: 'Upload', query: 'mutation Upload { uploadPhoto { id } }' }]));
+    expect(await outcome(win.fetch('https://www.heb.com/graphql', { method: 'POST', body: ok2 }))).toBe('sent');
+    expect(sent).toEqual(['https://www.heb.com/graphql']);
+  });
+
+  it('lets a body it cannot read through, but never past a blocked path', async () => {
+    const { win, sent } = guard();
+    expect(await outcome(win.fetch('https://www.heb.com/graphql', { method: 'POST', body: stream(), duplex: 'half' }))).toBe('sent');
+    expect(await outcome(win.fetch('https://www.heb.com/checkout/submit', { method: 'POST', body: stream(), duplex: 'half' }))).toBe('refused');
+    const used = new Request('https://www.heb.com/graphql', { method: 'POST', body: 'x' });
+    await used.text();
+    expect(await outcome(win.fetch(used))).toBe('sent');
+    expect(sent).toEqual(['https://www.heb.com/graphql', 'https://www.heb.com/graphql']);
+  });
+
+  it('judges only a mutation root: nested fields and aliases pass, root fields block', () => {
+    expect(mutationNames('mutation AddToCart { addItemsToCart { cart { items { maxPurchaseQuantity } } } }')).toEqual(['AddToCart', 'addItemsToCart']);
+    expect(mutationNames('mutation { a: placeOrder { id } ... on Mutation { ...F } } fragment F on Mutation { checkout { id } }')).toEqual(['placeOrder', 'checkout']);
   });
 });

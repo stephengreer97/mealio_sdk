@@ -309,6 +309,8 @@ final class MealioFlowModel: ObservableObject {
     private var onAdded: ((AddResult) -> Void)?
     private var onError: ((Error) -> Void)?
     private var runAfterClose: (() -> Void)?
+    /// The sheet was hidden mid-add: `onClose`, called when the add ends.
+    private var reportAfterAdd: ((AddResult?) -> Void)?
 
     // VERIFY: nonisolated so @StateObject's default value can build it; every
     // property default above is a plain constant.
@@ -428,8 +430,13 @@ final class MealioFlowModel: ObservableObject {
             } catch {
                 guard let self = self, self.run == id else { return }
                 let code = (error as? MealioError)?.code
-                // Stopped on purpose: nothing to report.
-                if code == MealioError.Code.cancelled { return }
+                // Never an error. Closing bumped `run`, so this was something
+                // else (a store sign-out, cancelJobs): the sheet is still up, so
+                // prepare again. A user change closes the sheet instead.
+                if code == MealioError.Code.cancelled {
+                    if self.hosting && !self.closeRequested { self.start() }
+                    return
+                }
                 if code == MealioError.Code.storeRequired || code == MealioError.Code.storeNotAllowed {
                     // No store given, or one this app does not offer: let the user pick.
                     self.store = nil
@@ -499,22 +506,48 @@ final class MealioFlowModel: ObservableObject {
         let id = run
         phase = .adding
         MealioCart.emit(.addStarted(items: cart.estimate().count))
-        Task { [weak self] in
+        // Holds the model: a sheet hidden mid-add still reports when it ends.
+        Task {
+            let outcome: Result<AddResult, Error>
             do {
                 let r = try await cart.addToCart()
-                guard let self = self, self.run == id else { return }
-                self.result = r
-                self.phase = .done
-                MealioCart.emit(.cartAdded(store: r.store, added: r.added.count, failed: r.failed.count))
-                self.onAdded?(r)
-                self.afterAdd()
+                outcome = .success(r)
             } catch {
-                guard let self = self, self.run == id else { return }
-                self.failedAdd = cart
-                self.fail(error, step: .adding, fallback: MealioCart.text.tr(.couldNotAdd))
-                self.afterAdd()
+                outcome = .failure(error)
             }
+            self.addEnded(outcome, cart: cart, run: id)
         }
+    }
+
+    private func addEnded(_ outcome: Result<AddResult, Error>, cart: CartSession, run id: Int) {
+        if let report = reportAfterAdd {
+            // The partner hid the sheet while adding. Nothing is drawn now,
+            // but the partner still hears how it went.
+            reportAfterAdd = nil
+            switch outcome {
+            case .success(let r):
+                MealioCart.emit(.cartAdded(store: r.store, added: r.added.count, failed: r.failed.count))
+                onAdded?(r)
+                report(r)
+            case .failure(let e):
+                MealioCart.emit(.error(code: (e as? MealioError)?.code ?? "error", step: .adding))
+                onError?(e)
+                report(nil)
+            }
+            return
+        }
+        guard run == id else { return }
+        switch outcome {
+        case .success(let r):
+            result = r
+            phase = .done
+            MealioCart.emit(.cartAdded(store: r.store, added: r.added.count, failed: r.failed.count))
+            onAdded?(r)
+        case .failure(let e):
+            failedAdd = cart
+            fail(e, step: .adding, fallback: MealioCart.text.tr(.couldNotAdd))
+        }
+        afterAdd()
     }
 
     /// The user changed while adding: now the sheet can close.
@@ -536,7 +569,7 @@ final class MealioFlowModel: ObservableObject {
     /// The sheet went away. Stops what can be stopped, cancels an open
     /// sign-in, reports once (the result when the cart was filled, nil
     /// otherwise), then runs the done action.
-    func close(_ report: (AddResult?) -> Void) {
+    func close(_ report: @escaping (AddResult?) -> Void) {
         closeNow(report)
         runPendingAfterClose()
     }
@@ -544,16 +577,20 @@ final class MealioFlowModel: ObservableObject {
     /// A close button: report now, so `onClose` fires even where dismissing
     /// does nothing (a UIKit host). The done action waits for the sheet to go,
     /// or a second, whichever is first.
-    func closeFromButton(_ report: (AddResult?) -> Void) {
+    func closeFromButton(_ report: @escaping (AddResult?) -> Void) {
         closeNow(report)
         if runAfterClose != nil {
             after(1000) { [weak self] in self?.runPendingAfterClose() }
         }
     }
 
-    private func closeNow(_ report: (AddResult?) -> Void) {
+    /// Hidden mid-add (the partner set `isPresented` false; the user cannot
+    /// close then), the add runs on and `report` waits for it. The sheet stops
+    /// hosting sign-in, so a sign-in the add asks for later is shown modally.
+    private func closeNow(_ report: @escaping (AddResult?) -> Void) {
         guard hosting else { return }
         hosting = false
+        let adding = phase == .adding
         run += 1
         // Nothing it was doing reports afterwards. An add is not stopped.
         preparing?.cancel()
@@ -568,6 +605,10 @@ final class MealioFlowModel: ObservableObject {
         userSub = nil
         login = nil
         host?.hostLogin(false)
+        if adding {
+            reportAfterAdd = report
+            return
+        }
         report(outcome)
     }
 

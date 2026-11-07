@@ -12,9 +12,30 @@
   check the cart (`addFailedNote`). `CartSession.restorePicks`, `searching`,
   `cancelSearches`, `warnings`; `addToCart` called twice returns one future.
 - Totals add up in whole cents; the quantity shown is the one sent.
-- Blocked requests also cover operation and field names in any mutation,
-  snake_case and form-encoded bodies, and more order paths. The guard script
-  reads Request objects and Blob bodies.
+- Blocked requests also cover a mutation's name and its root fields (inline
+  fragments and fragment spreads at the root included; nested fields,
+  arguments and variables never count), snake_case and form-encoded bodies,
+  GraphQL multipart `operations`, and more order paths. Escaped strings and
+  block strings are skipped. The guard script reads Request objects and Blob
+  bodies; a body it cannot read goes through unless its path is blocked.
+- A user change while a prepare or search waits for its session token cancels
+  it: it never takes the next user's token. An add keeps the token it was
+  tapped under, also on a 401, which fails with `session_expired` after a
+  user change.
+- `runExclusive` holds the queue until its work really ends, even after it
+  reports a timeout.
+- `MealioCartButton` passes prop changes (store, recipes, zip) to its open
+  sheet and its Try again. A sheet hidden during an add still reports the add
+  through `onAdded` and `onClose`. A prepare cancelled by `cancelJobs` or a
+  store sign-out while the sheet is open starts again, with no error.
+- `restorePicks` keeps products the user found with search.
+- Calling `configure` again keeps the user from `setUser`, and widgets follow
+  the new instance (`MealioCart.changes`).
+- The hidden page takes a new bridge nonce for every script, so a late message
+  from the last script cannot answer the next.
+- `package:mealio_sdk/testing.dart`: `installMealioTestPlatform`,
+  `configureMealioForTesting` and a fake WebView platform for widget tests.
+  The job queue works across separate `testWidgets` in one file.
 - The hidden page: a stale or replaced page's finish no longer answers a load,
   a timed-out load is stopped, a blocked page that starts on its own is
   replaced with a blank one, and an open sheet follows a remounted

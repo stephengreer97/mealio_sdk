@@ -1,6 +1,11 @@
 package co.mealio.sdk
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.roundToLong
 
@@ -283,19 +288,26 @@ class CartSession internal constructor(
      * Take the user's picks from an earlier cart, after a failed add. Works by
      * item key, on the same store: what they unticked stays unticked, and a
      * product still offered comes back with its quantity, weight and preference.
-     * A product no longer offered leaves the item as this cart set it.
+     * Products the user found with search() come along into this cart's
+     * options, so a searched pick stays too. A product no longer offered
+     * leaves the item as this cart set it.
      */
     fun restorePicks(from: CartSession) {
         if (from === this || from.store != store) return
         // Read the old cart first, so the two locks are never held together.
-        class Old(val known: Boolean, val productId: String?, val pref: String?, val qty: Int?, val lb: Double?)
+        class Old(val known: Boolean, val productId: String?, val pref: String?, val qty: Int?, val lb: Double?, val found: List<Product>)
         val old = synchronized(from) {
-            items.associate { it.key to Old(from.find(it.key) != null, from.picks[it.key]?.productId, from.picks[it.key]?.preferenceId, from.qty[it.key], from.lb[it.key]) }
+            items.associate { it.key to Old(from.find(it.key) != null, from.picks[it.key]?.productId, from.picks[it.key]?.preferenceId, from.qty[it.key], from.lb[it.key], from.extra[it.key] ?: emptyList()) }
         }
         synchronized(this) {
             for (it in items) {
                 val o = old[it.key] ?: continue
                 if (!o.known) continue
+                if (o.found.isNotEmpty()) {
+                    val prev = extra[it.key] ?: emptyList()
+                    val seen = prev.mapTo(HashSet()) { p -> p.id }
+                    extra[it.key] = prev + o.found.filter { p -> p.id !in seen }
+                }
                 val productId = o.productId
                 if (productId == null) { deselect(it.key); continue }
                 val product = options(it.key).firstOrNull { p -> p.id == productId } ?: continue
@@ -412,22 +424,29 @@ class CartSession internal constructor(
     /**
      * Fill the store cart with the current selections. A second call while one
      * is running waits for that same add instead of starting another.
+     *
+     * Once called the add runs to its end: it belongs to no caller, so a
+     * caller cancelled while waiting stops waiting but not the add, and every
+     * other caller still gets its result.
      */
     @JvmOverloads
     suspend fun addToCart(onStep: StepListener? = null): AddResult {
         val mine = CompletableDeferred<AddResult>()
         val running = synchronized(searches) { adding ?: run { adding = mine; null } }
         if (running != null) return running.await()
-        try {
-            val r = client.addToCart(cart.cartId, selections(), onStep)
-            mine.complete(r)
-            return r
-        } catch (e: Throwable) {
-            mine.completeExceptionally(e)
-            throw e
-        } finally {
+        val sel = selections()
+        // The caller's dispatcher, without its Job: cancelling the caller does not reach the add.
+        CoroutineScope(currentCoroutineContext().minusKey(Job)).launch(start = CoroutineStart.UNDISPATCHED) {
+            val r = try {
+                Result.success(client.addToCart(cart.cartId, sel, onStep))
+            } catch (e: Throwable) {
+                Result.failure(e)
+            }
+            // Not adding any more before anyone hears the result.
             synchronized(searches) { if (adding === mine) adding = null }
+            r.fold({ mine.complete(it) }, { mine.completeExceptionally(it) })
         }
+        return mine.await()
     }
 
     // ── 0.1 API ──────────────────────────────────────────────────────────

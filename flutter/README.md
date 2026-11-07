@@ -25,11 +25,15 @@ itself. See [PROTOCOL.md](../PROTOCOL.md).
 dependencies:
   mealio_sdk:
     git:
-      url: https://github.com/mealio/mealio-sdk.git
+      url: https://github.com/stephengreer97/mealio_sdk
       path: flutter
 ```
 
-Requirements: Dart 3.3+, Flutter 3.19+, Android minSdk 21+, iOS 12+.
+Requirements: Dart 3.3+, Flutter 3.19+, Android minSdk 24+, iOS 13.0+. The
+Android and iOS floors are those of the plugins the SDK uses, at the versions
+it resolves today: webview_flutter_android 4.x and shared_preferences_android
+need minSdk 24, and webview_flutter_wkwebview and shared_preferences_foundation
+need iOS 13.0.
 
 Android: make sure your release manifest has
 `<uses-permission android:name="android.permission.INTERNET" />` (Flutter
@@ -279,7 +283,9 @@ MealioCart.instance.setUser(user?.id); // null when nobody is signed in
 ```
 
 A change stops any cart being prepared, starts a new session and signs the old
-user out of the stores, so a new user never sees the last one's cart. An add
+user out of the stores, so a new user never sees the last one's cart. On
+Flutter that sign-out clears **every** WebView cookie in your app, not only the
+stores' (see below). An add
 already under way finishes first. While it is null there is no session and no
 warm-up, and `MealioCartButton` calls `onSignInRequired` (on the button, or
 given to `configure`), or is disabled without one. Store settings do the same.
@@ -292,9 +298,15 @@ await MealioCart.instance.signOutOfStore('heb');
 ```
 
 webview_flutter can only clear **all** WebView cookies, not one site's, so
-`signOutOfStore` signs the user out of every store (and clears any other
-WebView cookies in your app). Both bump a stored store-session epoch that the
-SDK reports to Mealio with its next cart.
+`signOutOfStore` signs the user out of every store. Both, and a `setUser`
+change away from a signed-in user, clear **every WebView cookie in your app**,
+including those of your own WebViews. Both bump a stored store-session epoch
+that the SDK reports to Mealio with its next cart.
+
+The epoch is kept in `SharedPreferences` under the key
+`mealio_sdk.store_epoch`. If your app calls `SharedPreferences.clear()`, that
+wipes it too and the count starts again at 0. If you clear preferences, keep
+this key.
 
 ## Errors
 
@@ -341,6 +353,47 @@ Every failure is a `MealioException(code, message)`.
   `fetch(url, {credentials: 'include'})` and the response comes back over the
   bridge (truncated to `maxBytes` in JS). The server opens a store page first,
   so the request is same-origin with the store's cookies.
+
+## Testing your screens
+
+`package:mealio_sdk/testing.dart` lets a widget test pump a screen that holds
+`MealioScope` and `MealioCartButton`. There is no WebView under `flutter
+test`, so install the fake one first:
+
+```dart
+import 'package:mealio_sdk/testing.dart';
+
+setUp(() {
+  installMealioTestPlatform();        // fake WebView + in-memory SharedPreferences
+  configureMealioForTesting(           // MealioCart.configure, no network
+    onSignInRequired: () => signInShown = true,
+  );
+});
+
+testWidgets('recipe screen', (tester) async {
+  await tester.pumpWidget(const MyApp()); // with MealioScope and MealioCartButton
+  MealioCart.instance.setUser(null);
+  await tester.pump();
+  await tester.tap(find.byType(MealioCartButton));
+  expect(signInShown, isTrue);
+});
+```
+
+- `installMealioTestPlatform({preferences})` sets `WebViewPlatform.instance`
+  to `MealioFakeWebViewPlatform` (it draws an empty box and loads nothing) and
+  gives `SharedPreferences` an in-memory store. Call it in `setUp`.
+- `configureMealioForTesting({httpClient, sessionTokenProvider,
+  onSignInRequired})` configures the SDK with every request going to
+  `httpClient`. Without one, each request gets a 503 `server` error
+  (`mealioTestErrorResponse()`), so a tapped button opens the sheet on its
+  error screen and the warm-up does nothing.
+- `MealioFakeWebViewController.all` holds every WebView the SDK made, with the
+  loads and scripts it asked for.
+- To test the sheet with a list of your own, open it with
+  `MealioCartFlow.show(context, recipe: r, prepareCart: ...)` and return a
+  `CartSession` from `prepareCart`.
+
+The SDK's job queue works across separate `testWidgets` in one file.
 
 ## Development
 

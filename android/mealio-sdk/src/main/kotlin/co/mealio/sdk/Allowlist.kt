@@ -120,7 +120,7 @@ private val URL_RE = Regex("^([a-z][a-z0-9+.-]*)://([^/?#]*)([^#]*)", RegexOptio
 private val AUTHORITY_RE = Regex("^([a-z0-9-]+(?:\\.[a-z0-9-]+)*)(?::\\d{1,5})?$", RegexOption.IGNORE_CASE)
 private val PERCENT_RE = Regex("%([0-9a-fA-F]{2})")
 private val OPERATION_NAME_RE = Regex("\"operationName\"\\s*:\\s*\"([^\"]*)\"")
-private val FORM_FIELD_RE = Regex("(?:^|&)(operationName|query)=([^&]*)")
+private val FORM_FIELD_RE = Regex("(?:^|&)(operationName|query|operations)=([^&]*)")
 private val OPS_RE = Regex(BLOCKED_GRAPHQL_OPERATION, RegexOption.IGNORE_CASE)
 
 /**
@@ -204,8 +204,8 @@ private fun isNameStart(c: Char) = c in 'A'..'Z' || c in 'a'..'z' || c == '_'
 private fun isNamePart(c: Char) = isNameStart(c) || c in '0'..'9'
 
 /**
- * Names and the tokens { } ( ) of a GraphQL document, with block strings,
- * strings and comments left out. A hand-written scanner rather than the
+ * Names and the tokens ... { } ( ) : @ of a GraphQL document, with block
+ * strings (\""" inside them included), strings and comments left out. A hand-written scanner rather than the
  * reference's regex, which java.util.regex can overflow its stack on with a
  * long string; it reads the same tokens.
  */
@@ -217,7 +217,17 @@ private fun graphqlTokens(doc: String): List<String> {
         val c = doc[i]
         if (c == '"') {
             if (doc.startsWith("\"\"\"", i)) {
-                val end = doc.indexOf("\"\"\"", i + 3)
+                // """(?:\\"""|[\s\S])*?""": the first """ not escaped as \""" ends
+                // it. With none, the regex backtracks: the last \""" ends it.
+                var j = i + 3
+                var end = -1
+                var lastEscaped = -1
+                while (j < n) {
+                    if (doc.startsWith("\"\"\"", j)) { end = j; break }
+                    if (doc[j] == '\\' && doc.startsWith("\"\"\"", j + 1)) { lastEscaped = j; j += 4; continue }
+                    j += 1
+                }
+                if (end < 0 && lastEscaped >= 0) end = lastEscaped + 1
                 if (end >= 0) { i = end + 3; continue }
             }
             // "(?:[^"\\]|\\.)*": a backslash escapes any one character but a line end.
@@ -239,7 +249,8 @@ private fun graphqlTokens(doc: String): List<String> {
             while (i < n && doc[i] != '\n' && doc[i] != '\r') i += 1
             continue
         }
-        if (c == '{' || c == '}' || c == '(' || c == ')') { out.add(c.toString()); i += 1; continue }
+        if (c == '.' && doc.startsWith("...", i)) { out.add("..."); i += 3; continue }
+        if (c == '{' || c == '}' || c == '(' || c == ')' || c == ':' || c == '@') { out.add(c.toString()); i += 1; continue }
         if (isNameStart(c)) {
             val start = i
             while (i < n && isNamePart(doc[i])) i += 1
@@ -252,36 +263,87 @@ private fun graphqlTokens(doc: String): List<String> {
 }
 
 /**
- * Every name a GraphQL document's mutations use: the operation's name and the
- * fields it selects at any depth, aliases included, plus the fields of its
- * fragments. Arguments and `on Type` conditions are not fields. Empty when the
- * document has no mutation, so a query may read a field called paymentMethods.
- * Port of mutationNames in packages/core/src/allowlist.ts.
+ * The names a GraphQL document's mutations are judged by: each mutation's own
+ * name, and its ROOT fields. A root field is a field in the mutation's top
+ * selection set, in an inline fragment at that level (`... on Mutation { x }`),
+ * or at the top of a fragment spread there (followed through further spreads).
+ * Aliases, nested fields, arguments, variables, directives, strings and
+ * comments are never names. A query, subscription or fragment on its own gives
+ * none, so a mutation may select `cart { checkoutUrl }` and a query may read
+ * `paymentMethods`. Port of mutationNames in packages/core/src/allowlist.ts.
  */
 fun mutationNames(doc: String): List<String> {
-    val names = ArrayList<String>()
-    var braces = 0
-    var parens = 0
-    var kind = ""
-    var mutation = false
-    var afterOn = false
-    for (t in graphqlTokens(doc)) {
-        when {
-            t == "(" -> parens += 1
-            t == ")" -> parens = maxOf(0, parens - 1)
-            parens > 0 -> continue
-            t == "{" -> braces += 1
-            t == "}" -> { braces = maxOf(0, braces - 1); if (braces == 0) kind = "" }
-            braces == 0 && kind.isEmpty() && t in GRAPHQL_KINDS -> {
-                kind = t
-                if (t == "mutation") mutation = true
-            }
-            afterOn -> afterOn = false
-            t == "on" -> afterOn = true
-            kind == "mutation" || kind == "fragment" -> names.add(t)
-        }
+    class Def(val kind: String) {
+        var name = ""
+        val fields = ArrayList<String>()
+        val spreads = ArrayList<String>()
     }
-    return if (mutation) names else emptyList()
+    val defs = ArrayList<Def>()
+    var def: Def? = null
+    // One entry per open selection set: true when it is at its definition's root.
+    val sets = ArrayList<Boolean>()
+    var parens = 0
+    var inline = false
+    var expect = ""
+    var pushed = false
+    for (t in graphqlTokens(doc)) {
+        val was = pushed
+        pushed = false
+        if (t == "(") { parens += 1; continue }
+        if (t == ")") { parens = maxOf(0, parens - 1); continue }
+        if (parens > 0) continue
+        if (t == "@") { expect = "directive"; continue }
+        if (t == "{") {
+            if (def == null) { def = Def("query"); defs.add(def) }
+            sets.add(sets.isEmpty() || (inline && sets.last()))
+            inline = false; expect = ""
+            continue
+        }
+        if (t == "}") {
+            if (sets.isNotEmpty()) sets.removeAt(sets.size - 1)
+            inline = false; expect = ""
+            if (sets.isEmpty()) def = null
+            continue
+        }
+        if (sets.isEmpty()) {
+            // A definition's header: its keyword, its name, and nothing else counts.
+            if (expect == "directive") expect = ""
+            else if (def == null && t in GRAPHQL_KINDS) { def = Def(t); defs.add(def) }
+            else if (def != null && def.name.isEmpty() && t != "on" && t != ":" && t != "...") def.name = t
+            continue
+        }
+        val root = sets.last()
+        if (t == "...") { expect = "spread"; inline = true; continue }
+        if (t == ":") { if (was && def != null) def.fields.removeAt(def.fields.size - 1); continue }
+        if (expect == "directive" || expect == "type") { expect = ""; continue }
+        if (expect == "spread") {
+            expect = ""
+            if (t == "on") { expect = "type"; continue }
+            inline = false
+            if (root && def != null) def.spreads.add(t)
+            continue
+        }
+        inline = false
+        if (root && def != null) { def.fields.add(t); pushed = true }
+    }
+    // new Map(entries) in the reference: a later fragment of the same name replaces an earlier one.
+    val fragments = HashMap<String, Def>()
+    for (d in defs) if (d.kind == "fragment") fragments[d.name] = d
+    val names = ArrayList<String>()
+    for (d in defs) {
+        if (d.kind != "mutation") continue
+        if (d.name.isNotEmpty()) names.add(d.name)
+        val seen = HashSet<String>()
+        fun walk(x: Def) {
+            names.addAll(x.fields)
+            for (sp in x.spreads) {
+                val f = fragments[sp]
+                if (f != null && seen.add(sp)) walk(f)
+            }
+        }
+        walk(d)
+    }
+    return names
 }
 
 private val GRAPHQL_KINDS = setOf("mutation", "query", "subscription", "fragment")
@@ -302,8 +364,9 @@ private fun parseJsonBody(body: String): Any? {
 /**
  * Does a request body name a blocked operation? Reads `operationName` the way
  * the server will (after JSON parsing, so `\\u004f` escapes do not hide it),
- * for a single request or a batch, or form-encoded, and every name in any
- * mutation (see mutationNames). A persisted query that sends only an innocent
+ * for a single request or a batch, or form-encoded, and the names of every
+ * mutation it carries (see mutationNames). A GraphQL multipart upload's
+ * `operations` field is JSON and is judged like a JSON body. A persisted query that sends only an innocent
  * name and a hash cannot be read here; the signature on the envelope covers it.
  * The guard script applies the same rule to requests a page script makes; this
  * applies it to the runner's own `fetch` op, which never passes through the page.
@@ -329,7 +392,12 @@ fun bodyBlocked(body: String?): Boolean {
         docs.add(body)
         for (m in FORM_FIELD_RE.findAll(body)) {
             val v = decodePercent(m.groupValues[2].replace('+', ' '))
-            if (m.groupValues[1] == "query") docs.add(v) else names.add(v)
+            when (m.groupValues[1]) {
+                "query" -> docs.add(v)
+                // GraphQL multipart: `operations` is JSON, judged like a JSON body.
+                "operations" -> if (bodyBlocked(v)) return true
+                else -> names.add(v)
+            }
         }
     }
     for (d in docs) names.addAll(mutationNames(d))

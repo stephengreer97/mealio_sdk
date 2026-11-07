@@ -467,6 +467,60 @@ data class PreparedCart(
     /** What the server changed or ignored in what was sent. Empty from older servers. */
     val warnings: List<CartWarning> = emptyList(),
 ) {
+    /** 0.5's constructor (before `warnings`), kept for Java and for code built against 0.5. */
+    constructor(
+        cartId: String,
+        store: String,
+        ready: List<CartItem>,
+        needsChoice: List<CartItem>,
+        unavailable: List<CartItem>,
+        items: List<CartItem>,
+        storeName: String?,
+        recipes: List<CartRecipe>,
+        location: StoreLocation?,
+    ) : this(cartId, store, ready, needsChoice, unavailable, items, storeName, recipes, location, emptyList())
+
+    /**
+     * The default-argument form of 0.5's constructor, which Kotlin code built
+     * against 0.5 calls: bit i of `mask` set means parameter i was left out.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    @Deprecated("Kept for binary compatibility", level = DeprecationLevel.HIDDEN)
+    constructor(
+        cartId: String,
+        store: String,
+        ready: List<CartItem>,
+        needsChoice: List<CartItem>,
+        unavailable: List<CartItem>,
+        items: List<CartItem>?,
+        storeName: String?,
+        recipes: List<CartRecipe>?,
+        location: StoreLocation?,
+        mask: Int,
+        marker: kotlin.jvm.internal.DefaultConstructorMarker?,
+    ) : this(
+        cartId, store, ready, needsChoice, unavailable,
+        if (mask and 0x20 != 0 || items == null) ready + needsChoice + unavailable else items,
+        if (mask and 0x40 != 0) null else storeName,
+        if (mask and 0x80 != 0 || recipes == null) emptyList() else recipes,
+        if (mask and 0x100 != 0) null else location,
+        emptyList(),
+    )
+
+    /** 0.5's copy, kept for code built against it. */
+    @Deprecated("Kept for binary compatibility", level = DeprecationLevel.HIDDEN)
+    fun copy(
+        cartId: String = this.cartId,
+        store: String = this.store,
+        ready: List<CartItem> = this.ready,
+        needsChoice: List<CartItem> = this.needsChoice,
+        unavailable: List<CartItem> = this.unavailable,
+        items: List<CartItem> = this.items,
+        storeName: String? = this.storeName,
+        recipes: List<CartRecipe> = this.recipes,
+        location: StoreLocation? = this.location,
+    ): PreparedCart = PreparedCart(cartId, store, ready, needsChoice, unavailable, items, storeName, recipes, location, warnings)
+
     companion object {
         fun fromJson(o: JSONObject): PreparedCart {
             fun group(name: String) = o.arr(name)?.objects()?.map { CartItem.fromJson(it, name) } ?: emptyList()

@@ -3,6 +3,7 @@ package co.mealio.sdk
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -171,15 +172,7 @@ object MealioCart {
     fun setUser(id: String?) {
         userState.value = MealioUser(tracked = true, id = id)
         val s = state ?: return
-        if (s.client.setUser(id)) {
-            scope.launch {
-                try {
-                    s.client.runExclusive { clearAllStores(s) }
-                } catch (e: Throwable) {
-                    // A failed store sign-out never blocks a user change.
-                }
-            }
-        }
+        if (s.client.setUser(id)) queueExclusive(scope, s.client) { clearAllStores(s) }
     }
 
     /** Stop every cart still loading and every search. An add runs on. */
@@ -211,6 +204,22 @@ object MealioCart {
         s.client.cancelJobs()
         s.client.resetSession()
         s.client.runExclusive { clearAllStores(s) }
+    }
+
+    /**
+     * Run `block` in the client's job queue from non-suspending code. Undispatched,
+     * so it takes its place in the queue before this returns: a cart started
+     * after this call (the next user's, after setUser) runs after it, never
+     * before. A failure is dropped: a failed store sign-out never blocks a user change.
+     */
+    internal fun queueExclusive(scope: CoroutineScope, client: MealioClient, block: suspend () -> Unit) {
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            try {
+                client.runExclusive(block)
+            } catch (e: Throwable) {
+                // See above.
+            }
+        }
     }
 
     private suspend fun clearAllStores(s: State) {

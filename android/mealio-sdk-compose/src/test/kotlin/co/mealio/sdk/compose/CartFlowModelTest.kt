@@ -154,10 +154,10 @@ class CartFlowModelTest {
         val ui = MealioUi(onEvent = { events += it })
         val dispatcher = StandardTestDispatcher(test.testScheduler)
 
-        fun model(store: String? = "heb", user: MealioUser = MealioUser()) = CartFlowModel(
+        fun model(store: String? = "heb", user: MealioUser = MealioUser(), now: () -> MealioUser = { user }, flowLogin: FlowLogin = login) = CartFlowModel(
             listOf(Recipe("r", listOf(RecipeIngredient("milk")))), store, ui,
             FlowCallbacks({ closed += it }, { addedResults += it }, { errors += it }),
-            backend, login, dispatcher, user,
+            backend, flowLogin, dispatcher, user, now,
         ).also { it.attach() }
     }
 
@@ -178,7 +178,8 @@ class CartFlowModelTest {
         val again = FlowModels.obtain("rot", openedNow = false) { error("a new model would restart the flow") }
         assertSame(m, again)
         h.openGate!!.complete(Unit)
-        advanceUntilIdle()
+        // The new screen comes within a frame or two, well inside RECLAIM_MS.
+        runCurrent()
         // Nothing is said to the partner while no screen shows it ...
         assertTrue(h.addedResults.isEmpty())
         assertEquals(Phase.DONE, m.phase)
@@ -435,5 +436,137 @@ class CartFlowModelTest {
         assertEquals(ButtonTap.SIGN_IN, buttonTap(signedIn = false, enabled = true, onSignInRequired = {}))
         assertEquals(ButtonTap.OFF, buttonTap(signedIn = false, enabled = true, onSignInRequired = null))
         assertEquals(ButtonTap.OFF, buttonTap(signedIn = true, enabled = false, onSignInRequired = {}))
+    }
+
+    // ── 0.6 round 2 ─────────────────────────────────────────────────
+
+    @Test
+    fun aPrepareCancelledFromOutsideLoadsAgainAndShowsNoError() = runTest {
+        val h = Harness(this)
+        h.openGate = CompletableDeferred()
+        h.answer = { p, _ -> h.start(p, open(), done(cart())) }
+        val m = h.model()
+        runCurrent()
+        // signOutOfStore / cancelJobs while the sheet is open.
+        h.client.cancelJobs()
+        h.openGate!!.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(Phase.LIST, m.phase)
+        assertTrue(h.errors.isEmpty())
+        assertTrue(h.events.none { it is MealioEvent.Error })
+        assertEquals(2, h.sent.count { it.endsWith("/carts") })
+        assertFalse(m.finished)
+    }
+
+    @Test
+    fun aPrepareCancelledByAUserChangeClosesQuietly() = runTest {
+        val h = Harness(this)
+        h.client.setUser("a")
+        h.openGate = CompletableDeferred()
+        h.answer = { p, _ -> h.start(p, open(), done(cart())) }
+        var now = MealioUser(true, "a")
+        val m = h.model(user = MealioUser(true, "a"), now = { now })
+        runCurrent()
+        // MealioCart.setUser("b"): the client side at once, the composable's checkUser a frame later.
+        now = MealioUser(true, "b")
+        h.client.setUser("b")
+        h.openGate!!.complete(Unit)
+        advanceUntilIdle()
+        assertTrue(h.errors.isEmpty())
+        assertTrue(h.events.none { it is MealioEvent.Error })
+        assertEquals(listOf<AddResult?>(null), h.closed)
+        assertTrue(m.finished)
+        assertEquals(1, h.sent.count { it.endsWith("/carts") })
+    }
+
+    @Test
+    fun aModelNoRecreatedScreenTakesBackIsDisposedAndLetsGoOfTheSheet() = runTest {
+        val h = Harness(this)
+        val before = FlowModels.size()
+        val m = FlowModels.obtain("leak-${System.nanoTime()}", openedNow = true) { h.model(flowLogin = InlineFlowLogin) }!!
+        advanceUntilIdle()
+        assertTrue(co.mealio.sdk.MealioInlineLogin.hasSheet)
+        // Rotation; the new activity never shows the sheet again.
+        m.detach()
+        testScheduler.advanceTimeBy(RECLAIM_MS - 1)
+        runCurrent()
+        assertFalse(m.finished)
+        testScheduler.advanceTimeBy(2)
+        runCurrent()
+        assertTrue(m.finished)
+        assertEquals(before, FlowModels.size())
+        assertFalse(co.mealio.sdk.MealioInlineLogin.hasSheet)
+        assertTrue(h.closed.isEmpty() && h.errors.isEmpty())
+    }
+
+    @Test
+    fun aModelTakenBackInTimeIsKept() = runTest {
+        val h = Harness(this)
+        val m = h.model()
+        advanceUntilIdle()
+        m.detach()
+        testScheduler.advanceTimeBy(RECLAIM_MS / 2)
+        m.attach()
+        advanceUntilIdle()
+        assertFalse(m.finished)
+        assertEquals(0, h.login.detached)
+    }
+
+    @Test
+    fun hiddenByThePartnerDuringAnAddItFinishesAndReportsOnAddedAndOnClose() = runTest {
+        val h = Harness(this)
+        h.answer = { p, _ -> if (p.endsWith("/add")) h.start(p, open(), done(added)) else h.start(p, done(cart())) }
+        val m = h.model()
+        advanceUntilIdle()
+        h.openGate = CompletableDeferred()
+        m.add()
+        runCurrent()
+        m.hidden = true
+        h.openGate!!.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(1, h.addedResults.size)
+        assertSame(h.addedResults.single(), h.closed.single())
+        assertTrue(m.finished)
+    }
+
+    @Test
+    fun hiddenDuringAnAddThatFailsReportsOnErrorThenOnClose() = runTest {
+        val h = Harness(this)
+        h.answer = { p, _ ->
+            if (p.endsWith("/add")) HttpResponse(500, JSONObject().put("error", JSONObject().put("code", "store_unavailable").put("message", "down")).toString())
+            else h.start(p, done(cart()))
+        }
+        val m = h.model()
+        advanceUntilIdle()
+        m.hidden = true
+        m.add()
+        advanceUntilIdle()
+        assertEquals(1, h.errors.size)
+        assertEquals(listOf<AddResult?>(null), h.closed)
+        assertTrue(m.finished)
+    }
+
+    @Test
+    fun tryAgainAfterAFailedAddKeepsAProductFoundWithSearch() = runTest {
+        val h = Harness(this)
+        h.answer = { p, _ ->
+            when {
+                p.endsWith("/add") -> HttpResponse(500, JSONObject().put("error", JSONObject().put("code", "store_unavailable").put("message", "down")).toString())
+                p.endsWith("/search") -> h.start(p, done(JSONObject().put("key", "milk").put("options", JSONArray().put(JSONObject().put("id", "p9").put("name", "Goat milk").put("unitPrice", 6)))))
+                else -> h.start(p, done(cart()))
+            }
+        }
+        val m = h.model()
+        advanceUntilIdle()
+        m.cart!!.search("milk", "goat milk")
+        m.cart!!.select("milk", "p9")
+        m.cart!!.setQuantity("milk", 2)
+        m.add()
+        advanceUntilIdle()
+        m.retry()
+        advanceUntilIdle()
+        assertEquals(Phase.LIST, m.phase)
+        assertEquals("p9", m.cart!!.selectedId("milk"))
+        assertEquals(2, m.cart!!.quantity("milk"))
     }
 }

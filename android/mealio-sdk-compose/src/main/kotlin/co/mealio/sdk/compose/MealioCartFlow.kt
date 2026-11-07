@@ -207,6 +207,7 @@ fun MealioCartFlow(
     SideEffect {
         model.ui = ui
         model.callbacks = callbacks
+        model.hidden = !visible
         shown.value = model
     }
     LaunchedEffect(model, store) { model.propStoreChanged(store) }

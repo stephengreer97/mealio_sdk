@@ -41,9 +41,19 @@ const String bridgeChannelName = '__mealioNativeBridge';
 /// wraps each message as `{"n": nonce, "m": message}` with a random nonce the
 /// Dart side holds, and [bridgeUnwrap] drops anything without it. A sub-frame
 /// calling the channel directly cannot forge a result.
-String bridgeInjection(String nonce) =>
-    'window.__mealioNativePost = function(s){ __mealioNativeBridge.postMessage(JSON.stringify({ n: '
-    '${jsonEncode(nonce)}, m: String(s) })) };$bridgeShim';
+///
+/// The hidden page takes a new nonce for every script it runs, and this also
+/// replaces `window.ReactNativeWebView` with one bound to that nonce. A late
+/// message from an earlier script, through the poster it held, carries the
+/// old nonce and is dropped.
+String bridgeInjection(String nonce) {
+  final n = jsonEncode(nonce);
+  return 'window.__mealioNativePost = function(s){ __mealioNativeBridge.postMessage(JSON.stringify({ n: '
+      '$n, m: String(s) })) };'
+      '(function(){ try { window.ReactNativeWebView = { postMessage: function (s) { try { '
+      '__mealioNativeBridge.postMessage(JSON.stringify({ n: $n, m: String(s) })); } catch (e) {} } }; } catch (e) {} })();'
+      '$bridgeShim';
+}
 
 /// The original message posted through [bridgeInjection] with `nonce`, or
 /// null when `raw` was not posted that way.
@@ -76,7 +86,7 @@ const int _maxLoginMessages = 200;
 
 /// A WebViewController set up the way every Mealio WebView needs it.
 WebViewController _newController({
-  required String nonce,
+  required String Function() nonce,
   required void Function(String message) onMessage,
   required NavigationDelegate delegate,
 }) {
@@ -88,7 +98,7 @@ WebViewController _newController({
   unawaited(c.addJavaScriptChannel(
     bridgeChannelName,
     onMessageReceived: (JavaScriptMessage m) {
-      final s = bridgeUnwrap(m.message, nonce);
+      final s = bridgeUnwrap(m.message, nonce());
       if (s != null) onMessage(s);
     },
   ));
@@ -212,7 +222,8 @@ class MealioLoginView {
 class WebViewHost implements MealioHost {
   WebViewHost() {
     hidden = _newController(
-      nonce: _hiddenNonce,
+      // Read per message: it changes with every script.
+      nonce: () => _hiddenNonce,
       onMessage: _hiddenMessages.add,
       delegate: NavigationDelegate(
         // The runner checks every page_open, but a page can navigate itself
@@ -324,7 +335,9 @@ class WebViewHost implements MealioHost {
   static final Allowlist _bundledAllowlist = Allowlist();
   Allowlist get _allowlist => sharedAllowlist ?? _bundledAllowlist;
 
-  final String _hiddenNonce = _newNonce();
+  /// The hidden page's bridge nonce. A new one for every script, so a late
+  /// message from the script before cannot answer the next.
+  String _hiddenNonce = _newNonce();
 
   /// The store whose page the hidden WebView was last asked to open.
   String? _pageStore;
@@ -424,6 +437,8 @@ class WebViewHost implements MealioHost {
     int timeoutMs,
   ) {
     return _serial(() async {
+      // This run's own nonce: anything stamped for an earlier one is dropped.
+      _hiddenNonce = _newNonce();
       final messages = <JsonMessage>[];
       final matched = Completer<void>();
       final started = DateTime.now();
@@ -637,7 +652,7 @@ class WebViewHost implements MealioHost {
     }
 
     c = _newController(
-      nonce: nonce,
+      nonce: () => nonce,
       onMessage: (String raw) {
         final m = parseMessage(raw);
         if (m == null) return;

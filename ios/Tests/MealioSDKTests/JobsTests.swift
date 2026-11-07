@@ -655,12 +655,242 @@ final class JobsTests: XCTestCase {
         XCTAssertEqual(try session([]).warnings, [])
     }
 
+    // MARK: sessions and users (0.6 round 2)
+
+    @MainActor
+    func testAUserChangeWhileAPrepareWaitsForItsTokenSendsNothingAndIsCancelled() async throws {
+        let rec = Recorder()
+        StubURLProtocol.handler = { req, body in
+            rec.record(req, body: body)
+            return (200, jsonData(["defaultStore": .null]))
+        }
+        let gate = Gate()
+        var asked = 0
+        let client = makeClient(ScriptedHost(), token: {
+            asked += 1
+            if asked == 1 { await gate.wait() }
+            return asked == 1 ? "alice" : "bob"
+        })
+        client.setUser("a")
+        let recipe = self.recipe
+        let p = Task { () -> String? in
+            do {
+                _ = try await client.prepareCart(recipe: recipe)
+                return nil
+            } catch {
+                return (error as? MealioError)?.code
+            }
+        }
+        try await waitFor { asked == 1 }
+        client.setUser("b")
+        gate.release()
+        let got = await p.value
+        XCTAssertEqual(got, MealioError.Code.cancelled)
+        XCTAssertEqual(asked, 1)
+        XCTAssertEqual(rec.paths, [])
+    }
+
+    @MainActor
+    func testToNobodyCancelledNotNotSignedIn() async throws {
+        let rec = Recorder()
+        StubURLProtocol.handler = { req, body in
+            rec.record(req, body: body)
+            return (200, jsonData(["defaultStore": .null]))
+        }
+        let gate = Gate()
+        var asked = 0
+        let client = makeClient(ScriptedHost(), token: {
+            asked += 1
+            await gate.wait()
+            return "alice"
+        })
+        client.setUser("a")
+        let recipe = self.recipe
+        let p = Task { () -> String? in
+            do {
+                _ = try await client.prepareCart(recipe: recipe)
+                return nil
+            } catch {
+                return (error as? MealioError)?.code
+            }
+        }
+        try await waitFor { asked == 1 }
+        client.setUser(nil)
+        gate.release()
+        let got = await p.value
+        XCTAssertEqual(got, MealioError.Code.cancelled)
+        XCTAssertEqual(rec.paths, [])
+    }
+
+    @MainActor
+    func testAnAddKeepsTheTokenOfTheMomentItWasAskedForEvenAfterAQueueWait() async throws {
+        let server = JobServer()
+        let added: JSONValue = ["cartId": "c", "store": "heb", "added": [], "skipped": [], "failed": []]
+        StubURLProtocol.handler = { req, body in
+            server.rec.record(req, body: body)
+            if req.url?.path.hasSuffix("/add") == true { return server.start([jobsDone(added)]) }
+            return server.start([jobsOpen("o"), jobsDone(jobsCart)])
+        }
+        var tokens = ["alice", "bob"]
+        let gate = Gate()
+        let host = ScriptedHost()
+        host.open = { url in
+            await gate.wait()
+            return PageOpenOutcome(ok: true, finalUrl: url)
+        }
+        let client = makeClient(host, token: { tokens.removeFirst() })
+        client.setUser("a")
+        let recipe = self.recipe
+        let prep = Task { () -> String? in
+            do {
+                _ = try await client.prepareCart(recipe: recipe)
+                return nil
+            } catch {
+                return (error as? MealioError)?.code
+            }
+        }
+        try await waitFor { host.log.order == ["open"] }
+        // Tapped by alice while her prepare still holds the page.
+        let add = Task { () -> String in
+            let r = try await client.addToCart(cartId: "c", selections: [])
+            return r.cartId
+        }
+        try await tick()
+        client.setUser("b")
+        gate.release()
+        let prepared = await prep.value
+        XCTAssertEqual(prepared, MealioError.Code.cancelled)
+        let cartId = try await add.value
+        XCTAssertEqual(cartId, "c")
+        let sent = Array(zip(server.paths, server.auths))
+        XCTAssertEqual(sent.filter { $0.0.hasSuffix("/add") }.map { $0.1 }, ["Bearer alice"])
+        XCTAssertFalse(server.auths.contains("Bearer bob"))
+    }
+
+    @MainActor
+    func testAnAdds401AfterAUserChangeFailsAsSessionExpiredNeverWithTheNewUsersToken() async throws {
+        let server = JobServer()
+        StubURLProtocol.handler = { req, body in
+            server.rec.record(req, body: body)
+            if req.url?.path.hasSuffix("/add") == true { return server.start([jobsOpen("o")]) }
+            return (401, jsonData(["error": ["code": "unauthorized", "message": "No"]]))
+        }
+        var tokens = ["alice", "bob"]
+        let gate = Gate()
+        let host = ScriptedHost()
+        host.open = { url in
+            await gate.wait()
+            return PageOpenOutcome(ok: true, finalUrl: url)
+        }
+        let client = makeClient(host, token: { tokens.removeFirst() })
+        client.setUser("a")
+        let p = Task { () -> String? in
+            do {
+                _ = try await client.addToCart(cartId: "c", selections: [])
+                return nil
+            } catch {
+                return (error as? MealioError)?.code
+            }
+        }
+        try await waitFor { host.log.order.contains("open") }
+        client.setUser("b")
+        gate.release()
+        let got = await p.value
+        XCTAssertEqual(got, MealioError.Code.sessionExpired)
+        XCTAssertEqual(server.auths, ["Bearer alice", "Bearer alice"])
+    }
+
+    @MainActor
+    func testAnAdds401WithTheSameUserRenewsTheTokenOnce() async throws {
+        let server = JobServer()
+        let added: JSONValue = ["cartId": "c", "store": "heb", "added": [], "skipped": [], "failed": []]
+        StubURLProtocol.handler = { req, body in
+            server.rec.record(req, body: body)
+            if server.paths.count == 1 { return (401, jsonData(["error": ["code": "unauthorized", "message": "No"]])) }
+            return server.start([jobsDone(added)])
+        }
+        var tokens = ["alice", "alice2"]
+        let client = makeClient(ScriptedHost(), token: { tokens.removeFirst() })
+        client.setUser("a")
+        let r = try await client.addToCart(cartId: "c", selections: [])
+        XCTAssertEqual(r.cartId, "c")
+        XCTAssertEqual(server.auths, ["Bearer alice", "Bearer alice2"])
+    }
+
+    // MARK: runExclusive (0.6 round 2)
+
+    @MainActor
+    func testALateFunctionGetsNetworkButTheQueueStaysHeldUntilItReallyEnds() async throws {
+        let server = JobServer()
+        StubURLProtocol.handler = { req, body in
+            server.rec.record(req, body: body)
+            return server.start([jobsDone(jobsCart)])
+        }
+        let gate = Gate()
+        let log = HostLog()
+        let client = makeClient(ScriptedHost(), timeoutMs: 100)
+        let ex = Task { () -> String? in
+            do {
+                try await client.runExclusive {
+                    await gate.wait()
+                    log.order.append("work ended")
+                }
+                return nil
+            } catch {
+                return (error as? MealioError)?.code
+            }
+        }
+        let got = await ex.value
+        XCTAssertEqual(got, MealioError.Code.network)
+        let recipe = self.recipe
+        let p = Task { () -> String in
+            let c = try await client.prepareCart(recipe: recipe)
+            log.order.append("prepared")
+            return c.cartId
+        }
+        try await tick(150)
+        XCTAssertEqual(server.paths, [])
+        gate.release()
+        let cartId = try await p.value
+        XCTAssertEqual(cartId, "c")
+        XCTAssertEqual(log.order, ["work ended", "prepared"])
+        XCTAssertEqual(server.paths, ["/carts"])
+    }
+
+    // MARK: restorePicks (0.6 round 2)
+
+    @MainActor
+    func testKeepsAProductTheUserFoundWithSearchWithItsQuantity() async throws {
+        let server = JobServer()
+        StubURLProtocol.handler = { req, body in
+            server.rec.record(req, body: body)
+            return server.start([jobsDone(["key": "k", "query": "jar", "options": [["id": "s1", "name": "Jar", "maxQuantity": 9]]])])
+        }
+        let old = try session([item(options: [prod("p")])])
+        let found = try await old.search(key: "k", query: "jar")
+        XCTAssertEqual(found.map(\.id), ["s1"])
+        try old.select(key: "k", productId: "s1")
+        old.setQuantity(key: "k", to: 3)
+        let fresh = try session([item(options: [prod("p")])])
+        fresh.restorePicks(from: old)
+        XCTAssertEqual(fresh.selectedId(for: "k"), "s1")
+        XCTAssertEqual(fresh.quantity(for: "k"), 3)
+        XCTAssertEqual(fresh.options(for: "k").map(\.id), ["p", "s1"])
+    }
+
     // MARK: blocked mutations
 
-    func testNamesEveryFieldOfAMutationAndNothingOfAQuery() {
+    func testNamesAMutationAndItsRootFieldsAndNothingOfAQuery() {
         XCTAssertEqual(Allowlist.mutationNames(#"mutation Go($a: ID!) { x: placeOrder(id: $a, note: "checkout") { ... on Err { message } } } # payment"#),
-                       ["Go", "x", "placeOrder", "message"])
+                       ["Go", "placeOrder"])
         XCTAssertEqual(Allowlist.mutationNames("query Q { paymentMethods { id } }"), [])
+    }
+
+    func testJudgesOnlyAMutationRootNestedFieldsAndAliasesPassRootFieldsBlock() {
+        XCTAssertEqual(Allowlist.mutationNames("mutation AddToCart { addItemsToCart { cart { items { maxPurchaseQuantity } } } }"),
+                       ["AddToCart", "addItemsToCart"])
+        XCTAssertEqual(Allowlist.mutationNames("mutation { a: placeOrder { id } ... on Mutation { ...F } } fragment F on Mutation { checkout { id } }"),
+                       ["placeOrder", "checkout"])
     }
 
     func testTheNewOrderPathsAreBlockedAndTheirReadingNeighborsAreNot() {
