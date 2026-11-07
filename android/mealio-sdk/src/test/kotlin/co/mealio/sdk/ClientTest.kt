@@ -68,6 +68,41 @@ class ClientTest {
     }
 
     @Test
+    fun resetSessionGivesTheNextUserANewToken(): Unit = runBlocking {
+        val users = ArrayDeque(listOf("alice", "bob"))
+        val transport = FakeTransport { _, _, _ -> ok(JSONObject()) }
+        val client = MealioClient(config { users.removeFirst() }, FakeHost(), transport)
+        client.storePreferences()
+        client.storePreferences()
+        client.resetSession()
+        client.storePreferences()
+        assertEquals(
+            listOf("Bearer alice", "Bearer alice", "Bearer bob"),
+            transport.headers.map { it["Authorization"] },
+        )
+    }
+
+    @Test
+    fun aTokenThatArrivesAfterTheResetIsDropped(): Unit = runBlocking {
+        var client: MealioClient? = null
+        var asked = 0
+        val transport = FakeTransport { _, _, _ -> ok(JSONObject()) }
+        client = MealioClient(config {
+            asked += 1
+            if (asked == 1) {
+                // The user changes while their token is on its way.
+                client!!.resetSession()
+                "alice"
+            } else {
+                "bob"
+            }
+        }, FakeHost(), transport)
+        client.storePreferences()
+        client.storePreferences()
+        assertEquals(listOf("Bearer bob", "Bearer bob"), transport.headers.map { it["Authorization"] })
+    }
+
+    @Test
     fun secondUnauthorizedIsSessionExpired(): Unit = runBlocking {
         val transport = FakeTransport { _, _, _ -> HttpResponse(401, "{}") }
         val client = MealioClient(config(), FakeHost(), transport)

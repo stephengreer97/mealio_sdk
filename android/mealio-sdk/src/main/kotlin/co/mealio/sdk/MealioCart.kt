@@ -116,10 +116,18 @@ object MealioCart {
         state?.client?.warm(store)
     }
 
+    /**
+     * The signed-in user changed. Forget the session, so the next call asks your
+     * server for a new one. Signing out of the stores does this too.
+     */
+    fun resetSession() {
+        state?.client?.resetSession()
+    }
+
     /** Sign the user out of one store on this device. */
     suspend fun signOutOfStore(store: String) {
         val s = current()
-        s.client.clearWarm()
+        s.client.resetSession()
         val hosts = s.client.allowlist.hostsFor(store) ?: STORES[store]
         if (hosts != null) s.sessions.clearStore(hosts)
         s.host.reset()
@@ -133,7 +141,7 @@ object MealioCart {
      */
     suspend fun signOutOfAllStores() {
         val s = current()
-        s.client.clearWarm()
+        s.client.resetSession()
         s.sessions.clearAll()
         s.host.reset()
         s.sessions.bumpEpoch()

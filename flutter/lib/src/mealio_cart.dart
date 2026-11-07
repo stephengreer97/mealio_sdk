@@ -202,7 +202,7 @@ class MealioCart {
   /// Clears every store login on this device and bumps the stored
   /// store-session epoch, which the next cart reports to Mealio.
   Future<void> signOutOfAllStores() async {
-    _client.clearWarm();
+    _client.resetSession();
     final host = WebViewHost.current;
     if (host != null) {
       await host.clearStoreSessions();
@@ -216,6 +216,10 @@ class MealioCart {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(_epochKey, (prefs.getInt(_epochKey) ?? 0) + 1);
   }
+
+  /// The signed-in user changed. Forget the session, so the next call asks
+  /// your server for a new one. Signing out of the stores does this too.
+  void resetSession() => _client.resetSession();
 
   /// The device's store-session epoch. Starts at 0.
   static Future<int> storeEpoch() async {

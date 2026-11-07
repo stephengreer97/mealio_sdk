@@ -63,6 +63,8 @@ interface Warmed { job: string; store: string; at: number; pageOpens: number; ep
 export class MealioClient {
   private runner: Runner;
   private token: string | null = null;
+  /** Bumped by resetSession, so a token still on its way is not kept. */
+  private sessionGen = 0;
   private base: string;
   private f: typeof fetch;
   private warmed: Warmed | null = null;
@@ -171,6 +173,26 @@ export class MealioClient {
     return this.warming;
   }
 
+  /**
+   * The signed-in user changed. Forget the session, so the next call asks your
+   * server for a new one. Signing out of the stores does this too.
+   */
+  resetSession(): void {
+    this.sessionGen += 1;
+    this.token = null;
+    this.clearWarm();
+  }
+
+  /** The current token. One that arrives after a reset belongs to the last user. */
+  private async sessionToken(): Promise<string> {
+    if (this.token) return this.token;
+    const gen = this.sessionGen;
+    const token = await this.cfg.getSessionToken();
+    if (gen !== this.sessionGen) return this.sessionToken();
+    this.token = token;
+    return token;
+  }
+
   /** Forget any warm-up, e.g. after signing out of the stores. */
   clearWarm(): void {
     this.warmed = null;
@@ -272,10 +294,10 @@ export class MealioClient {
   }
 
   private async post<T>(path: string, body: unknown, retried = false): Promise<T> {
-    if (!this.token) this.token = await this.cfg.getSessionToken();
+    const token = await this.sessionToken();
     const headers: Record<string, string> = {
       'content-type': 'application/json',
-      authorization: `Bearer ${this.token}`,
+      authorization: `Bearer ${token}`,
       'x-mealio-publishable-key': this.cfg.publishableKey,
       'x-mealio-sdk': `${this.cfg.platform}/${this.cfg.sdkVersion}`,
     };

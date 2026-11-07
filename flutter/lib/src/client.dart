@@ -117,6 +117,9 @@ class MealioClient {
   final String _base;
   final http.Client _http;
   String? _token;
+
+  /// Bumped by [resetSession], so a token still on its way is not kept.
+  int _sessionGen = 0;
   _Warmed? _warmed;
   Future<void>? _warming;
   int _lastWarmAt = 0;
@@ -227,6 +230,25 @@ class MealioClient {
   }
 
   /// Forget any warm-up, e.g. after signing out of the stores.
+  /// The signed-in user changed. Forget the session, so the next call asks
+  /// your server for a new one. Signing out of the stores does this too.
+  void resetSession() {
+    _sessionGen += 1;
+    _token = null;
+    clearWarm();
+  }
+
+  /// The current token. One that arrives after a reset belongs to the last user.
+  Future<String> _sessionToken() async {
+    while (true) {
+      final current = _token;
+      if (current != null) return current;
+      final gen = _sessionGen;
+      final fresh = await _cfg.getSessionToken();
+      if (gen == _sessionGen) _token = fresh;
+    }
+  }
+
   void clearWarm() {
     _warmed = null;
     _lastWarmAt = 0;
@@ -374,10 +396,10 @@ class MealioClient {
   }
 
   Future<Object?> _post(String path, Object? body, {bool retried = false}) async {
-    _token ??= await _cfg.getSessionToken();
+    final token = await _sessionToken();
     final headers = <String, String>{
       'Content-Type': 'application/json',
-      'Authorization': 'Bearer $_token',
+      'Authorization': 'Bearer $token',
       'X-Mealio-Publishable-Key': _cfg.publishableKey,
       'X-Mealio-SDK': '${_cfg.platform}/${_cfg.sdkVersion}',
     };

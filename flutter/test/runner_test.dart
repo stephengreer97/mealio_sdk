@@ -2,6 +2,7 @@
 // Host. Envelopes beyond the shared vectors are signed here with the same
 // deterministic test key.
 
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -475,6 +476,37 @@ void main() {
       await clientWith(mock, token: () async => 't${++tokens}').addToCart('c1', const <Selection>[]);
       expect(tokens, 2);
       expect(auth, <String?>['Bearer t1', 'Bearer t2']);
+    });
+
+    group('resetSession', () {
+      MockClient recording(List<String?> auth) => MockClient((http.Request req) async {
+            auth.add(req.headers['authorization']);
+            return _json(<String, Object?>{});
+          });
+
+      test('gives the next user a new token', () async {
+        final auth = <String?>[];
+        final users = <String>['alice', 'bob'];
+        final client = clientWith(recording(auth), token: () async => users.removeAt(0));
+        await client.storePreferences();
+        await client.storePreferences();
+        client.resetSession();
+        await client.storePreferences();
+        expect(auth, <String?>['Bearer alice', 'Bearer alice', 'Bearer bob']);
+      });
+
+      test('drops a token that arrives after the reset', () async {
+        final auth = <String?>[];
+        final alice = Completer<String>();
+        final answers = <Future<String>>[alice.future, Future<String>.value('bob')];
+        final client = clientWith(recording(auth), token: () => answers.removeAt(0));
+        final asked = client.storePreferences();
+        client.resetSession();
+        alice.complete('alice');
+        await asked;
+        await client.storePreferences();
+        expect(auth, <String?>['Bearer bob', 'Bearer bob']);
+      });
     });
 
     test('a second 401 is session_expired', () async {

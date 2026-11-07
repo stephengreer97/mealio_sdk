@@ -165,6 +165,54 @@ describe('client', () => {
     await client.addToCart('c1', []).catch(() => {});
     expect(tokens).toBe(2);
   });
+
+  describe('resetSession', () => {
+    function recorded(getSessionToken: () => Promise<string>) {
+      const seen: string[] = [];
+      const fetchImpl = (async (_url: string, init: { headers: Record<string, string> }) => {
+        seen.push(init.headers.authorization);
+        return { ok: true, status: 200, json: async () => ({}) };
+      }) as any;
+      const client = new MealioClient({ publishableKey: 'pk', getSessionToken, platform: 'web-test', sdkVersion: '0', fetchImpl, keys: KEYS }, fakeHost());
+      return { client, seen };
+    }
+
+    it('keeps one token for one user', async () => {
+      const { client, seen } = recorded(async () => 'alice');
+      await client.storePreferences();
+      await client.storePreferences();
+      expect(seen).toEqual(['Bearer alice', 'Bearer alice']);
+    });
+
+    it('gives the next user a new token', async () => {
+      const users = ['alice', 'bob'];
+      const { client, seen } = recorded(async () => users.shift()!);
+      await client.storePreferences();
+      client.resetSession();
+      await client.storePreferences();
+      expect(seen).toEqual(['Bearer alice', 'Bearer bob']);
+    });
+
+    it('asks once when your function returns an empty token', async () => {
+      let asked = 0;
+      const { client, seen } = recorded(async () => { asked += 1; return ''; });
+      await client.storePreferences();
+      expect(asked).toBe(1);
+      expect(seen).toEqual(['Bearer ']);
+    });
+
+    it('drops a token that arrives after the reset', async () => {
+      let finishAlice!: (t: string) => void;
+      const answers = [new Promise<string>((r) => { finishAlice = r; }), Promise.resolve('bob')];
+      const { client, seen } = recorded(() => answers.shift()!);
+      const asked = client.storePreferences();
+      client.resetSession();
+      finishAlice('alice');
+      await asked;
+      await client.storePreferences();
+      expect(seen).toEqual(['Bearer bob', 'Bearer bob']);
+    });
+  });
 });
 
 describe('cart session', () => {
