@@ -12,6 +12,7 @@ import '../errors.dart';
 import '../mealio_cart.dart';
 import '../protocol.dart';
 import '../theme.dart';
+import '../ui.dart';
 import 'flow_parts.dart';
 
 /// Lists a chain's stores near a zip. The default is
@@ -75,6 +76,15 @@ class _LocationPickerState extends State<LocationPicker> {
   String? _problem;
   int _ask = 0;
 
+  /// Set each build, for the calls that finish after it. Empty until then.
+  MealioUi _ui = const MealioUi();
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _ui = MealioUi.of(context);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -111,7 +121,7 @@ class _LocationPickerState extends State<LocationPicker> {
     } catch (e) {
       if (_ask != id) return;
       setState(() {
-        _problem = problemText(e, 'Could not look up stores. Try again.');
+        _problem = problemText(e, _ui.tr('couldNotLookUp'));
         _busy = false;
       });
     }
@@ -129,7 +139,7 @@ class _LocationPickerState extends State<LocationPicker> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _problem = problemText(e, 'Could not save that store. Try again.');
+        _problem = problemText(e, _ui.tr('couldNotSaveStore'));
         _saving = null;
       });
       return;
@@ -140,6 +150,10 @@ class _LocationPickerState extends State<LocationPicker> {
   @override
   Widget build(BuildContext context) {
     final t = widget.theme;
+    final ui = MealioUi.of(context);
+    final store = <String, Object?>{'store': widget.storeName};
+    final zipCode = ui.tr('zipCode');
+    final findStores = ui.tr('findStores');
     final found = _found;
     final problem = _problem;
     final canFind = _isZip(_zip.text) && !_busy;
@@ -152,13 +166,13 @@ class _LocationPickerState extends State<LocationPicker> {
             keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.manual,
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
             children: gapped(<Widget>[
-              Text('Enter your zip code to see ${widget.storeName} stores near you.',
+              Text(ui.tr('zipPrompt', store),
                   style: t.style(size: 14, color: t.muted)),
               Row(
                 children: <Widget>[
                   Expanded(
                     child: Semantics(
-                      label: 'Zip code',
+                      label: zipCode,
                       child: TextField(
                         key: const ValueKey<String>('mealio-zip'),
                         controller: _zip,
@@ -174,7 +188,7 @@ class _LocationPickerState extends State<LocationPicker> {
                         style: t.style(size: 16),
                         cursorColor: t.accent,
                         decoration: InputDecoration(
-                          hintText: 'Zip code',
+                          hintText: zipCode,
                           hintStyle: t.style(size: 16, color: t.muted),
                           isDense: true,
                           filled: true,
@@ -193,7 +207,7 @@ class _LocationPickerState extends State<LocationPicker> {
                   Semantics(
                     button: true,
                     enabled: canFind,
-                    label: 'Find stores',
+                    label: findStores,
                     onTap: canFind ? find : null,
                     excludeSemantics: true,
                     child: Opacity(
@@ -212,7 +226,7 @@ class _LocationPickerState extends State<LocationPicker> {
                               child: Center(
                                 widthFactor: 1,
                                 heightFactor: 1,
-                                child: Text('Find stores',
+                                child: Text(findStores,
                                     style: t.style(size: 16, weight: FontWeight.w700, color: t.onAccent)),
                               ),
                             ),
@@ -233,7 +247,7 @@ class _LocationPickerState extends State<LocationPicker> {
                 ),
               if (problem != null) Semantics(liveRegion: true, child: Text(problem, style: t.style(size: 15))),
               if (found != null && found.isEmpty)
-                Text('No ${widget.storeName} stores near $_foundZip. Try another zip code.',
+                Text(ui.tr('noStoresNear', <String, Object?>{...store, 'zip': _foundZip}),
                     style: t.style(size: 14, color: t.muted)),
               if (found != null)
                 for (final StoreLocation l in found)
@@ -245,7 +259,7 @@ class _LocationPickerState extends State<LocationPicker> {
                     selected: l.id == widget.current,
                     busy: _saving == l.id,
                     onTap: _saving == null ? () => unawaited(_pick(l)) : null,
-                    trailing: l.id == widget.current ? 'Current' : null,
+                    trailing: l.id == widget.current ? ui.tr('current') : null,
                   ),
             ], 10),
           ),

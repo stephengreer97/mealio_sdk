@@ -394,9 +394,16 @@ fun forRecipes(recipeCount: Int, itemRecipes: List<ItemRecipe>): String? {
     return if (names.isEmpty()) null else "For " + listAnd(names)
 }
 
+/** [forRecipes] in the partner's words: the `forRecipes` and `and` strings. */
+fun forRecipes(cart: CartSession, key: String, text: TextTools): String? {
+    if (cart.recipes.size < 2) return null
+    val names = cart.recipesFor(key).mapNotNull { it.title?.takeIf { t -> t.isNotEmpty() } }
+    return if (names.isEmpty()) null else text.tr("forRecipes", "recipes" to listAnd(names, text.tr("and")))
+}
+
 /** "A", "A and B", "A, B and C". */
-internal fun listAnd(xs: List<String>): String = when (xs.size) {
+internal fun listAnd(xs: List<String>, and: String = "and"): String = when (xs.size) {
     0 -> ""
     1 -> xs[0]
-    else -> xs.dropLast(1).joinToString(", ") + " and " + xs.last()
+    else -> xs.dropLast(1).joinToString(", ") + " " + and + " " + xs.last()
 }

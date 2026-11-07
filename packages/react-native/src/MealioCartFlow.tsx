@@ -393,7 +393,7 @@ function ItemRow({ t, cart, item, storeName, open, onToggleOpen, onChange, disab
           <View style={[s.box, on ? { backgroundColor: t.accent, borderWidth: 0 } : null]}>{on ? <Text style={s.boxCheck}>✓</Text> : null}</View>
         </Pressable>
         <Thumb t={t} product={shown || options[0] || null} dim={!on} />
-        <Pressable style={s.flex} onPress={onToggleOpen} accessibilityRole="button" accessibilityHint="Shows the options">
+        <Pressable style={s.flex} onPress={onToggleOpen} accessibilityRole="button">
           <Text style={s.ingredient} numberOfLines={1}>{item.ingredient}</Text>
           {forRecipes(cart, item.key, ui) ? <Text style={s.forRecipes} numberOfLines={1}>{forRecipes(cart, item.key, ui)}</Text> : null}
           <Text style={[s.name, !on && (shown ? s.nameOff : s.namePlaceholder)]} numberOfLines={2}>{shown ? shown.name : ui.tr('chooseProduct')}</Text>
@@ -585,8 +585,8 @@ function AddedRow({ t, cart, item, first }: { t: MealioTheme; cart: CartSession;
   const amount = byWeight ? lbText(item.weightLb as number) : `×${item.quantity}`;
   const p = cart.addedPrice(item);
   const price = p && ui.sheet.showTotal ? amountText(ui, p.amount, p.estimated) : '';
-  const spoken = [item.name, line ? `for ${line}` : null,
-    byWeight ? `${+(item.weightLb as number).toFixed(2)} pounds` : `quantity ${item.quantity}`, price || null].filter(Boolean).join(', ');
+  const spoken = [item.name, line ? ui.tr('forRecipes', { recipes: line }) : null,
+    `${ui.tr(byWeight ? 'weight' : 'quantity')} ${byWeight ? amount : item.quantity}`, price || null].filter(Boolean).join(', ');
   return (
     <View style={[s.addedRow, !first && s.addedRule]} accessible accessibilityLabel={spoken}>
       {image

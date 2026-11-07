@@ -565,4 +565,12 @@ class CartSessionTest {
         assertEquals("", listAnd(emptyList()))
         assertEquals("A", listAnd(listOf("A")))
     }
+
+    @Test
+    fun forRecipesUsesThePartnersWords() {
+        val cs = session(multiRecipe())
+        val text = TextTools(mapOf("forRecipes" to "Para {recipes}", "and" to "y"))
+        assertEquals("Para Tacos y Pasta", forRecipes(cs, "onion", text))
+        assertNull(forRecipes(cs, "salt", text))
+    }
 }

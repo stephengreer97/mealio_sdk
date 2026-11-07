@@ -17,6 +17,18 @@ public enum MealioCart {
     static var host: WebViewHost?
     /// The drop-in's look. Set it with `configure(theme:)` or directly.
     public static var theme: MealioTheme = .default
+    /// The colors for dark mode. Only used when `colorScheme` asks for dark.
+    public static var darkTheme: MealioDarkTheme = .default
+    /// `.auto` follows the phone. Defaults to `.light`.
+    public static var colorScheme: MealioColorScheme = .light
+    /// Your words, laid over `DEFAULT_STRINGS`.
+    public static var strings: MealioStrings = [:]
+    /// How prices read. Nil is "$12.50" and the store's own price text.
+    public static var formatMoney: ((Double) -> String)?
+    /// How the sheet looks and behaves.
+    public static var sheet = MealioSheetOptions()
+    /// The drop-in's words and prices as they stand now.
+    public static var text: MealioText { MealioText(strings: strings, formatMoney: formatMoney) }
 
     /// Set up the SDK. Call once, early (for example at app launch).
     ///
@@ -30,13 +42,25 @@ public enum MealioCart {
     ///   - attestationProvider: Returns an App Attest token, if your app has
     ///     attestation turned on.
     ///   - theme: Your brand for the drop-in (accent, radius, font...).
+    ///   - darkTheme: Colors for dark mode.
+    ///   - colorScheme: `.light` (the default), `.dark`, or `.auto` to follow the phone.
+    ///   - strings: Change or translate any word the drop-in shows.
+    ///   - formatMoney: How prices read. With it set, option prices are built
+    ///     from the numeric `unitPrice`, not the store's text.
+    ///   - sheet: How the sheet looks and behaves.
     public static func configure(publishableKey: String,
                                  sessionTokenProvider: @escaping () async throws -> String,
                                  baseURL: URL = DEFAULT_BASE_URL,
                                  presenter: WebViewHost.Presenter? = nil,
                                  attestationProvider: (() async -> String?)? = nil,
-                                 theme: MealioTheme? = nil) {
-        if let theme = theme { MealioCart.theme = theme }
+                                 theme: MealioTheme? = nil,
+                                 darkTheme: MealioDarkTheme? = nil,
+                                 colorScheme: MealioColorScheme? = nil,
+                                 strings: MealioStrings? = nil,
+                                 formatMoney: ((Double) -> String)? = nil,
+                                 sheet: MealioSheetOptions? = nil) {
+        configure(theme: theme, darkTheme: darkTheme, colorScheme: colorScheme,
+                  strings: strings, formatMoney: formatMoney, sheet: sheet)
         let host = WebViewHost(presenter: presenter)
         let config = MealioClientConfig(publishableKey: publishableKey,
                                         sessionTokenProvider: sessionTokenProvider,
@@ -54,9 +78,20 @@ public enum MealioCart {
         MealioCart.client = client
     }
 
-    /// Change the drop-in's look after `configure`.
-    public static func configure(theme: MealioTheme) {
-        MealioCart.theme = theme
+    /// Change the drop-in's look after `configure`. What you leave out stays
+    /// as it is. To clear `formatMoney`, set `MealioCart.formatMoney = nil`.
+    public static func configure(theme: MealioTheme? = nil,
+                                 darkTheme: MealioDarkTheme? = nil,
+                                 colorScheme: MealioColorScheme? = nil,
+                                 strings: MealioStrings? = nil,
+                                 formatMoney: ((Double) -> String)? = nil,
+                                 sheet: MealioSheetOptions? = nil) {
+        if let theme = theme { MealioCart.theme = theme }
+        if let darkTheme = darkTheme { MealioCart.darkTheme = darkTheme }
+        if let colorScheme = colorScheme { MealioCart.colorScheme = colorScheme }
+        if let strings = strings { MealioCart.strings = strings }
+        if let formatMoney = formatMoney { MealioCart.formatMoney = formatMoney }
+        if let sheet = sheet { MealioCart.sheet = sheet }
     }
 
     /// Start a cart for a recipe at a store. Shows the store's login if the

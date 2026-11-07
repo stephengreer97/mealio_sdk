@@ -65,6 +65,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
@@ -74,12 +75,13 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.collapse
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.expand
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -137,6 +139,9 @@ private data class FlowError(val code: String, val message: String)
  * @param onClose called when the sheet closes. `result` is null when nothing was added.
  *   Set `visible` to false here.
  * @param onAdded called after the cart is filled, before the user taps Done.
+ * @param doneMessage a line of your own on the done screen, like "Enjoy your meal!".
+ * @param doneAction a button of your own on the done screen, like "Back to meal plan".
+ *   Tapping it closes the sheet, then calls its `onClick`.
  */
 @Composable
 fun MealioCartFlow(
@@ -148,9 +153,11 @@ fun MealioCartFlow(
     onAdded: (AddResult) -> Unit = {},
     onError: (Exception) -> Unit = {},
     theme: MealioTheme = LocalMealioTheme.current,
+    doneMessage: String? = null,
+    doneAction: MealioDoneAction? = null,
 ) {
     val recipes = remember(recipe) { listOf(recipe) }
-    MealioCartFlow(visible, recipes, store, zip, onClose, onAdded, onError, theme)
+    MealioCartFlow(visible, recipes, store, zip, onClose, onAdded, onError, theme, doneMessage, doneAction)
 }
 
 /**
@@ -169,12 +176,14 @@ fun MealioCartFlow(
     onAdded: (AddResult) -> Unit = {},
     onError: (Exception) -> Unit = {},
     theme: MealioTheme = LocalMealioTheme.current,
+    doneMessage: String? = null,
+    doneAction: MealioDoneAction? = null,
 ) {
     if (!visible) return
     // Everything below lives only while the sheet is open, so each open starts fresh.
     val backRef = remember { mutableStateOf<() -> Unit>({}) }
     SheetDialog(onDismiss = { backRef.value() }) {
-        FlowSheet(theme, recipes, store, zip, onClose, onAdded, onError, backRef)
+        FlowSheet(theme, recipes, store, zip, onClose, onAdded, onError, backRef, doneMessage, doneAction)
     }
 }
 
@@ -206,20 +215,32 @@ internal fun SheetDialog(onDismiss: () -> Unit, content: @Composable () -> Unit)
 @Composable
 internal fun SheetFrame(t: MealioTheme, content: @Composable ColumnScope.() -> Unit) {
     val shown = remember { MutableTransitionState(false).apply { targetState = true } }
+    val height = LocalMealioUi.current.sheet.height
+    // Full reaches the top of the screen, so its own background goes behind the
+    // status bar and its content sits below it. Every other height stops short.
+    val full = height == MealioSheetHeight.Full
+    val share = when (height) {
+        MealioSheetHeight.Auto -> 0.94f
+        MealioSheetHeight.Full -> 1f
+        is MealioSheetHeight.Fraction -> height.value.coerceIn(0.5f, 1f)
+    }
+    val barsOutside = if (full) Modifier else Modifier.statusBarsPadding()
+    val barsInside = if (full) Modifier.statusBarsPadding() else Modifier
     Box(
         Modifier
             .fillMaxSize()
             .background(Color(0x59000000))
-            .statusBarsPadding(),
+            .then(barsOutside),
         contentAlignment = Alignment.BottomCenter,
     ) {
         AnimatedVisibility(visibleState = shown, enter = slideInVertically { it } + fadeIn()) {
             Column(
                 Modifier
                     .fillMaxWidth()
-                    .fillMaxHeight(0.94f)
-                    .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
+                    .fillMaxHeight(share)
+                    .clip(if (full) RectangleShape else RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
                     .background(t.background)
+                    .then(barsInside)
                     .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)),
             ) {
                 Box(
@@ -246,7 +267,10 @@ private fun FlowSheet(
     onAdded: (AddResult) -> Unit,
     onError: (Exception) -> Unit,
     backRef: androidx.compose.runtime.MutableState<() -> Unit>,
+    doneMessage: String?,
+    doneAction: MealioDoneAction?,
 ) {
+    val ui = LocalMealioUi.current
     val scope = rememberCoroutineScope()
     var phase by remember { mutableStateOf(Phase.LOADING) }
     var step by remember { mutableStateOf(Step.CONNECTING) }
@@ -317,10 +341,10 @@ private fun FlowSheet(
                     } else {
                         openStores(Phase.ERROR)
                     }
-                    else -> fail(e, "Something went wrong.")
+                    else -> fail(e, ui.tr("somethingWrongSentence"))
                 }
             } catch (e: Exception) {
-                fail(e, "Something went wrong.")
+                fail(e, ui.tr("somethingWrongSentence"))
             }
         }
     }
@@ -337,7 +361,7 @@ private fun FlowSheet(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                fail(e, "Could not add to your cart.")
+                fail(e, ui.tr("couldNotAdd"))
             }
         }
     }
@@ -353,14 +377,15 @@ private fun FlowSheet(
 
     LaunchedEffect(Unit) { start(initialStore) }
 
-    val storeName = cart?.storeName ?: store?.let { storeLabel(it) } ?: "your store"
+    val storeName = cart?.storeName ?: store?.let { storeLabel(it) } ?: ui.tr("yourStore")
+    val named = cart?.storeName != null || store != null
     // The kicker over the title: the recipe's own title, or "3 meals".
-    val kicker = if (recipes.size == 1) recipes[0].title else if (recipes.size > 1) "${recipes.size} meals" else null
+    val kicker = if (recipes.size == 1) recipes[0].title else if (recipes.size > 1) ui.tr("meals", "count" to recipes.size) else null
     val lineCount = recipes.sumOf { it.ingredients.size }
 
     SheetFrame(t) {
         val l = login
-        Header(t, kicker, l?.title ?: headerTitle(phase, storeName), onClose = ::close)
+        Header(t, kicker, l?.title ?: headerTitle(phase, storeName, named, ui), onClose = ::close)
         val c = cart
         val r = result
         val at = store
@@ -379,7 +404,7 @@ private fun FlowSheet(
                     startZip = c?.cart?.location?.zip ?: zip,
                     current = c?.cart?.location?.id,
                     onPicked = { start(at) },
-                    backLabel = if (backToList) "Back to your list" else "Choose a different store",
+                    backLabel = ui.tr(if (backToList) "backToList" else "differentStore"),
                     onBack = if (backToList) ({ phase = Phase.LIST }) else ({ openStores(Phase.ERROR) }),
                 )
             }
@@ -389,19 +414,24 @@ private fun FlowSheet(
                     onChangeStore = { openStores(Phase.LIST) },
                     onChangeLocation = { openLocation(Phase.LIST) },
                 )
-            phase == Phase.DONE && r != null && c != null -> Done(t, c, r, storeName, onDone = ::close)
+            phase == Phase.DONE && r != null && c != null -> Done(
+                t, c, r, storeName, onDone = ::close,
+                message = doneMessage,
+                actionLabel = doneAction?.label,
+                onAction = { close(); doneAction?.onClick?.invoke(r) },
+            )
             else -> ErrorView(t, error, onRetry = { start(store) }, onClose = ::close)
         }
     }
 }
 
-private fun headerTitle(phase: Phase, storeName: String): String = when (phase) {
-    Phase.DONE -> if (storeName == "your store") "In your cart" else "In your $storeName cart"
-    Phase.LOADING -> if (storeName == "your store") "Getting your cart ready" else "Getting your $storeName cart ready"
-    Phase.ERROR -> "Something went wrong"
-    Phase.STORES -> "Choose your store"
-    Phase.LOCATION -> "Find your $storeName"
-    else -> "Your $storeName list"
+private fun headerTitle(phase: Phase, storeName: String, named: Boolean, ui: MealioUi): String = when (phase) {
+    Phase.DONE -> if (named) ui.tr("titleInCart", "store" to storeName) else ui.tr("titleInCartPlain")
+    Phase.LOADING -> if (named) ui.tr("titleLoading", "store" to storeName) else ui.tr("titleLoadingPlain")
+    Phase.ERROR -> ui.tr("somethingWrong")
+    Phase.STORES -> ui.tr("titleStores")
+    Phase.LOCATION -> ui.tr("titleLocation", "store" to storeName)
+    else -> ui.tr("titleList", "store" to storeName)
 }
 
 internal fun storeLabel(id: String): String {
@@ -440,11 +470,16 @@ internal fun TopRule(t: MealioTheme, thickness: Dp = 1.dp) {
 
 @Composable
 internal fun Header(t: MealioTheme, recipeTitle: String?, title: String, onClose: () -> Unit) {
+    val ui = LocalMealioUi.current
+    val closeLabel = ui.tr("close")
     Row(
         Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.Top,
     ) {
+        ui.sheet.logo?.let { logo ->
+            Image(logo, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.size(36.dp).clip(RoundedCornerShape(8.dp)))
+        }
         Column(Modifier.weight(1f)) {
             if (!recipeTitle.isNullOrEmpty()) {
                 Text(recipeTitle, style = t.ts(13, FontWeight.Medium, t.muted), maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -462,8 +497,8 @@ internal fun Header(t: MealioTheme, recipeTitle: String?, title: String, onClose
                 .size(44.dp)
                 .clip(CircleShape)
                 .background(t.surface)
-                .clickable(role = Role.Button, onClickLabel = "Close", onClick = onClose)
-                .semantics { contentDescription = "Close" },
+                .clickable(role = Role.Button, onClickLabel = closeLabel, onClick = onClose)
+                .semantics { contentDescription = closeLabel },
             contentAlignment = Alignment.Center,
         ) {
             Text("✕", style = t.ts(16))
@@ -474,7 +509,7 @@ internal fun Header(t: MealioTheme, recipeTitle: String?, title: String, onClose
 @Composable
 private fun ColumnScope.LoginPane(t: MealioTheme, login: InlineLogin, storeName: String) {
     Text(
-        "Sign in on $storeName's own page. Mealio never sees your password.",
+        LocalMealioUi.current.tr("loginNote", "store" to storeName),
         style = t.ts(13, color = t.muted),
         modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 8.dp),
     )
@@ -490,18 +525,19 @@ private fun ColumnScope.LoginPane(t: MealioTheme, login: InlineLogin, storeName:
     }
 }
 
-private class StepRow(val keys: Set<Step>, val label: (Int, String) -> String)
+private class StepRow(val keys: Set<Step>, val label: (MealioUi, Int, String) -> String)
 
 private val STEPS = listOf(
-    StepRow(setOf(Step.CONNECTING, Step.CHECKING_SIGN_IN, Step.SIGNING_IN)) { _, store -> "Checking your $store sign-in" },
-    StepRow(setOf(Step.SEARCHING)) { n, _ -> "Finding your $n ingredient${if (n == 1) "" else "s"}" },
+    StepRow(setOf(Step.CONNECTING, Step.CHECKING_SIGN_IN, Step.SIGNING_IN)) { ui, _, store -> ui.tr("stepSignIn", "store" to store) },
+    StepRow(setOf(Step.SEARCHING)) { ui, n, _ -> ui.plural("stepFinding", n) },
 )
 
 @Composable
 private fun Loading(t: MealioTheme, step: Step, storeName: String, count: Int) {
+    val ui = LocalMealioUi.current
     val at = STEPS.indexOfFirst { step in it.keys }
     Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("Checking prices and stock at $storeName.", style = t.ts(14, color = t.muted))
+        Text(ui.tr("loadingNote", "store" to storeName), style = t.ts(14, color = t.muted))
         Column(Modifier.padding(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
             STEPS.forEachIndexed { i, x ->
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -515,7 +551,7 @@ private fun Loading(t: MealioTheme, step: Step, storeName: String, count: Int) {
                         else -> Box(Modifier.size(24.dp).border(2.dp, t.border, CircleShape))
                     }
                     Text(
-                        x.label(count, storeName),
+                        x.label(ui, count, storeName),
                         style = t.ts(15, if (i == at) FontWeight.Bold else FontWeight.Normal, if (i > at) t.muted else t.text),
                     )
                 }
@@ -548,6 +584,7 @@ fun MealioCartList(
     onChangeLocation: (() -> Unit)? = null,
 ) {
     val t = theme
+    val ui = LocalMealioUi.current
     // CartSession is not observable; this counter redraws after each change.
     var version by remember(cart) { mutableIntStateOf(0) }
     val bump = { version += 1; onChange() }
@@ -574,9 +611,9 @@ fun MealioCartList(
                     modifier = Modifier.weight(1f),
                 )
                 if (onChangeLocation != null) {
-                    val changeLabel = "Store location: ${location.name}. Change location"
+                    val changeLabel = ui.tr("a11yChangeLocation", "name" to location.name)
                     Text(
-                        "Change",
+                        ui.tr("change"),
                         style = t.ts(12, color = t.accent, lineHeight = 17),
                         modifier = Modifier
                             .clickable(enabled = !busy, role = Role.Button, onClick = onChangeLocation)
@@ -592,7 +629,7 @@ fun MealioCartList(
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             if (onChangeStore != null) {
-                val chipLabel = "Store: $storeName. Change store"
+                val chipLabel = ui.tr("a11yChangeStore", "store" to storeName)
                 Row(
                     Modifier
                         .heightIn(min = 36.dp)
@@ -605,10 +642,10 @@ fun MealioCartList(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Text(storeName, style = t.ts(13, FontWeight.SemiBold))
-                    Text("Change", style = t.ts(13, FontWeight.SemiBold, t.accent))
+                    Text(ui.tr("change"), style = t.ts(13, FontWeight.SemiBold, t.accent))
                 }
             }
-            Text("${est.count} of $selectable selected", style = t.ts(14, color = t.muted))
+            Text(ui.tr("selectedCount", "count" to est.count, "total" to selectable), style = t.ts(14, color = t.muted))
         }
         // Said while any item has no saved product, which on a recipe's first
         // cart is every item: the run where nothing on screen shows it yet.
@@ -624,7 +661,7 @@ fun MealioCartList(
                     .padding(12.dp),
             ) {
                 Text(
-                    "Pick a product for each item and Mealio will remember your preferences.",
+                    ui.tr("rememberNote"),
                     style = t.ts(13, FontWeight.Medium, t.text, lineHeight = 18),
                 )
             }
@@ -657,17 +694,19 @@ fun MealioCartList(
             val pending = cart.pendingPreferences().size
             if (pending > 0) {
                 Text(
-                    (if (pending == 1) "1 checked item needs" else "$pending checked items need") + " an option chosen before adding.",
+                    ui.plural("pendingOptions", pending),
                     style = t.ts(12, color = t.warnText, lineHeight = 17),
                     modifier = Modifier.padding(bottom = 6.dp),
                 )
             }
             // No partial totals: one unpriced item and there is no number to show.
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Bottom) {
-                val total = est.total
-                Text(if (total != null && est.estimated) "Estimated total" else "Total", style = t.ts(14, color = t.muted))
-                if (total != null) Text((if (est.estimated) "about " else "") + money(total), style = t.ts(18, FontWeight.Bold))
-                else Text("Prices at checkout", style = t.ts(15, FontWeight.SemiBold, t.muted))
+            if (ui.sheet.showTotal) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Bottom) {
+                    val total = est.total
+                    Text(ui.tr(if (total != null && est.estimated) "estimatedTotal" else "total"), style = t.ts(14, color = t.muted))
+                    if (total != null) Text(amountText(ui, total, est.estimated), style = t.ts(18, FontWeight.Bold))
+                    else Text(ui.tr("pricesAtCheckout"), style = t.ts(15, FontWeight.SemiBold, t.muted))
+                }
             }
             val off = busy || est.count == 0
             Cta(t, enabled = !off, onClick = onAdd, modifier = Modifier.alpha(if (off) 0.5f else 1f)) {
@@ -675,7 +714,7 @@ fun MealioCartList(
                     CircularProgressIndicator(Modifier.size(24.dp), color = t.onAccent, strokeWidth = 2.5.dp)
                 } else {
                     Text(
-                        if (est.count > 0) "Add ${est.count} item${if (est.count == 1) "" else "s"} to $storeName" else "Select items to add",
+                        if (est.count > 0) ui.plural("addItems", est.count, "store" to storeName) else ui.tr("selectItems"),
                         style = t.ts(16, FontWeight.Bold, t.onAccent),
                     )
                 }
@@ -735,6 +774,7 @@ private fun ItemRow(
     onChange: () -> Unit,
     disabled: Boolean,
 ) {
+    val ui = LocalMealioUi.current
     val scope = rememberCoroutineScope()
     var query by remember { mutableStateOf("") }
     var searching by remember { mutableStateOf(false) }
@@ -757,7 +797,7 @@ private fun ItemRow(
                 }
                 Column(Modifier.weight(1f)) {
                     Text(item.ingredient, style = t.ts(12, FontWeight.Medium, t.muted), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text("Not found at $storeName", style = t.ts(14, color = t.muted))
+                    Text(ui.tr("notFoundAt", "store" to storeName), style = t.ts(14, color = t.muted))
                 }
             }
         }
@@ -795,13 +835,13 @@ private fun ItemRow(
         scope.launch {
             try {
                 val found = cart.search(item.key, q)
-                searchNote = if (found.isEmpty()) "Nothing found for \"$q\"." else null
+                searchNote = if (found.isEmpty()) ui.tr("nothingFound", "query" to q) else null
                 query = ""
                 onChange()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                searchNote = e.message ?: "Search failed. Try again."
+                searchNote = e.message ?: ui.tr("searchFailed")
             } finally {
                 searching = false
             }
@@ -810,13 +850,15 @@ private fun ItemRow(
 
     val meta = when {
         picked != null -> listOfNotNull(
-            priceText(picked).takeIf { it.isNotEmpty() },
-            if (picked.id == item.remembered?.id) "Your usual" else null,
+            priceText(picked, ui).takeIf { it.isNotEmpty() },
+            if (picked.id == item.remembered?.id) ui.tr("yourUsual") else null,
         ).joinToString(" · ")
-        item.status == ItemStatus.REMEMBERED -> "Not adding this time"
-        item.status == ItemStatus.REMEMBERED_UNAVAILABLE -> "Your usual is out of stock"
-        else -> "${options.size} option${if (options.size == 1) "" else "s"}"
+        item.status == ItemStatus.REMEMBERED -> ui.tr("notAddingThisTime")
+        item.status == ItemStatus.REMEMBERED_UNAVAILABLE -> ui.tr("usualOutOfStock")
+        else -> ui.plural("options", options.size)
     }
+    // What tapping the row does right now, on the button and for TalkBack.
+    val rowAction = ui.tr(if (open) "done" else if (on || item.status == ItemStatus.REMEMBERED) "change" else "choose")
 
     Column(
         Modifier.fillMaxWidth().clip(cardShape).background(t.background).border(1.dp, if (open) t.muted else t.border, cardShape),
@@ -826,7 +868,7 @@ private fun ItemRow(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            val label = (if (on) "Leave out " else "Add ") + item.ingredient
+            val label = ui.tr(if (on) "a11yLeaveOut" else "a11yAdd", "item" to item.ingredient)
             Box(
                 Modifier
                     .size(48.dp)
@@ -849,14 +891,14 @@ private fun ItemRow(
             Column(
                 Modifier
                     .weight(1f)
-                    .clickable(role = Role.Button, onClickLabel = "Show the options", onClick = onToggleOpen),
+                    .clickable(role = Role.Button, onClickLabel = rowAction, onClick = onToggleOpen),
             ) {
                 Text(item.ingredient, style = t.ts(12, FontWeight.Medium, t.muted), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                forRecipes(cart, item.key)?.let {
+                forRecipes(cart, item.key, ui)?.let {
                     Text(it, style = t.ts(11, color = t.muted), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 Text(
-                    shown?.name ?: "Choose a product",
+                    shown?.name ?: ui.tr("chooseProduct"),
                     style = t.ts(
                         15, FontWeight.SemiBold,
                         color = if (on) t.text else t.muted,
@@ -872,12 +914,12 @@ private fun ItemRow(
                 Modifier
                     .heightIn(min = 44.dp)
                     .clickable(role = Role.Button, onClick = onToggleOpen)
-                    .semantics { stateDescription = if (open) "Expanded" else "Collapsed" }
+                    .semantics { if (open) collapse { onToggleOpen(); true } else expand { onToggleOpen(); true } }
                     .padding(horizontal = 10.dp),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
-                    if (open) "Done" else if (on || item.status == ItemStatus.REMEMBERED) "Change" else "Choose",
+                    rowAction,
                     style = t.ts(14, FontWeight.SemiBold, t.accent),
                 )
             }
@@ -885,7 +927,7 @@ private fun ItemRow(
 
         if (on && picked != null && cart.needsPreference(item.key)) {
             Text(
-                "Choose one: " + listOr(picked.preferences.map { it.label }),
+                ui.tr("chooseOne", "options" to listOr(picked.preferences.map { it.label }, ui)),
                 style = t.ts(13, FontWeight.SemiBold, t.accent, lineHeight = 18),
                 modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 8.dp).semantics { liveRegion = LiveRegionMode.Polite },
             )
@@ -909,26 +951,28 @@ private fun ItemRow(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                Text(if (byWeight) "Weight" else "Quantity", style = t.ts(12, color = t.muted, lineHeight = 17))
+                Text(ui.tr(if (byWeight) "weight" else "quantity"), style = t.ts(12, color = t.muted, lineHeight = 17))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    StepButton(t, "−", "Less ${item.ingredient}", enabled = !disabled && !atMin, dim = atMin) { step(-1) }
+                    StepButton(t, "−", ui.tr("a11yLess", "item" to item.ingredient), enabled = !disabled && !atMin, dim = atMin) { step(-1) }
                     val value = if (byWeight) lbText(lb) else "$n"
-                    val valueLabel = if (byWeight) "Weight ${lbText(lb)}" else "Quantity $n"
+                    val valueLabel = "${ui.tr(if (byWeight) "weight" else "quantity")} $value"
                     Text(
                         value,
                         style = t.ts(16, FontWeight.Bold),
                         textAlign = TextAlign.Center,
                         modifier = Modifier.widthIn(min = if (byWeight) 64.dp else 28.dp).semantics { contentDescription = valueLabel },
                     )
-                    StepButton(t, "+", "More ${item.ingredient}", enabled = !disabled && !atMax, dim = atMax) { step(1) }
+                    StepButton(t, "+", ui.tr("a11yMore", "item" to item.ingredient), enabled = !disabled && !atMax, dim = atMax) { step(1) }
                 }
             }
         }
 
         if (item.status == ItemStatus.REMEMBERED_UNAVAILABLE && !on) {
-            val name = item.remembered?.let { ", ${it.name}," } ?: ""
-            val why = if (item.reason == "not_found") "not available" else "out of stock"
-            WarnBox(t, "Your usual$name is $why today. Pick another this time. It stays your usual.", Modifier.padding(start = 12.dp, end = 12.dp, bottom = 12.dp))
+            val notFound = item.reason == "not_found"
+            val usual = item.remembered
+            val warning = if (usual != null) ui.tr(if (notFound) "usualNotAvailableNamed" else "usualOutNamed", "name" to usual.name)
+            else ui.tr(if (notFound) "usualNotAvailable" else "usualOut")
+            WarnBox(t, warning, Modifier.padding(start = 12.dp, end = 12.dp, bottom = 12.dp))
         }
 
         if (open) {
@@ -960,11 +1004,11 @@ private fun ItemRow(
                                 overflow = TextOverflow.Ellipsis,
                             )
                             Text(
-                                if (o.outOfStock) "Out of stock" else priceText(o),
+                                if (o.outOfStock) ui.tr("outOfStock") else priceText(o, ui),
                                 style = t.ts(13, FontWeight.SemiBold),
                             )
-                            if (usual) Text("Your usual", style = t.ts(11, FontWeight.Bold, t.accent))
-                            else if (o.badge == "popular") Text(o.badgeLabel ?: "Crowd favorite", style = t.ts(11, FontWeight.Bold, t.muted))
+                            if (usual) Text(ui.tr("yourUsual"), style = t.ts(11, FontWeight.Bold, t.accent))
+                            else if (o.badge == "popular") Text(o.badgeLabel ?: ui.tr("crowdFavorite"), style = t.ts(11, FontWeight.Bold, t.muted))
                         }
                     }
                 }
@@ -992,7 +1036,7 @@ private fun ItemRow(
                         }
                     }
                 }
-                val hint = "Search $storeName for something else"
+                val hint = ui.tr("searchPlaceholder", "store" to storeName)
                 Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     val shape = RoundedCornerShape(t.radius.minus2())
                     BasicTextField(
@@ -1028,8 +1072,8 @@ private fun ItemRow(
                             .padding(horizontal = 14.dp),
                         contentAlignment = Alignment.Center,
                     ) {
-                        if (searching) CircularProgressIndicator(Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
-                        else Text("Search", style = t.ts(14, FontWeight.SemiBold, Color.White))
+                        if (searching) CircularProgressIndicator(Modifier.size(20.dp), color = t.onAccent, strokeWidth = 2.dp)
+                        else Text(ui.tr("search"), style = t.ts(14, FontWeight.SemiBold, t.onAccent))
                     }
                 }
                 searchNote?.let {
@@ -1067,17 +1111,29 @@ private fun Thumb(t: MealioTheme, product: Product?, dim: Boolean = false, big: 
  * store's own app or site, not ours.
  */
 @Composable
-private fun ColumnScope.Done(t: MealioTheme, cart: CartSession, result: AddResult, storeName: String, onDone: () -> Unit) {
+private fun ColumnScope.Done(
+    t: MealioTheme,
+    cart: CartSession,
+    result: AddResult,
+    storeName: String,
+    onDone: () -> Unit,
+    message: String?,
+    actionLabel: String?,
+    onAction: () -> Unit,
+) {
+    val ui = LocalMealioUi.current
     val n = result.added.size
     val sum = remember(result) { cart.addedTotal(result) }
-    val left = remember(result) { leftOut(cart, result, storeName) }
+    val left = remember(result, ui) { leftOut(cart, result, storeName, ui) }
     var open by remember(result) { mutableStateOf(result.failed.isNotEmpty()) }
     val total = sum.total
-    val subtitle = listOfNotNull(
-        if (total != null) (if (sum.estimated) "about " else "") + money(total) else "Prices at checkout",
-        null,
-    ).joinToString(" · ")
-    val title = if (n > 0) "$n item${if (n == 1) "" else "s"} added" else "Nothing was added"
+    val subtitle = when {
+        n == 0 -> ui.tr("cartUnchanged")
+        !ui.sheet.showTotal -> ""
+        total != null -> amountText(ui, total, sum.estimated)
+        else -> ui.tr("pricesAtCheckout")
+    }
+    val title = if (n > 0) ui.plural("itemsAdded", n) else ui.tr("nothingAdded")
     val card = RoundedCornerShape(t.radius + 2.dp)
 
     Column(
@@ -1088,7 +1144,7 @@ private fun ColumnScope.Done(t: MealioTheme, cart: CartSession, result: AddResul
             .padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        val bannerLabel = if (n > 0) "$title, $subtitle" else "$title. Your cart did not change."
+        val bannerLabel = listOf(title, subtitle).filter { it.isNotEmpty() }.joinToString(", ")
         Row(
             Modifier
                 .fillMaxWidth()
@@ -1111,11 +1167,17 @@ private fun ColumnScope.Done(t: MealioTheme, cart: CartSession, result: AddResul
             }
             Column(Modifier.weight(1f)) {
                 Text(title, style = t.ts(15, FontWeight.Bold, if (n > 0) t.text else t.warnText))
-                Text(
-                    if (n > 0) subtitle else "Your cart did not change.",
-                    style = t.ts(13, color = if (n > 0) t.text.copy(alpha = 0.85f) else t.warnText, lineHeight = 18),
-                )
+                if (subtitle.isNotEmpty()) {
+                    Text(
+                        subtitle,
+                        style = t.ts(13, color = if (n > 0) t.text.copy(alpha = 0.85f) else t.warnText, lineHeight = 18),
+                    )
+                }
             }
+        }
+
+        if (!message.isNullOrEmpty()) {
+            Text(message, style = t.ts(15, align = TextAlign.Center), modifier = Modifier.fillMaxWidth())
         }
 
         if (n > 0) {
@@ -1133,15 +1195,15 @@ private fun ColumnScope.Done(t: MealioTheme, cart: CartSession, result: AddResul
                         .heightIn(min = 56.dp)
                         .clickable(role = Role.Button, onClick = { open = !open })
                         .semantics {
-                            contentDescription = "Left out this time: $names"
-                            stateDescription = if (open) "Expanded" else "Collapsed"
+                            contentDescription = "${ui.tr("leftOut")}: $names"
+                            if (open) collapse { open = false; true } else expand { open = true; true }
                         }
                         .padding(vertical = 10.dp, horizontal = 16.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text("Left out this time", style = t.ts(14, FontWeight.SemiBold))
+                        Text(ui.tr("leftOut"), style = t.ts(14, FontWeight.SemiBold))
                         if (!open) {
                             Text(sentence(names), style = t.ts(12, color = t.muted, lineHeight = 17), maxLines = 2, overflow = TextOverflow.Ellipsis)
                         }
@@ -1172,7 +1234,14 @@ private fun ColumnScope.Done(t: MealioTheme, cart: CartSession, result: AddResul
         Modifier.fillMaxWidth().background(t.background).padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 28.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Cta(t, onClick = onDone) { Text("Done", style = t.ts(16, FontWeight.Bold, t.onAccent)) }
+        if (actionLabel != null) {
+            Cta(t, onClick = onAction) { Text(actionLabel, style = t.ts(16, FontWeight.Bold, t.onAccent)) }
+        }
+        // A partner button is the main button, and Done turns quiet.
+        val quiet = actionLabel != null
+        Cta(t, onClick = onDone, background = if (quiet) t.surface else t.accent) {
+            Text(ui.tr("done"), style = t.ts(16, FontWeight.Bold, if (quiet) t.text else t.onAccent))
+        }
         Text(
             "Cart by Mealio",
             style = t.ts(12, color = t.muted, lineHeight = 17, align = TextAlign.Center),
@@ -1183,17 +1252,18 @@ private fun ColumnScope.Done(t: MealioTheme, cart: CartSession, result: AddResul
 
 @Composable
 private fun AddedRow(t: MealioTheme, cart: CartSession, item: AddedItem, first: Boolean) {
+    val ui = LocalMealioUi.current
     val product = cart.selected(item.key)
     val image = item.imageUrl?.takeIf { it.isNotEmpty() } ?: product?.imageUrl
     val line = item.ingredient?.takeIf { it.isNotEmpty() } ?: cart.items.firstOrNull { it.key == item.key }?.ingredient ?: ""
     val w = item.weightLb
     val amount = if (w != null) lbText(w) else "×${item.quantity}"
     val p = cart.addedPrice(item)
-    val price = p?.let { (if (it.estimated) "about " else "") + money(it.amount) } ?: ""
+    val price = p?.takeIf { ui.sheet.showTotal }?.let { amountText(ui, it.amount, it.estimated) } ?: ""
     val spoken = listOfNotNull(
         item.name,
-        if (line.isNotEmpty()) "for $line" else null,
-        if (w != null) "${lbNumber(w)} pounds" else "quantity ${item.quantity}",
+        if (line.isNotEmpty()) ui.tr("forRecipes", "recipes" to line) else null,
+        if (w != null) "${ui.tr("weight")} $amount" else "${ui.tr("quantity")} ${item.quantity}",
         price.takeIf { it.isNotEmpty() },
     ).joinToString(", ")
     Column(Modifier.fillMaxWidth()) {
@@ -1265,19 +1335,19 @@ private fun ChevronIcon(color: Color, up: Boolean, modifier: Modifier = Modifier
 private class LeftOut(val key: String, val label: String, val why: String, val failed: Boolean)
 
 /** Everything the store did not take this run: unchecked, skipped, or failed (with its reason). */
-private fun leftOut(cart: CartSession, result: AddResult, storeName: String): List<LeftOut> {
+private fun leftOut(cart: CartSession, result: AddResult, storeName: String, ui: MealioUi): List<LeftOut> {
     fun item(key: String) = cart.items.firstOrNull { it.key == key }
     val out = ArrayList<LeftOut>()
     for (f in result.failed) {
-        out += LeftOut(f.key, item(f.key)?.ingredient?.takeIf { it.isNotEmpty() } ?: f.name, sentence("${f.name}: ${reasonText(f.reason)}"), true)
+        out += LeftOut(f.key, item(f.key)?.ingredient?.takeIf { it.isNotEmpty() } ?: f.name, sentence("${f.name}: ${reasonText(f.reason, ui)}"), true)
     }
     for (x in result.skipped) {
         val it = item(x.key)
         val why = when {
-            it?.status == ItemStatus.UNAVAILABLE -> "Not found at $storeName"
-            x.reason == "preference_required" -> "Needed an option chosen"
-            x.reason == "deselected" -> "Unchecked this time"
-            else -> "Not chosen"
+            it?.status == ItemStatus.UNAVAILABLE -> ui.tr("notFoundAt", "store" to storeName)
+            x.reason == "preference_required" -> ui.tr("neededOption")
+            x.reason == "deselected" -> ui.tr("uncheckedThisTime")
+            else -> ui.tr("notChosen")
         }
         out += LeftOut(x.key, it?.ingredient?.takeIf { s -> s.isNotEmpty() } ?: x.key, why, false)
     }
@@ -1293,33 +1363,38 @@ internal fun monogram(name: String): String {
     return ((w.getOrNull(0)?.take(1) ?: "") + (w.getOrNull(1)?.take(1) ?: "")).uppercase()
 }
 
-/** "0.75", "1": pounds without the unit. */
-private fun lbNumber(lb: Double): String =
-    java.math.BigDecimal(String.format(java.util.Locale.US, "%.2f", lb)).stripTrailingZeros().toPlainString()
-
 /** "0.75 lb", "1 lb". */
 internal fun lbText(lb: Double): String =
     java.math.BigDecimal(String.format(java.util.Locale.US, "%.2f", lb)).stripTrailingZeros().toPlainString() + " lb"
 
 /** "A, B or C". */
-internal fun listOr(xs: List<String>): String {
+internal fun listOr(xs: List<String>, ui: MealioUi): String {
     if (xs.size <= 1) return xs.firstOrNull() ?: ""
-    return xs.dropLast(1).joinToString(", ") + " or " + xs.last()
+    return xs.dropLast(1).joinToString(", ") + " " + ui.tr("or") + " " + xs.last()
+}
+
+/** "$12.50", or "about $12.50" when the store's own price is an estimate. */
+internal fun amountText(ui: MealioUi, amount: Double, estimated: Boolean): String {
+    val price = ui.money(amount)
+    return if (estimated) ui.tr("aboutPrice", "price" to price) else price
 }
 
 /** The price as a row shows it. Sold by the pound: "$9.99/lb est.". */
-internal fun priceText(p: Product): String {
+internal fun priceText(p: Product, ui: MealioUi): String {
     val perLb = p.pricePerLb
-    if (p.soldByWeight == true && perLb != null) return "${money(perLb)}/lb est."
-    return ((p.price ?: "") + (if (p.estimated) " est." else "")).trim()
+    if (p.soldByWeight == true && perLb != null) return ui.tr("pricePerLb", "price" to ui.money(perLb))
+    // The store's own text, unless the partner set how prices read.
+    val unit = p.unitPrice
+    val price = if (ui.customMoney && unit != null) ui.money(unit) else p.price ?: ""
+    return if (p.estimated && price.isNotEmpty()) ui.tr("priceEstimate", "price" to price) else price
 }
 
-internal fun reasonText(r: String): String = when {
-    r == "not_confirmed" -> "not confirmed in your cart"
-    r == "weight_not_supported" -> "sold by weight, which this store cannot take here"
-    Regex("stock").containsMatchIn(r) -> "out of stock"
-    Regex("timeout|no_answer").containsMatchIn(r) -> "the store did not answer"
-    else -> "the store refused it"
+internal fun reasonText(r: String, ui: MealioUi): String = when {
+    r == "not_confirmed" -> ui.tr("reasonNotConfirmed")
+    r == "weight_not_supported" -> ui.tr("reasonWeight")
+    Regex("stock").containsMatchIn(r) -> ui.tr("reasonOutOfStock")
+    Regex("timeout|no_answer").containsMatchIn(r) -> ui.tr("reasonNoAnswer")
+    else -> ui.tr("reasonRefused")
 }
 
 private fun isZip(z: String): Boolean = z.length == 5 && z.all { it in '0'..'9' }
@@ -1343,6 +1418,7 @@ internal fun ColumnScope.LocationPicker(
     backLabel: String,
     onBack: () -> Unit,
 ) {
+    val ui = LocalMealioUi.current
     val scope = rememberCoroutineScope()
     var zip by remember { mutableStateOf(startZip ?: "") }
     var found by remember { mutableStateOf<FoundLocations?>(null) }
@@ -1366,7 +1442,7 @@ internal fun ColumnScope.LocationPicker(
                 throw e
             } catch (e: Exception) {
                 if (ask != id) return@launch
-                problem = e.message ?: "Could not look up stores. Try again."
+                problem = e.message ?: ui.tr("couldNotLookUp")
             } finally {
                 if (ask == id) busy = false
             }
@@ -1383,7 +1459,7 @@ internal fun ColumnScope.LocationPicker(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                problem = e.message ?: "Could not save that store. Try again."
+                problem = e.message ?: ui.tr("couldNotSaveStore")
                 saving = null
             }
         }
@@ -1397,10 +1473,11 @@ internal fun ColumnScope.LocationPicker(
         Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(start = 16.dp, end = 16.dp, bottom = 24.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Text("Enter your zip code to see $storeName stores near you.", style = t.ts(14, color = t.muted))
+        Text(ui.tr("zipPrompt", "store" to storeName), style = t.ts(14, color = t.muted))
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             val shape = RoundedCornerShape(t.radius.minus2())
             val valid = isZip(zip)
+            val zipLabel = ui.tr("zipCode")
             BasicTextField(
                 value = zip,
                 onValueChange = { v -> zip = v.filter { it in '0'..'9' }.take(5) },
@@ -1412,13 +1489,13 @@ internal fun ColumnScope.LocationPicker(
                 modifier = Modifier
                     .weight(1f)
                     .heightIn(min = 48.dp)
-                    .semantics { contentDescription = "Zip code" },
+                    .semantics { contentDescription = zipLabel },
                 decorationBox = { inner ->
                     Box(
                         Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(shape).background(t.surface).padding(horizontal = 12.dp),
                         contentAlignment = Alignment.CenterStart,
                     ) {
-                        if (zip.isEmpty()) Text("Zip code", style = t.ts(16, color = t.muted), maxLines = 1)
+                        if (zip.isEmpty()) Text(zipLabel, style = t.ts(16, color = t.muted), maxLines = 1)
                         inner()
                     }
                 },
@@ -1433,7 +1510,7 @@ internal fun ColumnScope.LocationPicker(
                     .padding(horizontal = 16.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                Text("Find stores", style = t.ts(16, FontWeight.Bold, t.onAccent))
+                Text(ui.tr("findStores"), style = t.ts(16, FontWeight.Bold, t.onAccent))
             }
         }
         if (busy) {
@@ -1444,7 +1521,7 @@ internal fun ColumnScope.LocationPicker(
         problem?.let { Text(it, style = t.ts(15)) }
         val results = found
         if (results != null && results.locations.isEmpty()) {
-            Text("No $storeName stores near ${results.zip}. Try another zip code.", style = t.ts(14, color = t.muted))
+            Text(ui.tr("noStoresNear", "store" to storeName, "zip" to results.zip), style = t.ts(14, color = t.muted))
         }
         results?.locations?.forEach { l ->
             key(l.id) {
@@ -1468,7 +1545,7 @@ internal fun ColumnScope.LocationPicker(
                     if (saving == l.id) {
                         CircularProgressIndicator(Modifier.size(20.dp), color = t.accent, strokeWidth = 2.dp)
                     } else if (on) {
-                        Text("Current", style = t.ts(12, color = t.accent, lineHeight = 17))
+                        Text(ui.tr("current"), style = t.ts(12, color = t.accent, lineHeight = 17))
                     }
                 }
             }
@@ -1488,6 +1565,7 @@ private fun ColumnScope.StorePicker(
     onPick: (String) -> Unit,
     onBack: (() -> Unit)?,
 ) {
+    val ui = LocalMealioUi.current
     if (stores == null) {
         Box(Modifier.fillMaxWidth().padding(20.dp), contentAlignment = Alignment.Center) {
             CircularProgressIndicator(Modifier.size(28.dp), color = t.accent, strokeWidth = 2.5.dp)
@@ -1498,7 +1576,7 @@ private fun ColumnScope.StorePicker(
         Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(start = 16.dp, end = 16.dp, bottom = 24.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        if (stores.isEmpty()) Text("Could not load stores. Close and try again.", style = t.ts(14, color = t.muted))
+        if (stores.isEmpty()) Text(ui.tr("couldNotLoadStores"), style = t.ts(14, color = t.muted))
         for (st in stores) {
             val on = st.id == current
             val shape = RoundedCornerShape(t.radius)
@@ -1514,25 +1592,26 @@ private fun ColumnScope.StorePicker(
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Text(st.name, style = t.ts(15, FontWeight.SemiBold, lineHeight = 20), modifier = Modifier.weight(1f))
-                if (on) Text("Current", style = t.ts(12, color = t.accent, lineHeight = 17))
+                if (on) Text(ui.tr("current"), style = t.ts(12, color = t.accent, lineHeight = 17))
             }
         }
     }
     if (onBack != null) {
         TopRule(t)
         Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 28.dp)) {
-            Cta(t, onClick = onBack, background = t.surface) { Text("Back to your list", style = t.ts(16, FontWeight.Bold, t.text)) }
+            Cta(t, onClick = onBack, background = t.surface) { Text(ui.tr("backToList"), style = t.ts(16, FontWeight.Bold, t.text)) }
         }
     }
 }
 
 @Composable
 private fun ColumnScope.ErrorView(t: MealioTheme, error: FlowError?, onRetry: () -> Unit, onClose: () -> Unit) {
-    val msg = if (error?.code == "login_cancelled") "Sign-in was closed before it finished." else error?.message ?: "Something went wrong."
+    val ui = LocalMealioUi.current
+    val msg = if (error?.code == "login_cancelled") ui.tr("signInClosed") else error?.message ?: ui.tr("somethingWrongSentence")
     Column(Modifier.weight(1f).fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(msg, style = t.ts(15))
         Spacer(Modifier.weight(1f))
-        Cta(t, onClick = onRetry) { Text("Try again", style = t.ts(16, FontWeight.Bold, t.onAccent)) }
-        Cta(t, onClick = onClose, background = t.surface) { Text("Close", style = t.ts(16, FontWeight.Bold, t.text)) }
+        Cta(t, onClick = onRetry) { Text(ui.tr("tryAgain"), style = t.ts(16, FontWeight.Bold, t.onAccent)) }
+        Cta(t, onClick = onClose, background = t.surface) { Text(ui.tr("close"), style = t.ts(16, FontWeight.Bold, t.text)) }
     }
 }

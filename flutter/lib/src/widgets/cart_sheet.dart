@@ -8,6 +8,7 @@ import '../cart_session.dart';
 import '../errors.dart';
 import '../protocol.dart';
 import '../theme.dart';
+import '../ui.dart';
 import 'cart_list.dart';
 import 'flow_parts.dart';
 
@@ -49,22 +50,28 @@ class MealioCartSheet extends StatefulWidget {
     @Deprecated('The drop-in never opens the store cart') ValueChanged<String>? onOpenStoreCart,
     MealioTheme? theme,
   }) async {
-    final t = theme ?? MealioTheme.of(context);
     final storeName = session.storeName ?? storeLabel(session.store);
     AddResult? added;
+    final carry = mealioCarryScope(context);
     final r = await Navigator.of(context, rootNavigator: true).push<AddResult>(
       MealioSheetRoute<AddResult>(
-        builder: (BuildContext sheetContext) => SheetFrame(
-          theme: t,
-          title: 'Your $storeName list',
-          onClose: () => Navigator.of(sheetContext).pop(added),
-          child: MealioCartSheet(
-            session: session,
-            theme: t,
-            // ignore: deprecated_member_use_from_same_package
-            onOpenStoreCart: onOpenStoreCart,
-            onAdded: (AddResult a) => added = a,
-            onDone: (AddResult a) => Navigator.of(sheetContext).pop(a),
+        barrierLabel: MealioUi.of(context).tr('close'),
+        builder: (BuildContext sheetContext) => carry(
+          Builder(
+            // No theme unless one was passed: the sheet follows the phone in auto.
+            builder: (BuildContext inner) => SheetFrame(
+              theme: theme ?? MealioTheme.of(inner),
+              title: MealioUi.of(inner).tr('titleList', <String, Object?>{'store': storeName}),
+              onClose: () => Navigator.of(sheetContext).pop(added),
+              child: MealioCartSheet(
+                session: session,
+                theme: theme,
+                // ignore: deprecated_member_use_from_same_package
+                onOpenStoreCart: onOpenStoreCart,
+                onAdded: (AddResult a) => added = a,
+                onDone: (AddResult a) => Navigator.of(sheetContext).pop(a),
+              ),
+            ),
           ),
         ),
       ),
@@ -80,6 +87,9 @@ class _MealioCartSheetState extends State<MealioCartSheet> {
   bool _adding = false;
   AddResult? _result;
   String? _error;
+
+  /// Set each build, for the add that fails after it.
+  MealioUi _ui = const MealioUi();
 
   Future<void> _add() async {
     setState(() {
@@ -97,7 +107,7 @@ class _MealioCartSheetState extends State<MealioCartSheet> {
     } on MealioException catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = e.message.isEmpty ? 'Could not add to your cart.' : e.message;
+        _error = e.message.isEmpty ? _ui.tr('couldNotAdd') : e.message;
         _adding = false;
       });
       widget.onError?.call(e);
@@ -107,6 +117,7 @@ class _MealioCartSheetState extends State<MealioCartSheet> {
   @override
   Widget build(BuildContext context) {
     final t = widget.theme ?? MealioTheme.of(context);
+    _ui = MealioUi.of(context);
     final s = widget.session;
     final storeName = s.storeName ?? storeLabel(s.store);
     final result = _result;

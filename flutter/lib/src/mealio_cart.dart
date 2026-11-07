@@ -11,7 +11,9 @@ import 'client.dart';
 import 'errors.dart';
 import 'host.dart';
 import 'protocol.dart';
+import 'strings.dart';
 import 'theme.dart';
+import 'ui.dart';
 import 'webview_host.dart';
 import 'widgets/store_settings.dart';
 
@@ -71,15 +73,29 @@ class MealioCart {
   /// `sessionTokenProvider` returns an SDK session token your server got from
   /// `POST /api/v1/sessions`. It is called again when a token expires.
   ///
-  /// `theme` styles the drop-in widgets. `MealioScope(theme: ...)` overrides it.
+  /// `theme` styles the drop-in widgets. `darkTheme`, `colorScheme` (`auto`
+  /// follows the phone), `strings` (any word, see [mealioDefaultStrings]),
+  /// `formatMoney` and `sheet` go with it. `MealioScope` overrides each one.
   static MealioCart configure({
     required String publishableKey,
     required Future<String> Function() sessionTokenProvider,
     String baseUrl = defaultBaseUrl,
     Future<String?> Function()? attestationProvider,
     MealioTheme? theme,
+    MealioTheme? darkTheme,
+    MealioColorScheme? colorScheme,
+    Map<String, String>? strings,
+    MealioMoneyFormat? formatMoney,
+    MealioSheetOptions? sheet,
   }) {
-    MealioTheme.configured = theme;
+    MealioLook.configured = MealioLook(
+      theme: theme,
+      darkTheme: darkTheme,
+      colorScheme: colorScheme,
+      strings: strings,
+      formatMoney: formatMoney,
+      sheet: sheet,
+    );
     final client = MealioClient(
       ClientConfig(
         publishableKey: publishableKey,

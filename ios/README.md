@@ -62,7 +62,7 @@ That is the whole integration.
   at, and `zip` fills the zip box on that screen. Without it, they type it in.
   The list shows the store with a Change link.
 - `label:` changes the button text (default "Add to my grocery cart");
-  `disabled:` fades it.
+  `disabled:` fades it. `variant:` changes its shape, see "Button variants".
 
 ### Several recipes in one cart
 
@@ -112,6 +112,35 @@ Or put `MealioCartFlow(recipe:store:zip:onAdded:onError:onClose:)` in a
 `.sheet` of your own. `onClose` is called exactly once, whether the user taps
 Close, Done, or swipes the sheet away.
 
+Or keep `MealioCartButton` and draw it yourself. It keeps the whole flow and
+the warm-up:
+
+```swift
+MealioCartButton(recipe: recipe, store: "heb") { action, disabled, label in
+    MyBrandButton(title: label, action: action)
+        .opacity(disabled ? 0.5 : 1)
+}
+```
+
+`action` opens the sheet, and does nothing while `disabled` is true. `label` is
+your `label:` or the `addToCart` string. The closure takes all three parameters.
+
+### Button variants
+
+```swift
+MealioCartButton(recipe: recipe, variant: .outline)
+```
+
+| variant | looks like |
+| --- | --- |
+| `.solid` | the accent filled, full width. The default |
+| `.outline` | an accent border, full width |
+| `.compact` | small, for a recipe card. The label defaults to "Add to cart" |
+| `.icon` | a round 48pt cart button. The label is its accessibility label |
+
+`.compact` and `.icon` are only as wide as they need to be, so place them where
+you want them.
+
 ### What the user sees
 
 - **Loading:** "Checking your H-E-B sign-in", then "Finding your 6 ingredients".
@@ -132,6 +161,23 @@ Close, Done, or swipes the sheet away.
   (or "Prices at checkout"), one row per added item (image, product, the recipe
   line, amount, price), a collapsed "Left out this time" that opens on its own
   when something failed (with the reason in plain words), and a Done button.
+
+### The done screen
+
+Add a line and a button of your own. `MealioCartButton`, `.mealioCartFlow` and
+`MealioCartFlow` all take these:
+
+```swift
+MealioCartButton(recipe: recipe,
+                 doneMessage: "Enjoy your meal!",
+                 doneAction: MealioDoneAction(label: "Back to meal plan") { result in
+                     router.showMealPlan(result)
+                 })
+```
+
+Your button becomes the main button and Done turns quiet. Tapping it closes the
+sheet, then calls your handler with the result. `onClose` runs first. The
+handler waits until the sheet has gone, so it can present or navigate.
 
 ### Store settings
 
@@ -167,6 +213,91 @@ MealioCart.configure(theme: MealioTheme(
 ```
 
 Every field has a default (`MealioTheme.default`), so pass only what you change.
+
+### Dark mode
+
+The drop-in is light unless you say otherwise:
+
+```swift
+MealioCart.configure(colorScheme: .auto)     // .light (the default), .dark, or .auto
+
+// Optional: your own dark colors. Anything you leave out is Mealio's dark default.
+MealioCart.configure(darkTheme: MealioDarkTheme(accent: .mint))
+```
+
+`.auto` follows the SwiftUI `colorScheme` environment. `MealioDarkTheme` has the
+same fields as `MealioTheme`. Its `radius` and `fontName` stay nil to carry over
+from your light theme, so set them only if dark should differ. Product photos
+keep a white background in both modes.
+
+`MealioCart.resolvedTheme(for: colorScheme)` returns the theme in force, if you
+draw screens of your own to match. `MealioCartList(theme:)` uses the theme you
+pass exactly as given.
+
+### Words and languages
+
+Change or translate any word the drop-in shows, accessibility labels and the
+store settings sheet included:
+
+```swift
+MealioCart.configure(strings: [
+    .addToCart: "Zum Warenkorb",
+    .done: "Fertig",
+    .titleList: "Deine {store} Liste",
+    .addItems_one: "1 Artikel zu {store}",
+    .addItems_other: "{count} Artikel zu {store}",
+])
+```
+
+Keys are `MealioStringKey`, and `DEFAULT_STRINGS` has every default. Keys you
+leave out keep the default text.
+
+- `{store}`-style placeholders are filled in at runtime. A placeholder with no
+  value stays visible, so a typo shows on screen.
+- A key ending `_one` or `_other` is the singular or plural of one message.
+- "Cart by Mealio" on the done screen is fixed.
+- Error messages from Mealio's server and the store's own sign-in title are not
+  in the table. Weights always read "lb".
+
+`MealioCart.text` is the table in force, with `tr`, `plural` and `money`, for
+screens of your own. `session.recipesLabel(for: key, text: MealioCart.text)`
+gives the "For Tacos and Pasta" line in your words.
+
+### Prices
+
+```swift
+MealioCart.configure(formatMoney: { amount in
+    amount.formatted(.currency(code: "EUR"))
+})
+```
+
+The default reads "$12.50". With `formatMoney` set, totals, per-pound prices and
+option prices all go through it. Option prices then come from the numeric
+`unitPrice`, not the store's price text. An option with no `unitPrice` still
+shows the store's text. Clear it with `MealioCart.formatMoney = nil`.
+
+### The sheet
+
+```swift
+MealioCart.configure(sheet: MealioSheetOptions(showTotal: false,
+                                               height: .fraction(0.8),
+                                               logo: Image("BrandLogo")))
+```
+
+- `showTotal` (default true): false hides the list's total row, the price on the
+  done screen and the prices on its rows. Options keep their own prices. There
+  is never a partial total: if any item has no price, the sheet says "Prices at
+  checkout" instead.
+- `height`: `.auto` (the default) is the ordinary tall sheet. `.full` fills the
+  screen. `.fraction(0.8)` is a share of the screen, clamped to 0.5...1.
+  `.fraction` needs iOS 16. On iOS 15 it is the ordinary tall sheet. A large
+  fraction stops at the system's tallest sheet, and iPad ignores it in regular
+  width.
+- `logo`: a SwiftUI `Image`, drawn 36pt at the top of the sheet.
+
+`.mealioCartFlow`, `.mealioStoreSettings` and `MealioCartButton` present `.full`
+as a full screen cover, which has no swipe to close. In a `.sheet` of your own,
+`.full` is the tallest sheet the system allows.
 
 ## Install
 
@@ -231,7 +362,10 @@ struct RecipeApp: App {
 
 `configure` also takes:
 
-- `theme:` the drop-in's look (see "Theme" above).
+- `theme:`, `darkTheme:`, `colorScheme:`, `strings:`, `formatMoney:` and
+  `sheet:`: the drop-in's look and words (see "Theme" above and the sections
+  after it). `MealioCart.configure(theme:...)` takes the same six on their own,
+  any time. What you leave out stays as it is.
 - `presenter:` returns the view controller to present the store login sheet
   from when no cart flow sheet is open (for example if you call
   `prepareCart` yourself). The default is the key window's top-most view
@@ -303,7 +437,8 @@ part of the cart.
 
 `MealioCartList(cart:storeName:theme:busy:onChangeStore:onChangeLocation:onAdd:)` is the list
 screen on its own, for hosting in a sheet of yours. `MealioCartSheet` (the 0.1
-sheet) still works and now draws that list.
+sheet) still works and now draws that list. Its `title:` defaults to the
+`addToCartShort` string, and its cancel button reads `close`.
 
 `AddResult` has `added`, `skipped` (reason `deselected` for unchecked items),
 `failed` (reason `not_confirmed` when the cart read after adding did not find
@@ -387,7 +522,11 @@ xcodebuild -scheme MealioSDK -destination 'platform=iOS Simulator,name=iPhone 15
 ```
 
 `Tests/MealioSDKTests/Resources/test-vectors.json` is a copy of
-`protocol/test-vectors.json`. `guard-script.js` and `bridge-shim.js` there are
-the exact text of `GUARD_SCRIPT` and `BRIDGE_SHIM` from
+`protocol/test-vectors.json`, and `strings.json` there is a copy of
+`protocol/strings.json`. `guard-script.js` and `bridge-shim.js` there are the
+exact text of `GUARD_SCRIPT` and `BRIDGE_SHIM` from
 `packages/core/src/guard.ts`; the tests compare `MealioScripts` with them byte
-for byte. Regenerate all three whenever the protocol or guard changes.
+for byte. Regenerate all four whenever the protocol, strings or guard change.
+When `protocol/strings.json` gains a key, add it to `MealioStringKey` and
+`DEFAULT_STRINGS` in `Sources/MealioSDK/MealioStrings.swift`; `StringsTests`
+fails until the two agree.

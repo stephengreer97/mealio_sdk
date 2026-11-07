@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import '../mealio_cart.dart';
 import '../protocol.dart';
 import '../theme.dart';
+import '../ui.dart';
 import 'cart_flow.dart';
 import 'flow_parts.dart';
 import 'location_picker.dart';
@@ -68,17 +69,21 @@ class MealioStoreSettings extends StatefulWidget {
     LoadLocations? loadLocations,
     SaveStore? saveStore,
   }) async {
-    final t = theme ?? MealioTheme.of(context);
+    final carry = mealioCarryScope(context);
     await Navigator.of(context, rootNavigator: true).push<void>(
       MealioSheetRoute<void>(
-        builder: (BuildContext sheetContext) => MealioStoreSettings(
-          theme: t,
-          onChange: onChange,
-          loadStores: loadStores,
-          loadPreferences: loadPreferences,
-          loadLocations: loadLocations,
-          saveStore: saveStore,
-          onClose: () => Navigator.of(sheetContext).pop(),
+        barrierLabel: MealioUi.of(context).tr('close'),
+        // No theme unless one was passed: the sheet follows the phone in auto.
+        builder: (BuildContext sheetContext) => carry(
+          MealioStoreSettings(
+            theme: theme,
+            onChange: onChange,
+            loadStores: loadStores,
+            loadPreferences: loadPreferences,
+            loadLocations: loadLocations,
+            saveStore: saveStore,
+            onClose: () => Navigator.of(sheetContext).pop(),
+          ),
         ),
       ),
     );
@@ -94,6 +99,15 @@ class _MealioStoreSettingsState extends State<MealioStoreSettings> {
   StoreInfo? _picking;
   String? _saving;
   String? _problem;
+
+  /// Set each build, for the calls that finish after it.
+  MealioUi _ui = const MealioUi();
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _ui = MealioUi.of(context);
+  }
 
   @override
   void initState() {
@@ -115,7 +129,7 @@ class _MealioStoreSettingsState extends State<MealioStoreSettings> {
       if (!mounted) return;
       setState(() {
         _stores = <StoreInfo>[];
-        _problem = problemText(e, 'Could not load your stores.');
+        _problem = problemText(e, _ui.tr('couldNotLoadYourStores'));
       });
     }
   }
@@ -141,7 +155,7 @@ class _MealioStoreSettingsState extends State<MealioStoreSettings> {
       final save = widget.saveStore ?? MealioCart.instance.setStore;
       _changed(await save(store.id));
     } catch (e) {
-      if (mounted) setState(() => _problem = problemText(e, 'Could not save that store. Try again.'));
+      if (mounted) setState(() => _problem = problemText(e, _ui.tr('couldNotSaveStore')));
     }
     if (mounted) setState(() => _saving = null);
   }
@@ -149,6 +163,7 @@ class _MealioStoreSettingsState extends State<MealioStoreSettings> {
   @override
   Widget build(BuildContext context) {
     final t = widget.theme ?? MealioTheme.of(context);
+    final ui = MealioUi.of(context);
     final picking = _picking;
     final stores = _stores;
     final Widget body;
@@ -166,7 +181,7 @@ class _MealioStoreSettingsState extends State<MealioStoreSettings> {
           _changed(StorePreferences(defaultStore: picking.id, location: location));
           if (mounted) setState(() => _picking = null);
         },
-        backLabel: 'Back to your stores',
+        backLabel: ui.tr('backToStores'),
         onBack: () => setState(() => _picking = null),
       );
     } else if (stores == null) {
@@ -200,18 +215,20 @@ class _MealioStoreSettingsState extends State<MealioStoreSettings> {
                     selected: st.id == prefs?.defaultStore,
                     busy: _saving == st.id,
                     onTap: _saving == null ? () => unawaited(_choose(st)) : null,
-                    trailing: st.id == prefs?.defaultStore ? (location != null ? 'Change' : 'Current') : null,
+                    trailing: st.id == prefs?.defaultStore ? ui.tr(location != null ? 'change' : 'current') : null,
                   ),
               ], 10),
             ),
           ),
-          Footer(theme: t, children: <Widget>[Cta(theme: t, label: 'Done', onTap: widget.onClose)]),
+          Footer(theme: t, children: <Widget>[Cta(theme: t, label: ui.tr('done'), onTap: widget.onClose)]),
         ],
       );
     }
     return SheetFrame(
       theme: t,
-      title: picking != null ? 'Find your ${picking.name}' : 'Your grocery store',
+      title: picking != null
+          ? ui.tr('titleLocation', <String, Object?>{'store': picking.name})
+          : ui.tr('titleSettings'),
       onClose: widget.onClose,
       child: body,
     );

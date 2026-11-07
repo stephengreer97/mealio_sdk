@@ -21,7 +21,8 @@ public extension View {
     ///
     /// `store` is optional: without it the user's default store is used, or
     /// they pick one in the sheet. `onClose` gets the result when something
-    /// was added, nil otherwise.
+    /// was added, nil otherwise. `doneMessage` and `doneAction` add a line and
+    /// a button of your own to the done screen.
     @MainActor
     func mealioCartFlow(isPresented: Binding<Bool>,
                         recipe: Recipe,
@@ -29,9 +30,12 @@ public extension View {
                         zip: String? = nil,
                         onAdded: ((AddResult) -> Void)? = nil,
                         onError: ((Error) -> Void)? = nil,
-                        onClose: ((AddResult?) -> Void)? = nil) -> some View {
+                        onClose: ((AddResult?) -> Void)? = nil,
+                        doneMessage: String? = nil,
+                        doneAction: MealioDoneAction? = nil) -> some View {
         mealioCartFlow(isPresented: isPresented, recipes: [recipe], store: store, zip: zip,
-                       onAdded: onAdded, onError: onError, onClose: onClose)
+                       onAdded: onAdded, onError: onError, onClose: onClose,
+                       doneMessage: doneMessage, doneAction: doneAction)
     }
 
     /// Present the whole cart flow for several recipes (at most `MAX_RECIPES`)
@@ -46,14 +50,17 @@ public extension View {
                         zip: String? = nil,
                         onAdded: ((AddResult) -> Void)? = nil,
                         onError: ((Error) -> Void)? = nil,
-                        onClose: ((AddResult?) -> Void)? = nil) -> some View {
+                        onClose: ((AddResult?) -> Void)? = nil,
+                        doneMessage: String? = nil,
+                        doneAction: MealioDoneAction? = nil) -> some View {
         // VERIFY: the sheet content closure is not @MainActor in the iOS 15
         // SDK; it is formed in a @MainActor function, so Swift 5 mode infers
         // main-actor isolation for it and the MealioCartFlow init call is fine.
-        sheet(isPresented: isPresented) {
+        mealioPresent(isPresented: isPresented) {
             MealioCartFlow(recipes: recipes, store: store, zip: zip,
                            onAdded: onAdded, onError: onError,
-                           onClose: { result in onClose?(result) })
+                           onClose: { result in onClose?(result) },
+                           doneMessage: doneMessage, doneAction: doneAction)
         }
     }
 }
@@ -70,9 +77,12 @@ public struct MealioCartFlow: View {
     private let onAdded: ((AddResult) -> Void)?
     private let onError: ((Error) -> Void)?
     private let onClose: (AddResult?) -> Void
+    private let doneMessage: String?
+    private let doneAction: MealioDoneAction?
 
     @StateObject private var model = MealioFlowModel()
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var systemScheme
 
     /// - Parameters:
     ///   - recipe: The recipe to cart.
@@ -85,12 +95,18 @@ public struct MealioCartFlow: View {
     ///   - onError: Called when preparing or adding fails. The sheet shows it too.
     ///   - onClose: Called once when the sheet goes away; the result when
     ///     something was added, nil otherwise.
+    ///   - doneMessage: A line of your own on the done screen, like "Enjoy your meal!".
+    ///   - doneAction: A button of your own on the done screen. It becomes the
+    ///     main button. Tapping it closes the sheet, then calls its handler.
     public init(recipe: Recipe, store: String? = nil, zip: String? = nil,
                 onAdded: ((AddResult) -> Void)? = nil,
                 onError: ((Error) -> Void)? = nil,
-                onClose: @escaping (AddResult?) -> Void = { _ in }) {
+                onClose: @escaping (AddResult?) -> Void = { _ in },
+                doneMessage: String? = nil,
+                doneAction: MealioDoneAction? = nil) {
         self.init(recipes: [recipe], store: store, zip: zip,
-                  onAdded: onAdded, onError: onError, onClose: onClose)
+                  onAdded: onAdded, onError: onError, onClose: onClose,
+                  doneMessage: doneMessage, doneAction: doneAction)
     }
 
     /// One cart from several recipes (at most `MAX_RECIPES`). Ingredients
@@ -100,34 +116,37 @@ public struct MealioCartFlow: View {
     public init(recipes: [Recipe], store: String? = nil, zip: String? = nil,
                 onAdded: ((AddResult) -> Void)? = nil,
                 onError: ((Error) -> Void)? = nil,
-                onClose: @escaping (AddResult?) -> Void = { _ in }) {
+                onClose: @escaping (AddResult?) -> Void = { _ in },
+                doneMessage: String? = nil,
+                doneAction: MealioDoneAction? = nil) {
         self.recipes = recipes
         self.store = store
         self.zip = zip
         self.onAdded = onAdded
         self.onError = onError
         self.onClose = onClose
+        self.doneMessage = doneMessage
+        self.doneAction = doneAction
     }
 
-    private var t: MealioTheme { MealioCart.theme }
+    private var t: MealioTheme { MealioCart.resolvedTheme(for: systemScheme) }
+    private var ui: MealioText { MealioCart.text }
     /// The recipe's title for one recipe, "3 meals" for several.
     private var kicker: String? {
         if recipes.count == 1 { return recipes[0].title }
-        return recipes.count > 1 ? "\(recipes.count) meals" : nil
+        return recipes.count > 1 ? ui.tr(.meals, ["count": String(recipes.count)]) : nil
     }
     /// Ingredient lines across every recipe, for the loading screen.
     private var lineCount: Int { recipes.reduce(0) { $0 + $1.ingredients.count } }
     private var storeName: String {
-        model.cart?.storeName ?? model.store.map { mealioStoreLabel($0) } ?? "your store"
+        model.cart?.storeName ?? model.store.map { mealioStoreLabel($0) } ?? ui.tr(.yourStore)
     }
+    /// False while there is only the "your store" stand-in.
+    private var named: Bool { model.cart?.storeName != nil || model.store != nil }
 
     public var body: some View {
         VStack(spacing: 0) {
-            Capsule()
-                .fill(t.border)
-                .frame(width: 36, height: 5)
-                .padding(.top, 8)
-                .accessibilityHidden(true)
+            MealioGrabber(t: t)
             MealioFlowHeader(t: t, recipeTitle: kicker,
                              title: model.login?.title ?? headerTitle,
                              onClose: { dismiss() })
@@ -136,6 +155,7 @@ public struct MealioCartFlow: View {
         }
         .background(t.background.ignoresSafeArea())
         .interactiveDismissDisabled(model.phase == .adding)
+        .mealioSheetSize()
         .onAppear {
             model.open(recipes: recipes, store: store, zip: zip, onAdded: onAdded, onError: onError)
         }
@@ -146,28 +166,29 @@ public struct MealioCartFlow: View {
     }
 
     private var headerTitle: String {
+        let store = ["store": storeName]
         switch model.phase {
-        case .done: return storeName == "your store" ? "In your cart" : "In your \(storeName) cart"
-        case .loading: return storeName == "your store" ? "Getting your cart ready" : "Getting your \(storeName) cart ready"
-        case .error: return "Something went wrong"
-        case .stores: return "Choose your store"
-        case .location: return "Find your \(storeName)"
-        case .list, .adding: return "Your \(storeName) list"
+        case .done: return named ? ui.tr(.titleInCart, store) : ui.tr(.titleInCartPlain)
+        case .loading: return named ? ui.tr(.titleLoading, store) : ui.tr(.titleLoadingPlain)
+        case .error: return ui.tr(.somethingWrong)
+        case .stores: return ui.tr(.titleStores)
+        case .location: return ui.tr(.titleLocation, store)
+        case .list, .adding: return ui.tr(.titleList, store)
         }
     }
 
     private var locationBack: MealioLocationPicker.Back {
         if model.canGoBackToList {
-            return MealioLocationPicker.Back(label: "Back to your list", action: { model.backToList() })
+            return MealioLocationPicker.Back(label: ui.tr(.backToList), action: { model.backToList() })
         }
-        return MealioLocationPicker.Back(label: "Choose a different store", action: { model.openStores(from: .error) })
+        return MealioLocationPicker.Back(label: ui.tr(.differentStore), action: { model.openStores(from: .error) })
     }
 
     @ViewBuilder
     private var content: some View {
         if let login = model.login {
             VStack(alignment: .leading, spacing: 0) {
-                Text("Sign in on \(storeName)\u{2019}s own page. Mealio never sees your password.")
+                Text(ui.tr(.loginNote, ["store": storeName]))
                     .font(t.font(13))
                     .foregroundColor(t.muted)
                     .padding(.horizontal, 20)
@@ -206,7 +227,13 @@ public struct MealioCartFlow: View {
                 }
             case .done:
                 if let cart = model.cart, let result = model.result {
-                    MealioDoneView(t: t, cart: cart, result: result, storeName: storeName, onDone: { dismiss() })
+                    MealioDoneView(t: t, cart: cart, result: result, storeName: storeName, onDone: { dismiss() },
+                                   message: doneMessage, actionLabel: doneAction?.label,
+                                   onAction: {
+                                       guard let action = doneAction else { return }
+                                       model.afterClose { action.handler(result) }
+                                       dismiss()
+                                   })
                 } else {
                     MealioErrorView(t: t, error: model.error, onRetry: { model.start() }, onClose: { dismiss() })
                 }
@@ -244,6 +271,7 @@ final class MealioFlowModel: ObservableObject {
     private var zip: String?
     private var onAdded: ((AddResult) -> Void)?
     private var onError: ((Error) -> Void)?
+    private var runAfterClose: (() -> Void)?
 
     // VERIFY: nonisolated so @StateObject's default value can build it; every
     // property default above is a plain constant.
@@ -363,9 +391,17 @@ final class MealioFlowModel: ObservableObject {
                 self.onAdded?(r)
             } catch {
                 guard let self = self, self.run == id else { return }
-                self.fail(error)
+                self.fail(error, fallback: MealioCart.text.tr(.couldNotAdd))
             }
         }
+    }
+
+    /// Run `action` once the sheet has gone, after `onClose`. Waiting matters:
+    /// a partner's handler may present something, and a sheet still sliding
+    /// away would refuse it.
+    func afterClose(_ action: @escaping () -> Void) {
+        guard runAfterClose == nil else { return }
+        runAfterClose = action
     }
 
     /// The sheet went away. Stops listening, cancels an open sign-in, and
@@ -381,10 +417,17 @@ final class MealioFlowModel: ObservableObject {
         login = nil
         host?.hostLogin(false)
         report(outcome)
+        let after = runAfterClose
+        runAfterClose = nil
+        after?()
     }
 
-    private func fail(_ e: Error) {
-        error = (e as? MealioError) ?? MealioError(code: "error", message: e.localizedDescription)
+    private func fail(_ e: Error, fallback: String? = nil) {
+        var shown = (e as? MealioError) ?? MealioError(code: "error", message: e.localizedDescription)
+        if shown.message.isEmpty, let fallback = fallback {
+            shown = MealioError(code: shown.code, message: fallback)
+        }
+        error = shown
         phase = .error
         onError?(e)
     }
@@ -400,6 +443,22 @@ func mealioStoreLabel(_ id: String) -> String {
         .split(separator: " ")
         .map { $0.prefix(1).uppercased() + $0.dropFirst() }
         .joined(separator: " ")
+}
+
+/// The drag handle. A full screen cover has nothing to drag.
+@MainActor
+struct MealioGrabber: View {
+    let t: MealioTheme
+
+    var body: some View {
+        if MealioCart.sheet.height != .full {
+            Capsule()
+                .fill(t.border)
+                .frame(width: 36, height: 5)
+                .padding(.top, 8)
+                .accessibilityHidden(true)
+        }
+    }
 }
 
 /// The visible store sign-in WebView, drawn in the flow sheet.
@@ -422,6 +481,15 @@ struct MealioFlowHeader: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
+            if let logo = MealioCart.sheet.logo {
+                logo
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 36, height: 36)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .accessibilityIgnoresInvertColors()
+                    .accessibilityHidden(true)
+            }
             VStack(alignment: .leading, spacing: 2) {
                 if let kicker = recipeTitle, !kicker.isEmpty {
                     Text(kicker)
@@ -445,7 +513,7 @@ struct MealioFlowHeader: View {
                     .background(Circle().fill(t.surface))
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Close")
+            .accessibilityLabel(MealioCart.text.tr(.close))
         }
         .padding(.horizontal, 20)
         .padding(.top, 12)
@@ -460,9 +528,10 @@ struct MealioLoadingView: View {
     let storeName: String
     let count: Int
 
+    private var ui: MealioText { MealioCart.text }
+
     private var labels: [String] {
-        ["Checking your \(storeName) sign-in",
-         "Finding your \(count) ingredient\(count == 1 ? "" : "s")"]
+        [ui.tr(.stepSignIn, ["store": storeName]), ui.plural("stepFinding", count)]
     }
 
     /// Which row is active; -1 when the step belongs to neither (as findIndex).
@@ -476,7 +545,7 @@ struct MealioLoadingView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Checking prices and stock at \(storeName).")
+            Text(ui.tr(.loadingNote, ["store": storeName]))
                 .font(t.font(14))
                 .foregroundColor(t.muted)
             VStack(alignment: .leading, spacing: 18) {
@@ -488,7 +557,8 @@ struct MealioLoadingView: View {
                             .foregroundColor(i > at ? t.muted : t.text)
                     }
                     .accessibilityElement(children: .combine)
-                    .accessibilityValue(i < at ? "Done" : (i == at ? "In progress" : ""))
+                    .accessibilityValue(i < at ? ui.tr(.done) : "")
+                    .accessibilityAddTraits(i == at ? .isSelected : [])
                 }
             }
             .padding(.vertical, 12)
@@ -539,11 +609,12 @@ public struct MealioCartList: View {
     private let onChangeLocation: (() -> Void)?
     private let onAdd: () -> Void
     @State private var open: String?
+    @Environment(\.colorScheme) private var systemScheme
 
     /// - Parameters:
     ///   - cart: From `MealioCart.prepareCart`.
     ///   - storeName: Display name; defaults to the server's.
-    ///   - theme: Defaults to `MealioCart.theme`.
+    ///   - theme: Defaults to the theme in force, dark mode included.
     ///   - busy: Adding is in progress (spinner on the button, list locked).
     ///   - onChangeStore: When set, a tappable store chip sits above the list.
     ///   - onChangeLocation: When set, a Change link sits beside the exact
@@ -565,7 +636,8 @@ public struct MealioCartList: View {
         }?.key)
     }
 
-    private var t: MealioTheme { themeOverride ?? MealioCart.theme }
+    private var t: MealioTheme { themeOverride ?? MealioCart.resolvedTheme(for: systemScheme) }
+    private var ui: MealioText { MealioCart.text }
     private var storeName: String { storeNameOverride ?? cart.storeName ?? mealioStoreLabel(cart.store) }
 
     public var body: some View {
@@ -583,7 +655,7 @@ public struct MealioCartList: View {
                                 .font(t.font(13, .semibold))
                                 .foregroundColor(t.text)
                                 .lineLimit(1)
-                            Text("Change")
+                            Text(ui.tr(.change))
                                 .font(t.font(13, .semibold))
                                 .foregroundColor(t.accent)
                         }
@@ -595,9 +667,9 @@ public struct MealioCartList: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(busy)
-                    .accessibilityLabel("Store: \(storeName). Change store")
+                    .accessibilityLabel(ui.tr(.a11yChangeStore, ["store": storeName]))
                 }
-                Text("\(est.count) of \(selectable) selected")
+                Text(ui.tr(.selectedCount, ["count": String(est.count), "total": String(selectable)]))
                     .font(t.font(14))
                     .foregroundColor(t.muted)
                 Spacer(minLength: 0)
@@ -607,7 +679,7 @@ public struct MealioCartList: View {
             // Said while any item has no saved product, which on a recipe's first
             // cart is every item: the run where nothing on screen shows it yet.
             if cart.items.contains(where: { $0.status == .choose }) {
-                Text("Pick a product for each item and Mealio will remember your preferences.")
+                Text(ui.tr(.rememberNote))
                     .font(t.font(13, .medium))
                     .foregroundColor(t.text)
                     .lineSpacing(3)
@@ -647,7 +719,7 @@ public struct MealioCartList: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             if let change = onChangeLocation {
                 Button(action: change) {
-                    Text("Change")
+                    Text(ui.tr(.change))
                         .font(t.font(12))
                         .foregroundColor(t.accent)
                         .frame(minHeight: 44)
@@ -655,7 +727,7 @@ public struct MealioCartList: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(busy)
-                .accessibilityLabel("Store location: \(location.name). Change location")
+                .accessibilityLabel(ui.tr(.a11yChangeLocation, ["name": location.name]))
             }
         }
         .padding(.horizontal, 20)
@@ -667,12 +739,12 @@ public struct MealioCartList: View {
     private func footer(_ est: CartEstimate) -> some View {
         let off = busy || est.count == 0
         let label = est.count > 0
-            ? "Add \(est.count) item\(est.count == 1 ? "" : "s") to \(storeName)"
-            : "Select items to add"
+            ? ui.plural("addItems", est.count, ["store": storeName])
+            : ui.tr(.selectItems)
         let pending = cart.pendingPreferences().count
         return VStack(spacing: 8) {
             if pending > 0 {
-                Text("\(pending == 1 ? "1 checked item needs" : "\(pending) checked items need") an option chosen before adding.")
+                Text(ui.plural("pendingOptions", pending))
                     .font(t.font(12))
                     .foregroundColor(t.warnText)
                     .fixedSize(horizontal: false, vertical: true)
@@ -680,22 +752,24 @@ public struct MealioCartList: View {
                     .padding(.bottom, 6)
             }
             // No partial totals: one unpriced item and there is no number to show.
-            HStack(alignment: .firstTextBaseline) {
-                Text(est.total != nil && est.estimated ? "Estimated total" : "Total")
-                    .font(t.font(14))
-                    .foregroundColor(t.muted)
-                Spacer()
-                if let total = est.total {
-                    Text((est.estimated ? "about " : "") + mealioMoney(total))
-                        .font(t.font(18, .bold))
-                        .foregroundColor(t.text)
-                } else {
-                    Text("Prices at checkout")
-                        .font(t.font(15, .semibold))
+            if MealioCart.sheet.showTotal {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(ui.tr(est.total != nil && est.estimated ? .estimatedTotal : .total))
+                        .font(t.font(14))
                         .foregroundColor(t.muted)
+                    Spacer()
+                    if let total = est.total {
+                        Text(ui.amount(total, estimated: est.estimated))
+                            .font(t.font(18, .bold))
+                            .foregroundColor(t.text)
+                    } else {
+                        Text(ui.tr(.pricesAtCheckout))
+                            .font(t.font(15, .semibold))
+                            .foregroundColor(t.muted)
+                    }
                 }
+                .accessibilityElement(children: .combine)
             }
-            .accessibilityElement(children: .combine)
             MealioCTA(t: t, title: label, busy: busy, enabled: !off, action: onAdd)
         }
         .padding(.horizontal, 16)
@@ -730,6 +804,7 @@ struct MealioItemRow: View {
         self.onToggleOpen = onToggleOpen
     }
 
+    private var ui: MealioText { MealioCart.text }
     private var cardShape: RoundedRectangle { RoundedRectangle(cornerRadius: t.radius + 2) }
 
     var body: some View {
@@ -752,7 +827,7 @@ struct MealioItemRow: View {
                     .font(t.font(12, .medium))
                     .foregroundColor(t.muted)
                     .lineLimit(1)
-                Text("Not found at \(storeName)")
+                Text(ui.tr(.notFoundAt, ["store": storeName]))
                     .font(t.font(14))
                     .foregroundColor(t.muted)
             }
@@ -771,7 +846,7 @@ struct MealioItemRow: View {
         let picked = cart.selected(for: item.key)
         let options = cart.options(for: item.key)
         let shown = picked ?? (item.status == .remembered ? item.remembered : nil)
-        let changeLabel = isOpen ? "Done" : ((on || item.status == .remembered) ? "Change" : "Choose")
+        let changeLabel = ui.tr(isOpen ? .done : ((on || item.status == .remembered) ? .change : .choose))
 
         return VStack(spacing: 0) {
             HStack(spacing: 10) {
@@ -792,8 +867,7 @@ struct MealioItemRow: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(disabled)
-                .accessibilityLabel((on ? "Leave out " : "Add ") + item.ingredient)
-                .accessibilityValue(on ? "Checked" : "Not checked")
+                .accessibilityLabel(ui.tr(on ? .a11yLeaveOut : .a11yAdd, ["item": item.ingredient]))
                 .accessibilityAddTraits(on ? .isSelected : [])
 
                 MealioThumb(t: t, product: shown ?? options.first, dim: !on, big: false)
@@ -805,13 +879,13 @@ struct MealioItemRow: View {
                             .foregroundColor(t.muted)
                             .lineLimit(1)
                         // Only on a cart from two or more recipes: "For Tacos and Pasta".
-                        if let forLine = cart.recipesLabel(for: item.key) {
+                        if let forLine = cart.recipesLabel(for: item.key, text: ui) {
                             Text(forLine)
                                 .font(t.font(11))
                                 .foregroundColor(t.muted)
                                 .lineLimit(1)
                         }
-                        Text(shown?.name ?? "Choose a product")
+                        Text(shown?.name ?? ui.tr(.chooseProduct))
                             .font(t.font(15, .semibold))
                             .foregroundColor(on ? t.text : t.muted)
                             // Struck through ONLY when the user unchecked their usual.
@@ -826,7 +900,6 @@ struct MealioItemRow: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityHint("Shows the options")
 
                 Button(action: onToggleOpen) {
                     Text(changeLabel)
@@ -837,13 +910,12 @@ struct MealioItemRow: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityHint(isOpen ? "Hides the options" : "Shows the options")
             }
             .padding(.vertical, 10)
             .padding(.trailing, 6)
 
             if on, let picked = picked, cart.needsPreference(item.key) {
-                Text("Choose one: \(mealioListOr((picked.preferences ?? []).map(\.label)))")
+                Text(ui.tr(.chooseOne, ["options": ui.listOr((picked.preferences ?? []).map(\.label))]))
                     .font(t.font(13, .semibold))
                     .foregroundColor(t.accent)
                     .lineSpacing(2)
@@ -881,6 +953,8 @@ struct MealioItemRow: View {
         let n = cart.quantity(for: item.key)
         let atMin = byWeight ? lb <= range.lowerBound : n <= 1
         let atMax = byWeight ? lb >= range.upperBound : n >= cart.maxQuantity(for: item.key)
+        let amount = byWeight ? mealioLbText(lb) : String(n)
+        let word = ui.tr(byWeight ? .weight : .quantity)
         let step: (Int) -> Void = { dir in
             if byWeight {
                 _ = cart.stepWeight(key: item.key, by: dir)
@@ -889,19 +963,19 @@ struct MealioItemRow: View {
             }
         }
         return HStack {
-            Text(byWeight ? "Weight" : "Quantity")
+            Text(word)
                 .font(t.font(12))
                 .foregroundColor(t.muted)
             Spacer(minLength: 8)
             HStack(spacing: 4) {
-                stepButton("\u{2212}", label: "Less \(item.ingredient)", off: atMin) { step(-1) }
-                Text(byWeight ? mealioLbText(lb) : "\(n)")
+                stepButton("\u{2212}", label: ui.tr(.a11yLess, ["item": item.ingredient]), off: atMin) { step(-1) }
+                Text(amount)
                     .font(t.font(16, .bold))
                     .foregroundColor(t.text)
                     .frame(minWidth: byWeight ? 64 : 28)
                     .multilineTextAlignment(.center)
-                    .accessibilityLabel(byWeight ? "Weight \(mealioLbText(lb))" : "Quantity \(n)")
-                stepButton("+", label: "More \(item.ingredient)", off: atMax) { step(1) }
+                    .accessibilityLabel("\(word) \(amount)")
+                stepButton("+", label: ui.tr(.a11yMore, ["item": item.ingredient]), off: atMax) { step(1) }
             }
         }
         .padding(.leading, 58)
@@ -925,25 +999,27 @@ struct MealioItemRow: View {
     }
 
     private var rememberedUnavailableText: String {
-        let name = item.remembered.map { ", \($0.name)," } ?? ""
-        let state = item.reason == "not_found" ? "not available" : "out of stock"
-        return "Your usual\(name) is \(state) today. Pick another this time. It stays your usual."
+        let gone = item.reason == "not_found"
+        if let name = item.remembered?.name {
+            return ui.tr(gone ? .usualNotAvailableNamed : .usualOutNamed, ["name": name])
+        }
+        return ui.tr(gone ? .usualNotAvailable : .usualOut)
     }
 
     private func meta(on: Bool, picked: Product?, options: [Product]) -> String {
         if let p = picked {
-            let parts: [String?] = [mealioPriceText(p), p.id == item.remembered?.id ? "Your usual" : nil]
+            let parts: [String?] = [ui.price(p), p.id == item.remembered?.id ? ui.tr(.yourUsual) : nil]
             return parts.compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " \u{00B7} ")
         }
         switch item.status {
-        case .remembered: return "Not adding this time"
-        case .rememberedUnavailable: return "Your usual is out of stock"
-        default: return "\(options.count) option\(options.count == 1 ? "" : "s")"
+        case .remembered: return ui.tr(.notAddingThisTime)
+        case .rememberedUnavailable: return ui.tr(.usualOutOfStock)
+        default: return ui.plural("options", options.count)
         }
     }
 
     private func expanded(picked: Product?, options: [Product]) -> some View {
-        let placeholder = "Search \(storeName) for something else"
+        let placeholder = ui.tr(.searchPlaceholder, ["store": storeName])
         return VStack(alignment: .leading, spacing: 12) {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(alignment: .top, spacing: 10) {
@@ -1004,11 +1080,11 @@ struct MealioItemRow: View {
                 Button(action: runSearch) {
                     ZStack {
                         if searching {
-                            ProgressView().progressViewStyle(.circular).tint(.white)
+                            ProgressView().progressViewStyle(.circular).tint(t.onAccent)
                         } else {
-                            Text("Search")
+                            Text(ui.tr(.search))
                                 .font(t.font(14, .semibold))
-                                .foregroundColor(.white)
+                                .foregroundColor(t.onAccent)
                         }
                     }
                     .padding(.horizontal, 14)
@@ -1017,7 +1093,7 @@ struct MealioItemRow: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(searching || disabled)
-                .accessibilityLabel(searching ? "Searching" : "Search")
+                .accessibilityLabel(ui.tr(.search))
             }
             .padding(.horizontal, 12)
 
@@ -1034,7 +1110,7 @@ struct MealioItemRow: View {
 
     private func optionCard(_ o: Product, selected sel: Bool) -> some View {
         let usual = o.id == item.remembered?.id
-        let price = o.outOfStock == true ? "Out of stock" : mealioPriceText(o)
+        let price = o.outOfStock == true ? ui.tr(.outOfStock) : ui.price(o)
         let shape = RoundedRectangle(cornerRadius: t.radius)
         return Button(action: { pick(o, preferenceId: nil) }) {
             VStack(alignment: .leading, spacing: 6) {
@@ -1049,9 +1125,9 @@ struct MealioItemRow: View {
                     .font(t.font(13, .semibold))
                     .foregroundColor(t.text)
                 if usual {
-                    Text("Your usual").font(t.font(11, .bold)).foregroundColor(t.accent)
+                    Text(ui.tr(.yourUsual)).font(t.font(11, .bold)).foregroundColor(t.accent)
                 } else if o.badge == "popular" {
-                    Text(o.badgeLabel ?? "Crowd favorite").font(t.font(11, .bold)).foregroundColor(t.muted)
+                    Text(o.badgeLabel ?? ui.tr(.crowdFavorite)).font(t.font(11, .bold)).foregroundColor(t.muted)
                 }
             }
             .padding(10)
@@ -1092,10 +1168,10 @@ struct MealioItemRow: View {
         Task { @MainActor in
             do {
                 let found = try await cart.search(key: key, query: q)
-                searchNote = found.isEmpty ? "Nothing found for \"\(q)\"." : nil
+                searchNote = found.isEmpty ? ui.tr(.nothingFound, ["query": q]) : nil
                 query = ""
             } catch {
-                searchNote = (error as? MealioError)?.message ?? "Search failed. Try again."
+                searchNote = mealioProblem(error, ui.tr(.searchFailed))
             }
             searching = false
         }
@@ -1178,7 +1254,7 @@ struct MealioCTA: View {
         }
         .buttonStyle(.plain)
         .disabled(!enabled || busy)
-        .accessibilityLabel(busy ? "Adding" : title)
+        .accessibilityLabel(title)
     }
 }
 
@@ -1195,37 +1271,58 @@ struct MealioDoneView: View {
     let result: AddResult
     let storeName: String
     let onDone: () -> Void
+    private let message: String?
+    private let actionLabel: String?
+    private let onAction: () -> Void
     @State private var open: Bool
 
-    init(t: MealioTheme, cart: CartSession, result: AddResult, storeName: String, onDone: @escaping () -> Void) {
+    /// `actionLabel` draws the partner's button, which then leads and Done
+    /// turns quiet.
+    init(t: MealioTheme, cart: CartSession, result: AddResult, storeName: String, onDone: @escaping () -> Void,
+         message: String? = nil, actionLabel: String? = nil, onAction: @escaping () -> Void = {}) {
         self._cart = ObservedObject(wrappedValue: cart)
         self.t = t
         self.result = result
         self.storeName = storeName
         self.onDone = onDone
+        self.message = message
+        self.actionLabel = actionLabel
+        self.onAction = onAction
         // "Left out this time" opens on its own when something failed.
         self._open = State(initialValue: !result.failed.isEmpty)
     }
 
     private var n: Int { result.added.count }
 
+    private var ui: MealioText { MealioCart.text }
+
     private var title: String {
-        n > 0 ? "\(n) item\(n == 1 ? "" : "s") added" : "Nothing was added"
+        n > 0 ? ui.plural("itemsAdded", n) : ui.tr(.nothingAdded)
     }
 
+    /// Empty when the partner hid prices. No partial totals: an unpriced item
+    /// leaves no number to show.
     private var subtitle: String {
+        guard MealioCart.sheet.showTotal else { return "" }
         let sum = cart.addedTotal(result)
-        let money: String = sum.total.map { (sum.estimated ? "about " : "") + mealioMoney($0) } ?? "Prices at checkout"
-        let parts: [String?] = [money, nil]
-        return parts.compactMap { $0 }.joined(separator: " \u{00B7} ")
+        return sum.total.map { ui.amount($0, estimated: sum.estimated) } ?? ui.tr(.pricesAtCheckout)
     }
 
     var body: some View {
-        let left = mealioLeftOut(cart: cart, result: result, storeName: storeName)
+        let left = mealioLeftOut(cart: cart, result: result, storeName: storeName, ui: ui)
         return VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     banner
+                    if let message = message, !message.isEmpty {
+                        Text(message)
+                            .font(t.font(15))
+                            .foregroundColor(t.text)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity)
+                            .accessibilityIdentifier("mealio-done-message")
+                    }
                     if n > 0 {
                         VStack(spacing: 0) {
                             ForEach(Array(result.added.enumerated()), id: \.element.key) { i, a in
@@ -1245,7 +1342,11 @@ struct MealioDoneView: View {
                 .padding(.bottom, 24)
             }
             VStack(spacing: 10) {
-                MealioCTA(t: t, title: "Done", action: onDone)
+                if let label = actionLabel {
+                    MealioCTA(t: t, title: label, action: onAction)
+                        .accessibilityIdentifier("mealio-done-action")
+                }
+                MealioCTA(t: t, title: ui.tr(.done), quiet: actionLabel != nil, action: onDone)
                 Text("Cart by Mealio")
                     .font(t.font(12))
                     .foregroundColor(t.muted)
@@ -1259,6 +1360,7 @@ struct MealioDoneView: View {
 
     private var banner: some View {
         let ok = n > 0
+        let sub = ok ? subtitle : ui.tr(.cartUnchanged)
         return HStack(spacing: 12) {
             ZStack {
                 Circle().fill(ok ? t.accent : t.warnText)
@@ -1271,11 +1373,13 @@ struct MealioDoneView: View {
                 Text(title)
                     .font(t.font(15, .bold))
                     .foregroundColor(ok ? t.text : t.warnText)
-                Text(ok ? subtitle : "Your cart did not change.")
-                    .font(t.font(13))
-                    .foregroundColor(ok ? t.text.opacity(0.85) : t.warnText)
-                    .lineSpacing(2)
-                    .fixedSize(horizontal: false, vertical: true)
+                if !sub.isEmpty {
+                    Text(sub)
+                        .font(t.font(13))
+                        .foregroundColor(ok ? t.text.opacity(0.85) : t.warnText)
+                        .lineSpacing(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -1284,7 +1388,7 @@ struct MealioDoneView: View {
         // The accent at 10% over the sheet, as the RN banner.
         .background(RoundedRectangle(cornerRadius: t.radius + 2).fill(ok ? t.accent.opacity(0.1) : t.warnBackground))
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(ok ? "\(title), \(subtitle)" : "\(title). Your cart did not change.")
+        .accessibilityLabel(sub.isEmpty ? title : "\(title), \(sub)")
     }
 
     private func leftOutCard(_ left: [MealioLeftOut]) -> some View {
@@ -1294,7 +1398,7 @@ struct MealioDoneView: View {
             Button(action: { withAnimation(.easeInOut(duration: 0.2)) { open.toggle() } }) {
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Left out this time")
+                        Text(ui.tr(.leftOut))
                             .font(t.font(14, .semibold))
                             .foregroundColor(t.text)
                         if !open {
@@ -1317,8 +1421,8 @@ struct MealioDoneView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Left out this time: \(labels)")
-            .accessibilityValue(open ? "Expanded" : "Collapsed")
+            .accessibilityLabel("\(ui.tr(.leftOut)): \(labels)")
+            .accessibilityAddTraits(open ? .isSelected : [])
 
             if open {
                 ForEach(left, id: \.key) { x in
@@ -1371,9 +1475,11 @@ struct MealioAddedRow: View {
         let line = lines.compactMap { $0 }.first { !$0.isEmpty } ?? ""
         let amount = item.weightLb.map(mealioLbText) ?? "\u{00D7}\(item.quantity)"
         let p = cart.addedPrice(item)
-        let price = p.map { ($0.estimated ? "about " : "") + mealioMoney($0.amount) } ?? ""
-        let spokenAmount = item.weightLb.map { "\(mealioLbNumber($0)) pounds" } ?? "quantity \(item.quantity)"
-        let parts: [String?] = [item.name, line.isEmpty ? nil : "for \(line)", spokenAmount, price.isEmpty ? nil : price]
+        let ui = MealioCart.text
+        // Row prices go when the total does.
+        let price = MealioCart.sheet.showTotal ? (p.map { ui.amount($0.amount, estimated: $0.estimated) } ?? "") : ""
+        let spokenAmount = item.weightLb.map { "\(ui.tr(.weight)) \(mealioLbText($0))" } ?? "\(ui.tr(.quantity)) \(item.quantity)"
+        let parts: [String?] = [item.name, line.isEmpty ? nil : ui.tr(.forRecipes, ["recipes": line]), spokenAmount, price.isEmpty ? nil : price]
         let spoken = parts.compactMap { $0 }.joined(separator: ", ")
 
         return HStack(spacing: 12) {
@@ -1449,25 +1555,25 @@ struct MealioLeftOut {
 /// Everything the store did not take this run: unchecked, skipped, or failed
 /// (with its reason).
 @MainActor
-func mealioLeftOut(cart: CartSession, result: AddResult, storeName: String) -> [MealioLeftOut] {
+func mealioLeftOut(cart: CartSession, result: AddResult, storeName: String, ui: MealioText) -> [MealioLeftOut] {
     func item(_ key: String) -> CartItem? { cart.items.first { $0.key == key } }
     func nonEmpty(_ s: String?) -> String? { (s?.isEmpty ?? true) ? nil : s }
     var out: [MealioLeftOut] = []
     for f in result.failed {
         out.append(MealioLeftOut(key: f.key, label: nonEmpty(item(f.key)?.ingredient) ?? f.name,
-                                 why: mealioSentence("\(f.name): \(mealioReasonText(f.reason))"), failed: true))
+                                 why: mealioSentence("\(f.name): \(ui.reason(f.reason))"), failed: true))
     }
     for x in result.skipped {
         let it = item(x.key)
         let why: String
         if it?.status == .unavailable {
-            why = "Not found at \(storeName)"
+            why = ui.tr(.notFoundAt, ["store": storeName])
         } else if x.reason == "preference_required" {
-            why = "Needed an option chosen"
+            why = ui.tr(.neededOption)
         } else if x.reason == "deselected" {
-            why = "Unchecked this time"
+            why = ui.tr(.uncheckedThisTime)
         } else {
-            why = "Not chosen"
+            why = ui.tr(.notChosen)
         }
         out.append(MealioLeftOut(key: x.key, label: nonEmpty(it?.ingredient) ?? x.key, why: why, failed: false))
     }
@@ -1491,38 +1597,12 @@ func mealioMonogram(_ name: String) -> String {
     return (a + b).uppercased()
 }
 
-/// A failed add's reason in plain words.
-func mealioReasonText(_ r: String) -> String {
-    if r == "not_confirmed" { return "not confirmed in your cart" }
-    if r == "weight_not_supported" { return "sold by weight, which this store cannot take here" }
-    if r.contains("stock") { return "out of stock" }
-    if r.contains("timeout") || r.contains("no_answer") { return "the store did not answer" }
-    return "the store refused it"
-}
-
 /// "0.75 lb", "1 lb": at most two decimals, no trailing zeros.
 func mealioLbText(_ lb: Double) -> String {
-    "\(mealioLbNumber(lb)) lb"
-}
-
-/// "0.75", "1": at most two decimals, no trailing zeros.
-func mealioLbNumber(_ lb: Double) -> String {
     var s = String(format: "%.2f", lb)
     while s.hasSuffix("0") { s.removeLast() }
     if s.hasSuffix(".") { s.removeLast() }
-    return s
-}
-
-/// The price as a row shows it. Sold by the pound: "$9.99/lb est.".
-func mealioPriceText(_ p: Product) -> String {
-    if p.soldByWeight == true, let perLb = p.pricePerLb { return "\(mealioMoney(perLb))/lb est." }
-    return "\(p.price ?? "")\(p.estimated ? " est." : "")".trimmingCharacters(in: .whitespaces)
-}
-
-/// "A, B or C".
-func mealioListOr(_ xs: [String]) -> String {
-    guard xs.count > 1, let last = xs.last else { return xs.first ?? "" }
-    return "\(xs.dropLast().joined(separator: ", ")) or \(last)"
+    return "\(s) lb"
 }
 
 // MARK: - Location picker
@@ -1614,6 +1694,8 @@ struct MealioLocationPicker: View {
     @State private var ask = 0
     @State private var searchedStartZip = false
 
+    private var ui: MealioText { MealioCart.text }
+
     init(t: MealioTheme, store: String, storeName: String, zip: String?, current: String?,
          onPicked: @escaping (StoreLocation) -> Void, back: Back) {
         self.t = t
@@ -1630,7 +1712,7 @@ struct MealioLocationPicker: View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Enter your zip code to see \(storeName) stores near you.")
+                    Text(ui.tr(.zipPrompt, ["store": storeName]))
                         .font(t.font(14))
                         .foregroundColor(t.muted)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1649,14 +1731,14 @@ struct MealioLocationPicker: View {
                     }
                     if let found = found {
                         if found.locations.isEmpty {
-                            Text("No \(storeName) stores near \(found.zip). Try another zip code.")
+                            Text(ui.tr(.noStoresNear, ["store": storeName, "zip": found.zip]))
                                 .font(t.font(14))
                                 .foregroundColor(t.muted)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                         ForEach(found.locations) { l in
                             MealioStoreOption(t: t, title: l.name, detail: l.address, selected: l.id == current,
-                                              saving: saving == l.id, trailing: l.id == current ? "Current" : nil,
+                                              saving: saving == l.id, trailing: l.id == current ? ui.tr(.current) : nil,
                                               disabled: saving != nil, action: { pick(l) })
                                 .accessibilityIdentifier("mealio-location-\(l.id)")
                         }
@@ -1684,7 +1766,7 @@ struct MealioLocationPicker: View {
         return HStack(spacing: 8) {
             ZStack(alignment: .leading) {
                 if zip.isEmpty {
-                    Text("Zip code")
+                    Text(ui.tr(.zipCode))
                         .font(t.font(16))
                         .foregroundColor(t.muted)
                         .accessibilityHidden(true)
@@ -1696,7 +1778,7 @@ struct MealioLocationPicker: View {
                     .submitLabel(.search)
                     .onSubmit { if mealioIsZip(zip) { find(zip) } }
                     .disableAutocorrection(true)
-                    .accessibilityLabel("Zip code")
+                    .accessibilityLabel(ui.tr(.zipCode))
                     .accessibilityIdentifier("mealio-zip")
             }
             .padding(.horizontal, 12)
@@ -1710,7 +1792,7 @@ struct MealioLocationPicker: View {
             }
 
             Button(action: { find(zip) }) {
-                Text("Find stores")
+                Text(ui.tr(.findStores))
                     .font(t.font(16, .bold))
                     .foregroundColor(t.onAccent)
                     .fixedSize(horizontal: true, vertical: false)
@@ -1737,7 +1819,7 @@ struct MealioLocationPicker: View {
                 let locations = try await MealioCart.storeLocations(store: store, zip: z)
                 if ask == id { found = Found(zip: z, locations: locations) }
             } catch {
-                if ask == id { problem = (error as? MealioError)?.message ?? "Could not look up stores. Try again." }
+                if ask == id { problem = mealioProblem(error, ui.tr(.couldNotLookUp)) }
             }
             if ask == id { busy = false }
         }
@@ -1751,7 +1833,7 @@ struct MealioLocationPicker: View {
                 try await MealioCart.setStore(store, locationId: l.id)
                 onPicked(l)
             } catch {
-                problem = (error as? MealioError)?.message ?? "Could not save that store. Try again."
+                problem = mealioProblem(error, ui.tr(.couldNotSaveStore))
                 saving = nil
             }
         }
@@ -1768,13 +1850,15 @@ struct MealioStorePicker: View {
     let onPick: (String) -> Void
     let onBack: (() -> Void)?
 
+    private var ui: MealioText { MealioCart.text }
+
     var body: some View {
         if let stores = stores {
             VStack(spacing: 0) {
                 ScrollView {
                     VStack(spacing: 10) {
                         if stores.isEmpty {
-                            Text("Could not load stores. Close and try again.")
+                            Text(ui.tr(.couldNotLoadStores))
                                 .font(t.font(14))
                                 .foregroundColor(t.muted)
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1788,7 +1872,7 @@ struct MealioStorePicker: View {
                     .padding(.bottom, 24)
                 }
                 if let back = onBack {
-                    MealioCTA(t: t, title: "Back to your list", quiet: true, action: back)
+                    MealioCTA(t: t, title: ui.tr(.backToList), quiet: true, action: back)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 12)
                         .overlay(alignment: .top) { Rectangle().fill(t.border).frame(height: 1) }
@@ -1812,7 +1896,7 @@ struct MealioStorePicker: View {
                     .foregroundColor(t.text)
                 Spacer()
                 if isCurrent {
-                    Text("Current")
+                    Text(ui.tr(.current))
                         .font(t.font(12))
                         .foregroundColor(t.accent)
                 }
@@ -1838,10 +1922,12 @@ struct MealioErrorView: View {
     let onRetry: () -> Void
     let onClose: () -> Void
 
+    private var ui: MealioText { MealioCart.text }
+
     private var message: String {
-        if error?.code == MealioError.Code.loginCancelled { return "Sign-in was closed before it finished." }
+        if error?.code == MealioError.Code.loginCancelled { return ui.tr(.signInClosed) }
         if let m = error?.message, !m.isEmpty { return m }
-        return "Something went wrong."
+        return ui.tr(.somethingWrongSentence)
     }
 
     var body: some View {
@@ -1851,8 +1937,8 @@ struct MealioErrorView: View {
                 .foregroundColor(t.text)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
-            MealioCTA(t: t, title: "Try again", action: onRetry)
-            MealioCTA(t: t, title: "Close", quiet: true, action: onClose)
+            MealioCTA(t: t, title: ui.tr(.tryAgain), action: onRetry)
+            MealioCTA(t: t, title: ui.tr(.close), quiet: true, action: onClose)
         }
         .padding(20)
     }

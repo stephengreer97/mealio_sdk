@@ -10,6 +10,7 @@ import '../cart_session.dart';
 import '../client.dart';
 import '../protocol.dart';
 import '../theme.dart';
+import '../ui.dart';
 
 /// Puts `children` in a list with `gap` between each.
 List<Widget> gapped(List<Widget> children, double gap, {Axis axis = Axis.vertical}) {
@@ -20,8 +21,6 @@ List<Widget> gapped(List<Widget> children, double gap, {Axis axis = Axis.vertica
   }
   return out;
 }
-
-String plural(int n, String word) => '$n $word${n == 1 ? '' : 's'}';
 
 /// "H-E-B" for "heb", "Price Chopper" for "price_chopper".
 String storeLabel(String id) {
@@ -61,7 +60,7 @@ Widget withMaterialDefaults(BuildContext context, Widget child) {
 /// The modal route every Mealio sheet uses: a scrim, the sheet sliding up
 /// from the bottom. Built on PopupRoute so it needs nothing from Material.
 class MealioSheetRoute<T> extends PopupRoute<T> {
-  MealioSheetRoute({required this.builder, super.settings});
+  MealioSheetRoute({required this.builder, required this.barrierLabel, super.settings});
 
   final WidgetBuilder builder;
 
@@ -72,7 +71,7 @@ class MealioSheetRoute<T> extends PopupRoute<T> {
   bool get barrierDismissible => true;
 
   @override
-  String? get barrierLabel => 'Close';
+  final String barrierLabel;
 
   @override
   Duration get transitionDuration => const Duration(milliseconds: 300);
@@ -96,8 +95,8 @@ class MealioSheetRoute<T> extends PopupRoute<T> {
   }
 }
 
-/// The sheet: 94% of the screen, rounded top, grabber, header, body. The
-/// body shrinks above the keyboard.
+/// The sheet: 94% of the screen unless the partner set a height, rounded top,
+/// grabber, header, body. The body shrinks above the keyboard.
 class SheetFrame extends StatelessWidget {
   const SheetFrame({
     super.key,
@@ -118,7 +117,10 @@ class SheetFrame extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = theme;
     final mq = MediaQuery.of(context);
-    final height = mq.size.height * 0.94;
+    final size = MealioUi.of(context).sheet.height;
+    final height = mq.size.height * size.fraction;
+    // A tall sheet starts under the status bar: its header stays below it.
+    final underBar = math.max(0.0, mq.padding.top - (mq.size.height - height));
     return Align(
       alignment: Alignment.bottomCenter,
       child: SizedBox(
@@ -127,11 +129,11 @@ class SheetFrame extends StatelessWidget {
         child: Material(
           color: t.background,
           clipBehavior: Clip.antiAlias,
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+          borderRadius: size.square ? BorderRadius.zero : const BorderRadius.vertical(top: Radius.circular(20)),
           child: withMaterialDefaults(
             context,
             Padding(
-              padding: EdgeInsets.only(bottom: math.max(0, mq.viewInsets.bottom)),
+              padding: EdgeInsets.only(top: underBar, bottom: math.max(0, mq.viewInsets.bottom)),
               child: MediaQuery.removeViewInsets(
                 context: context,
                 removeBottom: true,
@@ -171,11 +173,27 @@ class SheetHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = theme;
     final k = kicker;
+    final ui = MealioUi.of(context);
+    final logo = ui.sheet.logo;
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 12, 20, 8),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
+          if (logo != null) ...<Widget>[
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: Image(
+                key: const ValueKey<String>('mealio-sheet-logo'),
+                image: logo,
+                width: 36,
+                height: 36,
+                fit: BoxFit.contain,
+                excludeFromSemantics: true,
+              ),
+            ),
+            const SizedBox(width: 12),
+          ],
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -198,7 +216,7 @@ class SheetHeader extends StatelessWidget {
           const SizedBox(width: 12),
           Semantics(
             button: true,
-            label: 'Close',
+            label: ui.tr('close'),
             excludeSemantics: true,
             child: Material(
               color: t.surface,
@@ -244,7 +262,7 @@ class Cta extends StatelessWidget {
     return Semantics(
       button: true,
       enabled: !off,
-      label: busy ? 'Adding' : label,
+      label: label,
       excludeSemantics: true,
       child: Opacity(
         opacity: off ? 0.5 : 1,
@@ -338,15 +356,15 @@ class WarnBox extends StatelessWidget {
 class _StepDef {
   const _StepDef(this.steps, this.label);
   final List<MealioStep> steps;
-  final String Function(int n, String store) label;
+  final String Function(MealioUi ui, int n, String store) label;
 }
 
 final List<_StepDef> _loadingSteps = <_StepDef>[
   _StepDef(
     const <MealioStep>[MealioStep.connecting, MealioStep.checkingSignIn, MealioStep.signingIn],
-    (int n, String store) => 'Checking your $store sign-in',
+    (MealioUi ui, int n, String store) => ui.tr('stepSignIn', <String, Object?>{'store': store}),
   ),
-  _StepDef(const <MealioStep>[MealioStep.searching], (int n, String store) => 'Finding your ${plural(n, 'ingredient')}'),
+  _StepDef(const <MealioStep>[MealioStep.searching], (MealioUi ui, int n, String store) => ui.plural('stepFinding', n)),
 ];
 
 /// Progress steps and three skeleton cards.
@@ -361,6 +379,7 @@ class LoadingView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = theme;
+    final ui = MealioUi.of(context);
     final at = _loadingSteps.indexWhere((_StepDef d) => d.steps.contains(step));
     Widget dot(int i) {
       if (i < at) {
@@ -394,7 +413,7 @@ class LoadingView extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: gapped(<Widget>[
-          Text('Checking prices and stock at $storeName.', style: t.style(size: 14, color: t.muted)),
+          Text(ui.tr('loadingNote', <String, Object?>{'store': storeName}), style: t.style(size: 14, color: t.muted)),
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 12),
             child: Column(
@@ -409,7 +428,7 @@ class LoadingView extends StatelessWidget {
                         const SizedBox(width: 12),
                         Expanded(
                           child: Text(
-                            _loadingSteps[i].label(count, storeName),
+                            _loadingSteps[i].label(ui, count, storeName),
                             style: t.style(
                               size: 15,
                               weight: i == at ? FontWeight.w700 : FontWeight.w400,
@@ -444,30 +463,41 @@ String lbText(double lb) {
 }
 
 /// "A, B or C".
-String listOr(List<String> xs) {
+String listOr(List<String> xs, MealioUi ui) {
   if (xs.length <= 1) return xs.isEmpty ? '' : xs.first;
-  return '${xs.sublist(0, xs.length - 1).join(', ')} or ${xs.last}';
+  return '${xs.sublist(0, xs.length - 1).join(', ')} ${ui.tr('or')} ${xs.last}';
 }
 
 /// "A and B", "A, B and C".
-String listAnd(List<String> xs) {
+String listAnd(List<String> xs, MealioUi ui) {
   if (xs.length <= 1) return xs.isEmpty ? '' : xs.first;
-  return '${xs.sublist(0, xs.length - 1).join(', ')} and ${xs.last}';
+  return '${xs.sublist(0, xs.length - 1).join(', ')} ${ui.tr('and')} ${xs.last}';
 }
 
-/// The price as a row shows it. Sold by the pound: "\$9.99/lb est.".
-String priceText(Product p) {
+/// "\$12.50", or "about \$12.50" when the store's own price is an estimate.
+String amountText(MealioUi ui, double amount, bool estimated) {
+  final price = ui.money(amount);
+  return estimated ? ui.tr('aboutPrice', <String, Object?>{'price': price}) : price;
+}
+
+/// The price as a row shows it. Sold by the pound: "\$9.99/lb est.". Otherwise
+/// the store's own text, unless the partner set how prices read.
+String priceText(Product p, MealioUi ui) {
   final perLb = p.pricePerLb;
-  if ((p.soldByWeight ?? false) && perLb != null) return '${mealioMoney(perLb)}/lb est.';
-  return '${p.price ?? ''}${p.estimated ? ' est.' : ''}'.trim();
+  if ((p.soldByWeight ?? false) && perLb != null) {
+    return ui.tr('pricePerLb', <String, Object?>{'price': ui.money(perLb)});
+  }
+  final unit = p.unitPrice;
+  final price = ui.customMoney && unit != null ? ui.money(unit) : p.price ?? '';
+  return p.estimated && price.isNotEmpty ? ui.tr('priceEstimate', <String, Object?>{'price': price}) : price;
 }
 
-String reasonText(String r) {
-  if (r == 'not_confirmed') return 'not confirmed in your cart';
-  if (r == 'weight_not_supported') return 'sold by weight, which this store cannot take here';
-  if (RegExp('stock').hasMatch(r)) return 'out of stock';
-  if (RegExp('timeout|no_answer').hasMatch(r)) return 'the store did not answer';
-  return 'the store refused it';
+String reasonText(String r, MealioUi ui) {
+  if (r == 'not_confirmed') return ui.tr('reasonNotConfirmed');
+  if (r == 'weight_not_supported') return ui.tr('reasonWeight');
+  if (RegExp('stock').hasMatch(r)) return ui.tr('reasonOutOfStock');
+  if (RegExp('timeout|no_answer').hasMatch(r)) return ui.tr('reasonNoAnswer');
+  return ui.tr('reasonRefused');
 }
 
 /// The finished run. What the store took, row by row (image, product, the
@@ -483,6 +513,8 @@ class DoneView extends StatefulWidget {
     required this.storeName,
     required this.onDone,
     this.extra,
+    this.message,
+    this.action,
   });
 
   final MealioTheme theme;
@@ -493,6 +525,12 @@ class DoneView extends StatefulWidget {
 
   /// An extra button above Done (MealioCartSheet's deprecated "Open store cart").
   final Widget? extra;
+
+  /// A line of the partner's own, under the banner.
+  final String? message;
+
+  /// The partner's own button, drawn as the main one. Done turns quiet.
+  final MealioDoneAction? action;
 
   @override
   State<DoneView> createState() => _DoneViewState();
@@ -509,11 +547,18 @@ class _DoneViewState extends State<DoneView> {
     final cart = widget.session;
     final n = r.added.length;
     final sum = cart.addedTotal(r);
-    final left = _leftOut(cart, r, widget.storeName);
-    final subtitle = <String>[
-      if (sum.total != null) '${sum.estimated ? 'about ' : ''}${mealioMoney(sum.total!)}' else 'Prices at checkout',
-    ].join(' · ');
-    final title = n > 0 ? '${plural(n, 'item')} added' : 'Nothing was added';
+    final ui = MealioUi.of(context);
+    final left = _leftOut(cart, r, widget.storeName, ui);
+    final total = sum.total;
+    // No partial totals: one unpriced item and there is no number to show.
+    final subtitle = !ui.sheet.showTotal
+        ? ''
+        : total != null
+            ? amountText(ui, total, sum.estimated)
+            : ui.tr('pricesAtCheckout');
+    final title = n > 0 ? ui.plural('itemsAdded', n) : ui.tr('nothingAdded');
+    final message = widget.message;
+    final action = widget.action;
     final small = t.style(size: 12, height: 17 / 12, color: t.muted);
     final cardRadius = BorderRadius.circular(t.radius + 2);
     final labels = left.map((_LeftOut x) => x.label).join(', ');
@@ -521,7 +566,7 @@ class _DoneViewState extends State<DoneView> {
     final banner = Semantics(
       container: true,
       liveRegion: true,
-      label: n > 0 ? '$title, $subtitle' : '$title. Your cart did not change.',
+      label: <String>[title, if (n == 0) ui.tr('cartUnchanged') else if (subtitle.isNotEmpty) subtitle].join(', '),
       excludeSemantics: true,
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
@@ -544,13 +589,14 @@ class _DoneViewState extends State<DoneView> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[
                   Text(title, style: t.style(size: 15, weight: FontWeight.w700, color: n > 0 ? t.text : t.warnText)),
-                  Opacity(
-                    opacity: 0.85,
-                    child: Text(
-                      n > 0 ? subtitle : 'Your cart did not change.',
-                      style: t.style(size: 13, height: 18 / 13, color: n > 0 ? t.text : t.warnText),
+                  if (n == 0 || subtitle.isNotEmpty)
+                    Opacity(
+                      opacity: 0.85,
+                      child: Text(
+                        n > 0 ? subtitle : ui.tr('cartUnchanged'),
+                        style: t.style(size: 13, height: 18 / 13, color: n > 0 ? t.text : t.warnText),
+                      ),
                     ),
-                  ),
                 ],
               ),
             ),
@@ -575,6 +621,13 @@ class _DoneViewState extends State<DoneView> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: gapped(<Widget>[
                 banner,
+                if (message != null && message.isNotEmpty)
+                  Text(
+                    message,
+                    key: const ValueKey<String>('mealio-done-message'),
+                    textAlign: TextAlign.center,
+                    style: t.style(size: 15),
+                  ),
                 if (n > 0)
                   Container(
                     clipBehavior: Clip.antiAlias,
@@ -597,7 +650,7 @@ class _DoneViewState extends State<DoneView> {
                         Semantics(
                           button: true,
                           expanded: _open,
-                          label: 'Left out this time: $labels',
+                          label: '${ui.tr('leftOut')}: $labels',
                           excludeSemantics: true,
                           child: Material(
                             type: MaterialType.transparency,
@@ -613,7 +666,7 @@ class _DoneViewState extends State<DoneView> {
                                         child: Column(
                                           crossAxisAlignment: CrossAxisAlignment.start,
                                           children: <Widget>[
-                                            Text('Left out this time', style: t.style(size: 14, weight: FontWeight.w600)),
+                                            Text(ui.tr('leftOut'), style: t.style(size: 14, weight: FontWeight.w600)),
                                             if (!_open)
                                               Text(_sentence(labels),
                                                   maxLines: 2, overflow: TextOverflow.ellipsis, style: small),
@@ -665,7 +718,14 @@ class _DoneViewState extends State<DoneView> {
           gap: 10,
           children: <Widget>[
             if (widget.extra != null) widget.extra!,
-            Cta(theme: t, label: 'Done', onTap: widget.onDone),
+            if (action != null)
+              Cta(
+                key: const ValueKey<String>('mealio-done-action'),
+                theme: t,
+                label: action.label,
+                onTap: () => action.onPress(r),
+              ),
+            Cta(theme: t, label: ui.tr('done'), quiet: action != null, onTap: widget.onDone),
             Text('Cart by Mealio', textAlign: TextAlign.center, style: small),
           ],
         ),
@@ -687,6 +747,7 @@ class _AddedRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = theme;
+    final ui = MealioUi.of(context);
     final product = session.selected(item.key);
     final image = _nonEmpty(item.imageUrl) ?? _nonEmpty(product?.imageUrl);
     String line = _nonEmpty(item.ingredient) ?? '';
@@ -698,11 +759,11 @@ class _AddedRow extends StatelessWidget {
     final lb = item.weightLb;
     final amount = lb != null ? lbText(lb) : '×${item.quantity}';
     final p = session.addedPrice(item);
-    final price = p == null ? '' : '${p.estimated ? 'about ' : ''}${mealioMoney(p.amount)}';
+    final price = p == null || !ui.sheet.showTotal ? '' : amountText(ui, p.amount, p.estimated);
     final spoken = <String>[
       item.name,
-      if (line.isNotEmpty) 'for $line',
-      if (lb != null) '${lbText(lb).replaceFirst(' lb', '')} pounds' else 'quantity ${item.quantity}',
+      if (line.isNotEmpty) ui.tr('forRecipes', <String, Object?>{'recipes': line}),
+      if (lb != null) '${ui.tr('weight')} ${lbText(lb)}' else '${ui.tr('quantity')} ${item.quantity}',
       if (price.isNotEmpty) price,
     ].join(', ');
     final small = t.style(size: 12, height: 17 / 12, color: t.muted);
@@ -784,7 +845,7 @@ class _LeftOut {
 
 /// Everything the store did not take this run: unchecked, skipped, or failed
 /// (with its reason).
-List<_LeftOut> _leftOut(CartSession cart, AddResult result, String storeName) {
+List<_LeftOut> _leftOut(CartSession cart, AddResult result, String storeName, MealioUi ui) {
   CartItem? item(String key) {
     for (final CartItem i in cart.items) {
       if (i.key == key) return i;
@@ -797,19 +858,19 @@ List<_LeftOut> _leftOut(CartSession cart, AddResult result, String storeName) {
     out.add(_LeftOut(
       key: f.key,
       label: _nonEmpty(item(f.key)?.ingredient) ?? f.name,
-      why: _sentence('${f.name}: ${reasonText(f.reason)}'),
+      why: _sentence('${f.name}: ${reasonText(f.reason, ui)}'),
       failed: true,
     ));
   }
   for (final SkippedItem x in result.skipped) {
     final it = item(x.key);
     final why = it?.status == ItemStatus.unavailable
-        ? 'Not found at $storeName'
-        : x.reason == 'preference_required'
-            ? 'Needed an option chosen'
+        ? ui.tr('notFoundAt', <String, Object?>{'store': storeName})
+        : ui.tr(x.reason == 'preference_required'
+            ? 'neededOption'
             : x.reason == 'deselected'
-                ? 'Unchecked this time'
-                : 'Not chosen';
+                ? 'uncheckedThisTime'
+                : 'notChosen');
     out.add(_LeftOut(key: x.key, label: _nonEmpty(it?.ingredient) ?? x.key, why: why, failed: false));
   }
   return out;
@@ -875,9 +936,10 @@ class ErrorView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = theme;
+    final ui = MealioUi.of(context);
     final msg = code == 'login_cancelled'
-        ? 'Sign-in was closed before it finished.'
-        : (message == null || message!.isEmpty ? 'Something went wrong.' : message!);
+        ? ui.tr('signInClosed')
+        : (message == null || message!.isEmpty ? ui.tr('somethingWrongSentence') : message!);
     return Padding(
       padding: const EdgeInsets.all(20),
       child: Column(
@@ -885,9 +947,9 @@ class ErrorView extends StatelessWidget {
         children: <Widget>[
           Semantics(liveRegion: true, child: Text(msg, style: t.style(size: 15))),
           const Spacer(),
-          Cta(theme: t, label: 'Try again', onTap: onRetry),
+          Cta(theme: t, label: ui.tr('tryAgain'), onTap: onRetry),
           const SizedBox(height: 12),
-          Cta(theme: t, label: 'Close', onTap: onClose, quiet: true),
+          Cta(theme: t, label: ui.tr('close'), onTap: onClose, quiet: true),
         ],
       ),
     );

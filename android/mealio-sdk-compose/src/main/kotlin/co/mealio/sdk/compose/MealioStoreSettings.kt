@@ -73,6 +73,7 @@ fun MealioStoreSettings(
 
 @Composable
 private fun SettingsSheet(t: MealioTheme, onClose: () -> Unit, onChange: (StorePreferences) -> Unit) {
+    val ui = LocalMealioUi.current
     val scope = rememberCoroutineScope()
     var stores by remember { mutableStateOf<List<StoreInfo>?>(null) }
     var prefs by remember { mutableStateOf<StorePreferences?>(null) }
@@ -94,7 +95,7 @@ private fun SettingsSheet(t: MealioTheme, onClose: () -> Unit, onChange: (StoreP
             throw e
         } catch (e: Exception) {
             stores = emptyList()
-            problem = e.message ?: "Could not load your stores."
+            problem = e.message ?: ui.tr("couldNotLoadYourStores")
         }
     }
 
@@ -117,7 +118,7 @@ private fun SettingsSheet(t: MealioTheme, onClose: () -> Unit, onChange: (StoreP
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                problem = e.message ?: "Could not save that store. Try again."
+                problem = e.message ?: ui.tr("couldNotSaveStore")
             } finally {
                 saving = null
             }
@@ -130,7 +131,7 @@ private fun SettingsSheet(t: MealioTheme, onClose: () -> Unit, onChange: (StoreP
     val list = stores
 
     SheetFrame(t) {
-        Header(t, null, if (chain != null) "Find your ${chain.name}" else "Your grocery store", onClose = onClose)
+        Header(t, null, if (chain != null) ui.tr("titleLocation", "store" to chain.name) else ui.tr("titleSettings"), onClose = onClose)
         when {
             chain != null -> LocationPicker(
                 t, chain.id, chain.name,
@@ -140,7 +141,7 @@ private fun SettingsSheet(t: MealioTheme, onClose: () -> Unit, onChange: (StoreP
                     changed(StorePreferences(chain.id, location))
                     picking = null
                 },
-                backLabel = "Back to your stores",
+                backLabel = ui.tr("backToStores"),
                 onBack = { picking = null },
             )
             list == null -> Box(Modifier.fillMaxWidth().padding(20.dp), contentAlignment = Alignment.Center) {
@@ -177,7 +178,7 @@ private fun SettingsSheet(t: MealioTheme, onClose: () -> Unit, onChange: (StoreP
                                 if (saving == st.id) {
                                     CircularProgressIndicator(Modifier.size(20.dp), color = t.accent, strokeWidth = 2.dp)
                                 } else if (on) {
-                                    Text(if (location != null) "Change" else "Current", style = t.ts(12, color = t.accent, lineHeight = 17))
+                                    Text(ui.tr(if (location != null) "change" else "current"), style = t.ts(12, color = t.accent, lineHeight = 17))
                                 }
                             }
                         }
@@ -185,7 +186,7 @@ private fun SettingsSheet(t: MealioTheme, onClose: () -> Unit, onChange: (StoreP
                 }
                 TopRule(t)
                 Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 28.dp)) {
-                    Cta(t, onClick = onClose) { Text("Done", style = t.ts(16, FontWeight.Bold, t.onAccent)) }
+                    Cta(t, onClick = onClose) { Text(ui.tr("done"), style = t.ts(16, FontWeight.Bold, t.onAccent)) }
                 }
             }
         }

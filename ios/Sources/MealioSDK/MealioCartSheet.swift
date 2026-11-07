@@ -10,24 +10,25 @@ import SwiftUI
 public struct MealioCartSheet: View {
     @ObservedObject private var session: CartSession
     private let accentColor: Color?
-    private let title: String
+    private let title: String?
     private let onFinished: (AddResult) -> Void
     private let onError: (Error) -> Void
     private let onCancel: (() -> Void)?
 
     @State private var adding = false
     @State private var errorText: String?
+    @Environment(\.colorScheme) private var systemScheme
 
     /// - Parameters:
     ///   - session: From `MealioCart.prepareCart`.
-    ///   - accentColor: Overrides `MealioCart.theme.accent` for this sheet.
-    ///   - title: The navigation title.
+    ///   - accentColor: Overrides the theme's accent for this sheet.
+    ///   - title: The navigation title. Defaults to the `addToCartShort` string.
     ///   - onFinished: Called with the result after the store cart is filled.
     ///   - onError: Called when filling the cart fails. The sheet also shows it.
     ///   - onCancel: Shows a Cancel button when set.
     public init(session: CartSession,
                 accentColor: Color? = nil,
-                title: String = "Add to cart",
+                title: String? = nil,
                 onFinished: @escaping (AddResult) -> Void,
                 onError: @escaping (Error) -> Void = { _ in },
                 onCancel: (() -> Void)? = nil) {
@@ -40,10 +41,12 @@ public struct MealioCartSheet: View {
     }
 
     private var theme: MealioTheme {
-        var t = MealioCart.theme
+        var t = MealioCart.resolvedTheme(for: systemScheme)
         if let a = accentColor { t.accent = a }
         return t
     }
+
+    private var ui: MealioText { MealioCart.text }
 
     public var body: some View {
         let t = theme
@@ -58,12 +61,12 @@ public struct MealioCartSheet: View {
                             .padding(.top, 8)
                     }
                 }
-                .navigationTitle(title)
+                .navigationTitle(title ?? ui.tr(.addToCartShort))
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
                         if let onCancel = onCancel {
-                            Button("Cancel") { onCancel() }
+                            Button(ui.tr(.close)) { onCancel() }
                                 .disabled(adding)
                         }
                     }
@@ -84,7 +87,7 @@ public struct MealioCartSheet: View {
                 onFinished(result)
             } catch {
                 adding = false
-                errorText = (error as? MealioError)?.message ?? error.localizedDescription
+                errorText = mealioProblem(error, error is MealioError ? ui.tr(.couldNotAdd) : error.localizedDescription)
                 onError(error)
             }
         }

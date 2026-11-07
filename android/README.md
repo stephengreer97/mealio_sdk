@@ -46,7 +46,7 @@ MealioStoreSettings(visible = open, onClose = { open = false })
 | Module | What |
 | --- | --- |
 | `mealio-sdk` | The core: protocol, signature checks, allowlist, guard script, runner, client, cart session, WebView host, login screen. No Compose. |
-| `mealio-sdk-compose` | The drop-in: `MealioCartButton`, `MealioCartFlow`, `MealioCartList`, `MealioTheme`. |
+| `mealio-sdk-compose` | The drop-in: `MealioCartButton`, `MealioCartFlow`, `MealioCartList`, `MealioStoreSettings`, `MealioTheme`, `MealioThemeProvider`. |
 
 minSdk 24, compileSdk 34, Java 17, Kotlin 1.9.
 
@@ -108,7 +108,7 @@ MealioCartButton(
     recipe = recipe,
     store = "heb",                 // optional
     zip = "78701",                 // optional: fills the zip box for Kroger family stores
-    label = "Add to my grocery cart",
+    label = "Add to my grocery cart", // optional: this is the default, from the `addToCart` string
     onAdded = { result -> analytics.log("added", result.added.size) },
     onClose = { result -> /* null when nothing was added */ },
     onError = { e -> /* MealioException with a code, see below */ },
@@ -141,7 +141,34 @@ An empty list fails with `bad_recipe` and more than 10 with
 `recipe`, so older servers keep working; they return no `recipes` lists, and
 both come back empty.
 
-### Your own button: `MealioCartFlow`
+### Button styles
+
+```kotlin
+MealioCartButton(recipe = recipe, variant = MealioButtonVariant.OUTLINE)
+```
+
+| Variant | Looks like |
+| --- | --- |
+| `SOLID` | The default. A filled accent button. |
+| `OUTLINE` | Transparent, with an accent border and accent text. |
+| `COMPACT` | A small button for a recipe card. Its label defaults to the `addToCartShort` string. |
+| `ICON` | A round 48dp cart button. `label` is its content description. |
+
+### Your own button
+
+Pass `button` to draw it yourself. It keeps the whole flow and the warm-up.
+
+```kotlin
+MealioCartButton(
+    recipe = recipe,
+    button = { onClick, enabled, label ->
+        MyButton(onClick = onClick, enabled = enabled) { Text(label) }
+    },
+)
+```
+
+`MealioCartFlow` is the sheet on its own, for when you start it yourself. Call
+`MealioCart.warm(store)` too if you want the warm-up.
 
 ```kotlin
 var open by remember { mutableStateOf(false) }
@@ -149,10 +176,27 @@ MyButton(onClick = { open = true })
 MealioCartFlow(visible = open, recipe = recipe, store = "heb", onClose = { open = false })
 ```
 
+### The done screen
+
+`MealioCartButton` and `MealioCartFlow` both take these.
+
+```kotlin
+MealioCartButton(
+    recipe = recipe,
+    doneMessage = "Enjoy your meal!",
+    doneAction = MealioDoneAction("Back to meal plan") { result -> openMealPlan(result) },
+)
+```
+
+With `doneAction`, your button is the main button and Done turns quiet. Tapping
+your button closes the sheet, which calls `onClose`, and then calls its
+`onClick`.
+
 ### Theme
 
 Set your brand once with a CompositionLocal (or pass `theme =` to either
-composable). Every value has a default.
+composable). Every value has a default. `MealioThemeProvider` also takes the
+dark colors, words, prices and sheet options below.
 
 ```kotlin
 MealioThemeProvider(MealioTheme(accent = Color(0xFF0A5BD3), radius = 10.dp, fontFamily = myFont)) {
@@ -171,6 +215,89 @@ MealioThemeProvider(MealioTheme(accent = Color(0xFF0A5BD3), radius = 10.dp, font
 | `radius` | `14.dp` | cards and buttons |
 | `fontFamily` | system | all text |
 | `warnBackground` / `warnText` | `#FFF4E5` / `#7A4A06` | out-of-stock notes |
+
+### Dark mode
+
+`colorScheme` is `LIGHT` by default. `DARK` always uses the dark colors, and
+`AUTO` follows the phone through `isSystemInDarkTheme()`.
+
+```kotlin
+MealioThemeProvider(
+    theme = MealioTheme(accent = Color(0xFF0A5BD3), radius = 10.dp),
+    darkTheme = MealioDarkTheme(accent = Color(0xFF7FB2FF)), // optional
+    colorScheme = MealioColorScheme.AUTO,
+) {
+    AppContent()
+}
+```
+
+The default dark colors are `MealioTheme.Dark`. `MealioDarkTheme` lays yours
+over them, and a value you leave null keeps the default. `radius` and
+`fontFamily` carry over from your light theme unless `MealioDarkTheme` sets
+them. Product photos always sit on white.
+
+A `theme =` passed straight to a composable is used as it is. Dark mode applies
+to the theme from `MealioThemeProvider`.
+
+### Words
+
+Change or translate any word the sheet shows with `strings`, alongside the
+theme. `DEFAULT_STRINGS` has every key.
+
+```kotlin
+MealioThemeProvider(
+    strings = mapOf(
+        "addToCart" to "Add to my Kroger cart",
+        "titleList" to "Your {store} shopping list",
+        "options_one" to "1 choice",
+        "options_other" to "{count} choices",
+    ),
+) {
+    AppContent()
+}
+```
+
+`{store}`-style placeholders are filled in when the text shows. A placeholder
+with no value stays as written, so a typo shows. A key ending `_one` or
+`_other` is the singular or plural of the same message. "Cart by Mealio" does
+not change. Unit marks like "lb" are not in the table.
+
+The fallback sign-in screen (`MealioLoginActivity`, used only when no flow
+sheet is open) has no Compose around it, so `strings` does not reach it.
+
+### Prices
+
+`formatMoney` sets how prices read. The default is `$12.50`.
+
+```kotlin
+MealioThemeProvider(formatMoney = { euros.format(it) }) { AppContent() }
+```
+
+With it set, option prices come from the numeric `unitPrice` rather than the
+store's text. An option with no `unitPrice` keeps the store's text.
+
+### Sheet options
+
+```kotlin
+MealioThemeProvider(
+    sheet = MealioSheetOptions(
+        showTotal = false,
+        height = MealioSheetHeight.Fraction(0.8f),
+        logo = painterResource(R.drawable.logo),
+    ),
+) {
+    AppContent()
+}
+```
+
+| Option | Default | What |
+| --- | --- | --- |
+| `showTotal` | `true` | `false` hides the list total row, the done subtitle price and the done row prices. Options keep their own prices. With `true`, a total shows only when every item has a price. |
+| `height` | `Auto` | `Auto` fits a tall sheet, `Full` fills the screen, `Fraction(x)` is a share of the screen, clamped to 0.5..1. |
+| `logo` | none | A `Painter`, drawn at 36dp in the sheet header. |
+
+Inside your own composables, `LocalMealioUi.current` gives the same `tr`,
+`plural` and `money`.
 
 ### What the user sees
 
@@ -232,12 +359,14 @@ WebView in your app, not only the stores'.
 ```kotlin
 // mealio-sdk-compose
 @Composable fun MealioCartButton(recipe: Recipe, store: String? = null, zip: String? = null,
-    label: String = "Add to my grocery cart", onAdded: (AddResult) -> Unit = {}, onClose: (AddResult?) -> Unit = {},
+    label: String? = null, onAdded: (AddResult) -> Unit = {}, onClose: (AddResult?) -> Unit = {},
     onError: (Exception) -> Unit = {}, modifier: Modifier = Modifier, enabled: Boolean = true,
-    theme: MealioTheme = LocalMealioTheme.current)
+    theme: MealioTheme = LocalMealioTheme.current, variant: MealioButtonVariant = MealioButtonVariant.SOLID,
+    button: (@Composable (onClick: () -> Unit, enabled: Boolean, label: String) -> Unit)? = null,
+    doneMessage: String? = null, doneAction: MealioDoneAction? = null)
 @Composable fun MealioCartFlow(visible: Boolean, recipe: Recipe, store: String? = null, zip: String? = null,
     onClose: (AddResult?) -> Unit, onAdded: (AddResult) -> Unit = {}, onError: (Exception) -> Unit = {},
-    theme: MealioTheme = LocalMealioTheme.current)
+    theme: MealioTheme = LocalMealioTheme.current, doneMessage: String? = null, doneAction: MealioDoneAction? = null)
 // MealioCartButton and MealioCartFlow each have a twin taking `recipes: List<Recipe>` in place of `recipe`.
 @Composable fun MealioCartList(cart: CartSession, storeName: String, busy: Boolean, onAdd: () -> Unit,
     modifier: Modifier = Modifier, onChange: () -> Unit = {}, onChangeStore: (() -> Unit)? = null, theme: MealioTheme = ...,
@@ -245,7 +374,19 @@ WebView in your app, not only the stores'.
 @Composable fun MealioStoreSettings(visible: Boolean, onClose: () -> Unit, onChange: (StorePreferences) -> Unit = {},
     theme: MealioTheme = LocalMealioTheme.current)
 data class MealioTheme(accent, onAccent, background, surface, text, muted, border, radius, fontFamily, warnBackground, warnText)
-val LocalMealioTheme; @Composable fun MealioThemeProvider(theme: MealioTheme, content: @Composable () -> Unit)
+MealioTheme.Default; MealioTheme.Dark
+data class MealioDarkTheme(accent, onAccent, background, surface, text, muted, border, radius, fontFamily, warnBackground, warnText) // every value nullable
+enum class MealioColorScheme { LIGHT, DARK, AUTO }
+enum class MealioButtonVariant { SOLID, OUTLINE, COMPACT, ICON }
+data class MealioDoneAction(val label: String, val onClick: (AddResult) -> Unit)
+data class MealioSheetOptions(val showTotal: Boolean = true, val height: MealioSheetHeight = MealioSheetHeight.Auto, val logo: Painter? = null)
+sealed class MealioSheetHeight { Auto; Full; Fraction(val value: Float) }
+class MealioUi : TextTools { val sheet: MealioSheetOptions; val customMoney: Boolean; fun money(amount: Double): String }
+val LocalMealioTheme; val LocalMealioUi
+@Composable fun MealioThemeProvider(theme: MealioTheme, content: @Composable () -> Unit)   // sets the theme only
+@Composable fun MealioThemeProvider(theme: MealioTheme = MealioTheme.Default, darkTheme: MealioDarkTheme? = null,
+    colorScheme: MealioColorScheme = MealioColorScheme.LIGHT, strings: Map<String, String> = emptyMap(),
+    formatMoney: ((Double) -> String)? = null, sheet: MealioSheetOptions = MealioSheetOptions(), content: @Composable () -> Unit)
 
 // mealio-sdk
 object MealioCart {
@@ -295,6 +436,13 @@ data class CartRecipe(val id: String, val title: String?)
 data class ItemRecipe(val id: String, val title: String?, val quantity: Int)
 const val MAX_RECIPES = 10
 fun forRecipes(cart: CartSession, key: String): String?   // "For Tacos and Pasta"; null unless 2+ recipes
+fun forRecipes(cart: CartSession, key: String, text: TextTools): String?   // the same, in the partner's words
+val DEFAULT_STRINGS: Map<String, String>                  // every word the drop-in shows, from protocol/strings.json
+fun fillText(template: String, vars: Map<String, Any> = emptyMap()): String
+open class TextTools(overrides: Map<String, String> = emptyMap()) {
+    fun tr(key: String, vararg vars: Pair<String, Any>): String
+    fun plural(base: String, count: Int, vararg vars: Pair<String, Any>): String
+}
 class MealioException(val code: String, message: String, cause: Throwable? = null) : Exception
 ```
 
@@ -384,6 +532,9 @@ The unit tests run on the JVM (JUnit 4):
   merging options, `estimate()` with server unit prices ("2 for $1.05"),
   the estimated flag, `stepOf` and the runner's onStep, and the multi-recipe
   fields (`recipes`, `recipesFor`, `forRecipes`) with and without a newer server.
+- `StringsTest` checks `DEFAULT_STRINGS` against `protocol/strings.json`, read
+  from the repo rather than copied, so a change to either one fails until the
+  other follows. It also covers placeholders, plurals and overrides.
 - `GuardScriptTest` checks `GUARD_SCRIPT` and `BRIDGE_SHIM` byte for byte
   against `guard-expected.js` / `bridge-expected.js`, which are the exact
   strings `packages/core/src/guard.ts` produces. If `guard.ts` changes,

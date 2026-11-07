@@ -9,24 +9,25 @@ import '../cart_session.dart';
 import '../errors.dart';
 import '../protocol.dart';
 import '../theme.dart';
+import '../ui.dart';
 import 'flow_parts.dart';
 
 /// "For Tacos and Pasta": the line under an item's ingredient on a cart made
 /// from two or more recipes. Null on a one-recipe cart, from older servers,
 /// and when none of the item's recipes has a title.
-String? forRecipes(CartSession session, String key) =>
-    forRecipesLabel(session.recipes.length, session.recipesFor(key));
+String? forRecipes(CartSession session, String key, [MealioUi ui = const MealioUi()]) =>
+    forRecipesLabel(session.recipes.length, session.recipesFor(key), ui);
 
 /// [forRecipes] without a session. `cartRecipeCount` is how many recipes the
 /// cart was made from; `itemRecipes` are the ones that call for the item.
 /// Untitled recipes are left out: "For A and B", "For A, B and C".
-String? forRecipesLabel(int cartRecipeCount, List<ItemRecipe> itemRecipes) {
+String? forRecipesLabel(int cartRecipeCount, List<ItemRecipe> itemRecipes, [MealioUi ui = const MealioUi()]) {
   if (cartRecipeCount < 2) return null;
   final names = itemRecipes
       .map((ItemRecipe r) => r.title?.trim() ?? '')
       .where((String n) => n.isNotEmpty)
       .toList();
-  return names.isEmpty ? null : 'For ${listAnd(names)}';
+  return names.isEmpty ? null : ui.tr('forRecipes', <String, Object?>{'recipes': listAnd(names, ui)});
 }
 
 /// The list screen on its own, for apps that host it in their own sheet.
@@ -85,6 +86,7 @@ class _MealioCartListState extends State<MealioCartList> {
   @override
   Widget build(BuildContext context) {
     final t = widget.theme ?? MealioTheme.of(context);
+    final ui = MealioUi.of(context);
     final s = widget.session;
     final storeName = widget.storeName ?? s.storeName ?? storeLabel(s.store);
     return withMaterialDefaults(
@@ -102,17 +104,18 @@ class _MealioCartListState extends State<MealioCartList> {
             return Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: <Widget>[
-                if (location != null) _locationRow(t, location),
+                if (location != null) _locationRow(t, ui, location),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
                   child: Row(
                     children: <Widget>[
                       if (widget.onChangeStore != null) ...<Widget>[
-                        _storeChip(t, storeName),
+                        _storeChip(t, ui, storeName),
                         const SizedBox(width: 10),
                       ],
                       Flexible(
-                        child: Text('${est.count} of $selectable selected', style: t.style(size: 14, color: t.muted)),
+                        child: Text(ui.tr('selectedCount', <String, Object?>{'count': est.count, 'total': selectable}),
+                            style: t.style(size: 14, color: t.muted)),
                       ),
                     ],
                   ),
@@ -130,7 +133,7 @@ class _MealioCartListState extends State<MealioCartList> {
                       border: Border.all(color: t.border),
                     ),
                     child: Text(
-                      'Pick a product for each item and Mealio will remember your preferences.',
+                      ui.tr('rememberNote'),
                       style: t.style(size: 13, weight: FontWeight.w500, height: 18 / 13, color: t.text),
                     ),
                   ),
@@ -160,31 +163,34 @@ class _MealioCartListState extends State<MealioCartList> {
                       Padding(
                         padding: const EdgeInsets.only(bottom: 6),
                         child: Text(
-                          '${pending == 1 ? '1 checked item needs' : '$pending checked items need'} '
-                          'an option chosen before adding.',
+                          ui.plural('pendingOptions', pending),
                           style: t.style(size: 12, height: 17 / 12, color: t.warnText),
                         ),
                       ),
                     // No partial totals: one unpriced item and there is no number to show.
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.baseline,
-                      textBaseline: TextBaseline.alphabetic,
-                      children: <Widget>[
-                        Expanded(
-                          child: Text(est.total != null && est.estimated ? 'Estimated total' : 'Total',
-                              style: t.style(size: 14, color: t.muted)),
-                        ),
-                        if (est.total != null)
-                          Text('${est.estimated ? 'about ' : ''}${mealioMoney(est.total!)}',
-                              style: t.style(size: 18, weight: FontWeight.w700))
-                        else
-                          Text('Prices at checkout', style: t.style(size: 15, weight: FontWeight.w600, color: t.muted)),
-                      ],
-                    ),
+                    if (ui.sheet.showTotal)
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.baseline,
+                        textBaseline: TextBaseline.alphabetic,
+                        children: <Widget>[
+                          Expanded(
+                            child: Text(ui.tr(est.total != null && est.estimated ? 'estimatedTotal' : 'total'),
+                                style: t.style(size: 14, color: t.muted)),
+                          ),
+                          if (est.total != null)
+                            Text(amountText(ui, est.total!, est.estimated),
+                                style: t.style(size: 18, weight: FontWeight.w700))
+                          else
+                            Text(ui.tr('pricesAtCheckout'),
+                                style: t.style(size: 15, weight: FontWeight.w600, color: t.muted)),
+                        ],
+                      ),
                     Cta(
                       theme: t,
                       busy: widget.busy,
-                      label: est.count > 0 ? 'Add ${plural(est.count, 'item')} to $storeName' : 'Select items to add',
+                      label: est.count > 0
+                          ? ui.plural('addItems', est.count, <String, Object?>{'store': storeName})
+                          : ui.tr('selectItems'),
                       onTap: canAdd ? widget.onAdd : null,
                     ),
                   ],
@@ -199,7 +205,7 @@ class _MealioCartListState extends State<MealioCartList> {
 }
 
 extension on _MealioCartListState {
-  Widget _locationRow(MealioTheme t, StoreLocation location) {
+  Widget _locationRow(MealioTheme t, MealioUi ui, StoreLocation location) {
     final small = t.style(size: 12, height: 17 / 12, color: t.muted);
     final onTap = widget.busy ? null : widget.onChangeLocation;
     return Padding(
@@ -220,7 +226,7 @@ extension on _MealioCartListState {
             Semantics(
               button: true,
               enabled: onTap != null,
-              label: 'Store location: ${location.name}. Change location',
+              label: ui.tr('a11yChangeLocation', <String, Object?>{'name': location.name}),
               onTap: onTap,
               excludeSemantics: true,
               child: GestureDetector(
@@ -228,7 +234,7 @@ extension on _MealioCartListState {
                 onTap: onTap,
                 child: Padding(
                   padding: const EdgeInsets.all(8),
-                  child: Text('Change', style: small.copyWith(color: t.accent)),
+                  child: Text(ui.tr('change'), style: small.copyWith(color: t.accent)),
                 ),
               ),
             ),
@@ -238,13 +244,13 @@ extension on _MealioCartListState {
     );
   }
 
-  Widget _storeChip(MealioTheme t, String storeName) {
+  Widget _storeChip(MealioTheme t, MealioUi ui, String storeName) {
     final onTap = widget.busy ? null : widget.onChangeStore;
     final chipText = t.style(size: 13, weight: FontWeight.w600);
     return Semantics(
       button: true,
       enabled: onTap != null,
-      label: 'Store: $storeName. Change store',
+      label: ui.tr('a11yChangeStore', <String, Object?>{'store': storeName}),
       excludeSemantics: true,
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
@@ -261,7 +267,7 @@ extension on _MealioCartListState {
               children: <Widget>[
                 Text(storeName, style: chipText),
                 const SizedBox(width: 8),
-                Text('Change', style: t.style(size: 13, weight: FontWeight.w600, color: t.accent)),
+                Text(ui.tr('change'), style: t.style(size: 13, weight: FontWeight.w600, color: t.accent)),
               ],
             ),
           ),
@@ -309,6 +315,9 @@ class _ItemRowState extends State<_ItemRow> {
   CartSession get _s => widget.session;
   CartItem get _item => widget.item;
 
+  /// Set each build, for the search that finishes after it.
+  MealioUi _ui = const MealioUi();
+
   void _toggle() {
     if (widget.disabled) return;
     final on = _s.isSelected(_item.key);
@@ -337,11 +346,11 @@ class _ItemRowState extends State<_ItemRow> {
     try {
       final found = await _s.search(_item.key, q);
       if (!mounted) return;
-      setState(() => _searchNote = found.isEmpty ? 'Nothing found for "$q".' : null);
+      setState(() => _searchNote = found.isEmpty ? _ui.tr('nothingFound', <String, Object?>{'query': q}) : null);
       _query.clear();
     } catch (e) {
       if (!mounted) return;
-      setState(() => _searchNote = e is MealioException && e.message.isNotEmpty ? e.message : 'Search failed. Try again.');
+      setState(() => _searchNote = e is MealioException && e.message.isNotEmpty ? e.message : _ui.tr('searchFailed'));
     } finally {
       if (mounted) setState(() => _searching = false);
     }
@@ -350,8 +359,10 @@ class _ItemRowState extends State<_ItemRow> {
   @override
   Widget build(BuildContext context) {
     final t = widget.theme;
+    final ui = _ui = MealioUi.of(context);
     final item = _item;
     final storeName = widget.storeName;
+    final notFound = ui.tr('notFoundAt', <String, Object?>{'store': storeName});
     final cardDecoration = BoxDecoration(
       color: t.background,
       borderRadius: BorderRadius.circular(t.radius + 2),
@@ -359,7 +370,7 @@ class _ItemRowState extends State<_ItemRow> {
     );
     final ingredient = Text(item.ingredient,
         maxLines: 1, overflow: TextOverflow.ellipsis, style: t.style(size: 12, weight: FontWeight.w500, color: t.muted));
-    final forLine = forRecipes(_s, item.key);
+    final forLine = forRecipes(_s, item.key, ui);
     final Widget? forText = forLine == null
         ? null
         : Padding(
@@ -371,7 +382,7 @@ class _ItemRowState extends State<_ItemRow> {
     if (item.status == ItemStatus.unavailable) {
       return Semantics(
         container: true,
-        label: '${item.ingredient}, not found at $storeName',
+        label: '${item.ingredient}, $notFound',
         excludeSemantics: true,
         child: Container(
           decoration: cardDecoration,
@@ -386,7 +397,7 @@ class _ItemRowState extends State<_ItemRow> {
                   children: <Widget>[
                     ingredient,
                     if (forText != null) forText,
-                    Text('Not found at $storeName', style: t.style(size: 14, weight: FontWeight.w600, color: t.muted)),
+                    Text(notFound, style: t.style(size: 14, weight: FontWeight.w600, color: t.muted)),
                   ],
                 ),
               ),
@@ -405,15 +416,15 @@ class _ItemRowState extends State<_ItemRow> {
     final String meta;
     if (picked != null) {
       meta = <String?>[
-        priceText(picked),
-        picked.id == rememberedId ? 'Your usual' : null,
+        priceText(picked, ui),
+        picked.id == rememberedId ? ui.tr('yourUsual') : null,
       ].whereType<String>().where((String x) => x.isNotEmpty).join(' · ');
     } else if (item.status == ItemStatus.remembered) {
-      meta = 'Not adding this time';
+      meta = ui.tr('notAddingThisTime');
     } else if (item.status == ItemStatus.rememberedUnavailable) {
-      meta = 'Your usual is out of stock';
+      meta = ui.tr('usualOutOfStock');
     } else {
-      meta = plural(options.length, 'option');
+      meta = ui.plural('options', options.length);
     }
 
     final TextStyle nameStyle;
@@ -426,7 +437,8 @@ class _ItemRowState extends State<_ItemRow> {
       nameStyle = t.style(size: 15, height: 20 / 15, weight: FontWeight.w600, color: t.muted);
     }
 
-    final changeLabel = widget.open ? 'Done' : (on || item.status == ItemStatus.remembered ? 'Change' : 'Choose');
+    final changeLabel =
+        ui.tr(widget.open ? 'done' : (on || item.status == ItemStatus.remembered ? 'change' : 'choose'));
 
     final row = Padding(
       padding: const EdgeInsets.only(top: 10, bottom: 10, right: 6),
@@ -435,7 +447,7 @@ class _ItemRowState extends State<_ItemRow> {
           Semantics(
             checked: on,
             enabled: !widget.disabled,
-            label: '${on ? 'Leave out ' : 'Add '}${item.ingredient}',
+            label: ui.tr(on ? 'a11yLeaveOut' : 'a11yAdd', <String, Object?>{'item': item.ingredient}),
             onTap: widget.disabled ? null : _toggle,
             excludeSemantics: true,
             child: InkWell(
@@ -450,7 +462,6 @@ class _ItemRowState extends State<_ItemRow> {
           Expanded(
             child: Semantics(
               button: true,
-              hint: 'Shows the options',
               child: InkWell(
                 onTap: widget.onToggleOpen,
                 child: Column(
@@ -458,7 +469,7 @@ class _ItemRowState extends State<_ItemRow> {
                   children: <Widget>[
                     ingredient,
                     if (forText != null) forText,
-                    Text(shown?.name ?? 'Choose a product',
+                    Text(shown?.name ?? ui.tr('chooseProduct'),
                         maxLines: 2, overflow: TextOverflow.ellipsis, style: nameStyle),
                     if (meta.isNotEmpty) Text(meta, style: t.style(size: 12, height: 17 / 12, color: t.muted)),
                   ],
@@ -470,7 +481,7 @@ class _ItemRowState extends State<_ItemRow> {
           Semantics(
             button: true,
             label: changeLabel,
-            hint: widget.open ? 'Hides the options for ${item.ingredient}' : 'Shows the options for ${item.ingredient}',
+            hint: item.ingredient,
             excludeSemantics: true,
             child: InkWell(
               onTap: widget.onToggleOpen,
@@ -499,27 +510,30 @@ class _ItemRowState extends State<_ItemRow> {
         child: Padding(
           padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
           child: Text(
-            'Choose one: ${listOr(picked.preferences.map((ProductPreference p) => p.label).toList())}',
+            ui.tr('chooseOne', <String, Object?>{
+              'options': listOr(picked.preferences.map((ProductPreference p) => p.label).toList(), ui),
+            }),
             style: t.style(size: 13, height: 18 / 13, weight: FontWeight.w600, color: t.accent),
           ),
         ),
       ));
     }
 
-    if (on && picked != null) children.add(_quantityRow(t, picked));
+    if (on && picked != null) children.add(_quantityRow(t, ui, picked));
 
     if (item.status == ItemStatus.rememberedUnavailable && !on) {
       final r = item.remembered;
       children.add(WarnBox(
         theme: t,
         margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-        text: 'Your usual${r != null ? ', ${r.name},' : ''} is '
-            '${item.reason == 'not_found' ? 'not available' : 'out of stock'} today. '
-            'Pick another this time. It stays your usual.',
+        text: r != null
+            ? ui.tr(item.reason == 'not_found' ? 'usualNotAvailableNamed' : 'usualOutNamed',
+                <String, Object?>{'name': r.name})
+            : ui.tr(item.reason == 'not_found' ? 'usualNotAvailable' : 'usualOut'),
       ));
     }
 
-    if (widget.open) children.add(_expanded(t, picked, options, rememberedId, storeName));
+    if (widget.open) children.add(_expanded(t, ui, picked, options, rememberedId, storeName));
 
     return Container(
       decoration: cardDecoration,
@@ -530,7 +544,7 @@ class _ItemRowState extends State<_ItemRow> {
 
   // Sold by weight: the stepper is pounds, stepping through the store's
   // weights (else 0.25 lb). Otherwise a count, clamped to the store cap.
-  Widget _quantityRow(MealioTheme t, Product picked) {
+  Widget _quantityRow(MealioTheme t, MealioUi ui, Product picked) {
     final key = _item.key;
     final byWeight = picked.soldByWeight ?? false;
     final range = byWeight ? _s.weightRange(key) : null;
@@ -547,18 +561,20 @@ class _ItemRowState extends State<_ItemRow> {
     }
 
     final value = byWeight ? lbText(lb) : '$q';
+    final name = ui.tr(byWeight ? 'weight' : 'quantity');
+    final item = <String, Object?>{'item': _item.ingredient};
     return Padding(
       padding: const EdgeInsets.only(left: 58, right: 12, bottom: 10),
       child: Row(
         children: <Widget>[
           Expanded(
-            child: Text(byWeight ? 'Weight' : 'Quantity', style: t.style(size: 12, height: 17 / 12, color: t.muted)),
+            child: Text(name, style: t.style(size: 12, height: 17 / 12, color: t.muted)),
           ),
-          _stepButton(t, '−', 'Less ${_item.ingredient}', !atMin, () => step(-1)),
+          _stepButton(t, '−', ui.tr('a11yLess', item), !atMin, () => step(-1)),
           const SizedBox(width: 4),
           Semantics(
             container: true,
-            label: byWeight ? 'Weight $value' : 'Quantity $value',
+            label: '$name $value',
             excludeSemantics: true,
             child: ConstrainedBox(
               constraints: BoxConstraints(minWidth: byWeight ? 64 : 28),
@@ -566,7 +582,7 @@ class _ItemRowState extends State<_ItemRow> {
             ),
           ),
           const SizedBox(width: 4),
-          _stepButton(t, '+', 'More ${_item.ingredient}', !atMax, () => step(1)),
+          _stepButton(t, '+', ui.tr('a11yMore', item), !atMax, () => step(1)),
         ],
       ),
     );
@@ -599,10 +615,17 @@ class _ItemRowState extends State<_ItemRow> {
     );
   }
 
-  Widget _expanded(MealioTheme t, Product? picked, List<Product> options, String? rememberedId, String storeName) {
+  Widget _expanded(
+    MealioTheme t,
+    MealioUi ui,
+    Product? picked,
+    List<Product> options,
+    String? rememberedId,
+    String storeName,
+  ) {
     final prefs = picked?.preferences ?? const <ProductPreference>[];
     final selPref = _s.preferenceId(_item.key);
-    final searchLabel = 'Search $storeName for something else';
+    final searchLabel = ui.tr('searchPlaceholder', <String, Object?>{'store': storeName});
     final note = _searchNote;
     return Container(
       decoration: BoxDecoration(border: Border(top: BorderSide(color: t.border))),
@@ -618,7 +641,7 @@ class _ItemRowState extends State<_ItemRow> {
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: gapped(<Widget>[
-                    for (final Product o in options) _option(t, o, picked?.id == o.id, o.id == rememberedId),
+                    for (final Product o in options) _option(t, ui, o, picked?.id == o.id, o.id == rememberedId),
                   ], 10, axis: Axis.horizontal),
                 ),
               ),
@@ -695,7 +718,8 @@ class _ItemRowState extends State<_ItemRow> {
                 const SizedBox(width: 8),
                 Semantics(
                   button: true,
-                  label: _searching ? 'Searching' : 'Search',
+                  enabled: !_searching && !widget.disabled,
+                  label: ui.tr('search'),
                   excludeSemantics: true,
                   child: Material(
                     color: t.text,
@@ -710,13 +734,13 @@ class _ItemRowState extends State<_ItemRow> {
                           child: Center(
                             widthFactor: 1,
                             child: _searching
-                                ? const SizedBox(
+                                ? SizedBox(
                                     width: 20,
                                     height: 20,
-                                    child: CircularProgressIndicator(strokeWidth: 2.5, color: Color(0xFFFFFFFF)),
+                                    child: CircularProgressIndicator(strokeWidth: 2.5, color: t.onAccent),
                                   )
-                                : Text('Search',
-                                    style: t.style(size: 14, weight: FontWeight.w600, color: const Color(0xFFFFFFFF))),
+                                : Text(ui.tr('search'),
+                                    style: t.style(size: 14, weight: FontWeight.w600, color: t.onAccent)),
                           ),
                         ),
                       ),
@@ -736,9 +760,9 @@ class _ItemRowState extends State<_ItemRow> {
     );
   }
 
-  Widget _option(MealioTheme t, Product o, bool sel, bool usual) {
-    final price = o.outOfStock ? 'Out of stock' : priceText(o);
-    final tag = usual ? 'Your usual' : (o.badge == 'popular' ? (o.badgeLabel ?? 'Crowd favorite') : null);
+  Widget _option(MealioTheme t, MealioUi ui, Product o, bool sel, bool usual) {
+    final price = o.outOfStock ? ui.tr('outOfStock') : priceText(o, ui);
+    final tag = usual ? ui.tr('yourUsual') : (o.badge == 'popular' ? (o.badgeLabel ?? ui.tr('crowdFavorite')) : null);
     return Semantics(
       inMutuallyExclusiveGroup: true,
       checked: sel,

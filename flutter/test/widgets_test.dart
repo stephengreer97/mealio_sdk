@@ -415,7 +415,7 @@ void main() {
       expect(find.text('×1'), findsOneWidget);
       expect(find.text(r'$2.50'), findsOneWidget);
       expect(find.text(r'$0.50'), findsOneWidget);
-      expect(find.bySemanticsLabel(r'Yellow Onion, for 2 yellow onions, quantity 2, $2.50'), findsOneWidget);
+      expect(find.bySemanticsLabel(r'Yellow Onion, For 2 yellow onions, Quantity 2, $2.50'), findsOneWidget);
 
       // Nothing failed: collapsed, with a one-line summary.
       expect(find.text('Left out this time'), findsOneWidget);
