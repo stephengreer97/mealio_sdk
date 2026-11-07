@@ -54,14 +54,14 @@ jobs:
       - run: dart pub publish --dry-run
 
   ios:
-    runs-on: macos-14
+    runs-on: macos-15
     defaults:
       run:
         working-directory: ios
     steps:
       - uses: actions/checkout@v4
       - run: swift test
-      - run: xcodebuild -scheme MealioSDK -destination 'platform=iOS Simulator,name=iPhone 15' test
+      - run: xcodebuild -scheme MealioSDK -destination 'platform=iOS Simulator,name=iPhone 16' test
       # The root Package.swift is what Swift Package Manager users get.
       - run: swift build
         working-directory: .

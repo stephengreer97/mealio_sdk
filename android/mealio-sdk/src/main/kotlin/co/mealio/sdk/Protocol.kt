@@ -303,6 +303,8 @@ data class Product(
     val outOfStock: Boolean = false,
     /** Why this option sits where it does: "picked_before", "popular" or "partner_pick". Ranking only. */
     val badge: String? = null,
+    /** The words for the badge, when it has any: "Crowd favorite for Tacos". */
+    val badgeLabel: String? = null,
     /** Variants the user must pick one of (H-E-B "sliced or shaved?"). Pass the id as preferenceId. */
     val preferences: List<ProductPreference> = emptyList(),
     /** One unit's price as a number, for an estimated total. The server works out "2 for $1.05" style deals. */
@@ -330,6 +332,7 @@ data class Product(
             size = o.str("size"),
             outOfStock = o.bool("outOfStock") ?: false,
             badge = o.str("badge"),
+            badgeLabel = o.str("badgeLabel"),
             preferences = o.arr("preferences")?.objects()?.map { ProductPreference(it.str("id") ?: "", it.str("label") ?: "") }
                 ?: emptyList(),
             unitPrice = o.num("unitPrice")?.takeIf { it.isFinite() },

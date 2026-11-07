@@ -885,7 +885,7 @@ private fun ItemRow(
                                 style = t.ts(13, FontWeight.SemiBold),
                             )
                             if (usual) Text("Your usual", style = t.ts(11, FontWeight.Bold, t.accent))
-                            else if (o.badge == "popular") Text("Popular", style = t.ts(11, FontWeight.Bold, t.muted))
+                            else if (o.badge == "popular") Text(o.badgeLabel ?: "Crowd favorite", style = t.ts(11, FontWeight.Bold, t.muted))
                         }
                     }
                 }

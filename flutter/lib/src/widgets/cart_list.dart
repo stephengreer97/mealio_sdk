@@ -692,7 +692,7 @@ class _ItemRowState extends State<_ItemRow> {
 
   Widget _option(MealioTheme t, Product o, bool sel, bool usual) {
     final price = o.outOfStock ? 'Out of stock' : priceText(o);
-    final tag = usual ? 'Your usual' : (o.badge == 'popular' ? 'Popular' : null);
+    final tag = usual ? 'Your usual' : (o.badge == 'popular' ? (o.badgeLabel ?? 'Crowd favorite') : null);
     return Semantics(
       inMutuallyExclusiveGroup: true,
       checked: sel,

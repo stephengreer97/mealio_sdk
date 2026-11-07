@@ -972,7 +972,7 @@ struct MealioItemRow: View {
                 if usual {
                     Text("Your usual").font(t.font(11, .bold)).foregroundColor(t.accent)
                 } else if o.badge == "popular" {
-                    Text("Popular").font(t.font(11, .bold)).foregroundColor(t.muted)
+                    Text(o.badgeLabel ?? "Crowd favorite").font(t.font(11, .bold)).foregroundColor(t.muted)
                 }
             }
             .padding(10)
