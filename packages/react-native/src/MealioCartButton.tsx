@@ -5,7 +5,7 @@
 import React, { useEffect, useState, type ReactNode } from 'react';
 import { Pressable, StyleSheet, Text, type StyleProp, type ViewStyle } from 'react-native';
 import type { AddResult, MealioError, Recipe } from '@mealio/sdk-core';
-import { useMealio } from './MealioProvider';
+import { useMealio, useMealioInternal } from './MealioProvider';
 import { MealioCartFlow } from './MealioCartFlow';
 import type { MealioTheme } from './theme';
 
@@ -37,6 +37,11 @@ export interface MealioCartButtonProps {
   doneAction?: { label: string; onPress: (result: AddResult) => void };
   style?: StyleProp<ViewStyle>;
   disabled?: boolean;
+  /**
+   * Called on tap while the provider's `userId` is null. Send the user to your
+   * sign-in. With neither this nor the provider's, the button is disabled.
+   */
+  onSignInRequired?: () => void;
 }
 
 export function MealioCartButton(props: MealioCartButtonProps) {
@@ -45,16 +50,18 @@ export function MealioCartButton(props: MealioCartButtonProps) {
   const { ui } = mealio;
   const variant = props.variant ?? 'solid';
   const label = props.label || ui.tr(variant === 'compact' ? 'addToCartShort' : 'addToCart');
-  const disabled = !!props.disabled;
-  const onPress = () => setOpen(true);
+  const internal = useMealioInternal();
+  const signIn = mealio.hasUser ? null : props.onSignInRequired ?? internal.onSignInRequired;
+  const disabled = !!props.disabled || (!mealio.hasUser && !signIn);
+  const onPress = () => { if (signIn) signIn(); else if (mealio.hasUser) setOpen(true); };
   const [open, setOpen] = useState(false);
   // WARM THE LOGIN CHECK while the user reads the recipe. Only for a known user
   // with a store on file: the server answers "nothing to warm" otherwise. The
   // client runs it at most once every few minutes however many buttons mount.
   useEffect(() => {
-    if (!props.disabled) void mealio.warm({ store: props.store ?? null });
+    if (!disabled && mealio.hasUser) void mealio.warm({ store: props.store ?? null });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.store, props.disabled]);
+  }, [props.store, disabled, mealio.userId]);
   return (
     <>
       {props.renderButton ? props.renderButton({ onPress, disabled, label }) : (

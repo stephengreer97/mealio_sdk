@@ -19,6 +19,8 @@
   "files": [
     "dist",
     "src",
+    "jest.js",
+    "jest.d.ts",
     "README.md",
     "LICENSE"
   ],
@@ -28,6 +30,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
     "prepack": "npm run build"
   },
   "dependencies": {
@@ -54,7 +57,9 @@
     "react": "18.3.1",
     "react-native": "0.76.5",
     "react-native-webview": "13.12.5",
-    "typescript": "5.6.3"
+    "react-test-renderer": "18.3.1",
+    "typescript": "5.6.3",
+    "vitest": "2.1.8"
   },
   "react-native": "src/index.ts"
 }

@@ -70,6 +70,23 @@ const vectors = {
     { store: 'safeway', url: 'https://evil.us.auth0.com/login', use: 'login', ok: false },
     { store: 'wegmans', url: 'https://wegmansb2c.b2clogin.com/x/oauth2', use: 'login', ok: true },
     { store: 'heb', url: 'https://evil.b2clogin.com/x', use: 'login', ok: false },
+    // Order paths, in every spelling seen.
+    { store: 'heb', url: 'https://www.heb.com/place_order', use: 'fetch', ok: false },
+    { store: 'heb', url: 'https://www.heb.com/api/order/submit', use: 'fetch', ok: false },
+    { store: 'heb', url: 'https://www.heb.com/orders/place?x=1', use: 'fetch', ok: false },
+    { store: 'heb', url: 'https://www.heb.com/cart/confirm', use: 'page', ok: false },
+    { store: 'heb', url: 'https://www.heb.com/purchase', use: 'fetch', ok: false },
+    { store: 'heb', url: 'https://www.heb.com/purchase/review', use: 'fetch', ok: false },
+    // Their neighbors that only read stay open.
+    { store: 'heb', url: 'https://www.heb.com/orders/placed', use: 'page', ok: true },
+    { store: 'heb', url: 'https://www.heb.com/my-account/purchases', use: 'page', ok: true },
+    // Paths the store rails use today (lib/cart-relay/stores). None may block.
+    { store: 'safeway', url: 'https://www.safeway.com/abs/pub/xapi/pgmsearch/v1/search/products?q=milk', use: 'fetch', ok: true },
+    { store: 'safeway', url: 'https://www.safeway.com/abs/pub/erums/cartservice/api/v2/cart/items', use: 'fetch', ok: true },
+    { store: 'safeway', url: 'https://www.safeway.com/abs/pub/erums/cartservice/api/v2/cart/customer/', use: 'fetch', ok: true },
+    { store: 'wegmans', url: 'https://www.wegmans.com/commerce/cart/carts/lineitems', use: 'fetch', ok: true },
+    { store: 'wegmans', url: 'https://www.wegmans.com/commerce/order/orders/activeorders', use: 'fetch', ok: true },
+    { store: 'aldi', url: 'https://www.aldi.us/graphql', use: 'fetch', ok: true },
   ],
   // Request bodies the runner's fetch op and the guard refuse.
   blockedBodies: [
@@ -81,6 +98,26 @@ const vectors = {
     { body: '{"query":"query Search { products { id } }"}', blocked: false },
     { body: 'q=checkout+guide', blocked: false },
     { body: '', blocked: false },
+    // Any mutation: its name, and every field it selects, at any depth.
+    { body: '{"query":"mutation Go { placeOrder(input:{}) { id } }"}', blocked: true },
+    { body: '{"query":"mutation { placeOrder { id } }"}', blocked: true },
+    { body: '{"query":"mutation($a:ID!){ checkoutComplete(id:$a){id} }"}', blocked: true },
+    { body: '{"query":"mutation Go { cart { submitOrder { id } } }"}', blocked: true },
+    { body: '{"query":"mutation Go { done: place_order { id } }"}', blocked: true },
+    { body: '{"query":"mutation Go { ...F } fragment F on Mutation { placeOrder { id } }"}', blocked: true },
+    { body: '{"operationName":"place_order"}', blocked: true },
+    { body: 'operationName=PlaceOrder&query=mutation+PlaceOrder', blocked: true },
+    { body: 'operationName=Search&query=mutation+Go+%7B+placeOrder+%7B+id+%7D+%7D', blocked: true },
+    { body: 'mutation { submit_order { id } }', blocked: true },
+    // A query may read any field. Arguments, strings, comments and type conditions are not fields.
+    { body: '{"query":"query Wallet { me { paymentMethods { id } } }"}', blocked: false },
+    { body: '{"query":"mutation Add($p: String!) { addItem(note: \\"checkout\\", purchasePreferenceId: $p) { ... on PaymentError { message } } } # placeOrder"}', blocked: false },
+    { body: 'operationName=Search&query=query+Search+%7B+a+%7D', blocked: false },
+    // The store rails' own writes (lib/cart-relay/stores) must pass.
+    { body: JSON.stringify({ operationName: 'cartItemV2', variables: {}, query: 'mutation cartItemV2($productId: String!, $skuId: String!, $quantity: Int, $purchasePreferenceId: String) { addItemToCartV2(productId: $productId, skuId: $skuId, quantity: $quantity, purchasePreferenceId: $purchasePreferenceId) { __typename ... on Cart { id } ... on AddOnsCart { id cart { id } } ... on AddItemToCartV2Error { message title code } ... on AddItemToCartV2TimeslotError { message title errorCode: code } } }' }), blocked: false },
+    { body: JSON.stringify({ operationName: 'cartItemsV2', variables: {}, query: 'mutation cartItemsV2($p0: String!, $s0: String!, $w0: Float, $r0: String) { a0: addItemToCartV2(productId: $p0, skuId: $s0, weight: $w0, purchasePreferenceId: $r0) { __typename ... on Cart { id } } }' }), blocked: false },
+    { body: '{"operationName":"MergeAndGetCart","variables":{}}', blocked: false },
+    { body: '{"operationName":"updateItems","variables":{}}', blocked: false },
   ],
   matchers: [
     { msg: { type: 'ALB_SESSION', loggedIn: true, early: true }, m: { type: 'ALB_SESSION', ne: { early: true } }, ok: false },

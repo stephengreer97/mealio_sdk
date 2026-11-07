@@ -199,6 +199,13 @@ export interface CartItem {
   chosen?: Product | null;
 }
 
+/** Something the server changed or ignored in what was sent. The cart still works. */
+export interface CartWarning {
+  /** ingredients_dropped, lines_dropped, servings_ignored, or a newer code. */
+  code: string;
+  message: string;
+}
+
 export interface PreparedCart {
   cartId: string;
   store: string;
@@ -214,6 +221,8 @@ export interface PreparedCart {
   ready: CartItem[];
   needsChoice: CartItem[];
   unavailable: CartItem[];
+  /** Absent from older servers. */
+  warnings?: CartWarning[];
 }
 
 export interface SearchResult {

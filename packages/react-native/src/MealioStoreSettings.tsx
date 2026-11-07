@@ -2,10 +2,10 @@
 // and location screens as the cart sheet. Opens with useMealio().openStoreSettings(),
 // or render it yourself.
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Modal, Platform, KeyboardAvoidingView, Pressable, ScrollView, Text, View } from 'react-native';
 import type { StoreInfo, StorePreferences } from '@mealio/sdk-core';
-import { useMealio } from './MealioProvider';
+import { useMealio, useMealioInternal } from './MealioProvider';
 import { Header, LocationPicker, sheetHeight, sheetStyles } from './MealioCartFlow';
 
 export interface MealioStoreSettingsProps {
@@ -13,10 +13,17 @@ export interface MealioStoreSettingsProps {
   onClose: () => void;
   /** Called each time the user's store changes. */
   onChange?: (preferences: StorePreferences) => void;
+  /** Called instead of opening while the provider's `userId` is null. */
+  onSignInRequired?: () => void;
 }
 
-export function MealioStoreSettings({ visible, onClose, onChange }: MealioStoreSettingsProps) {
+export function MealioStoreSettings({ visible, onClose, onChange, onSignInRequired }: MealioStoreSettingsProps) {
   const mealio = useMealio();
+  const internal = useMealioInternal();
+  // Latest values, so a theme or callback change never reruns the load below:
+  // that would throw away a zip step the user is on.
+  const latest = useRef({ mealio, onChange, onClose, signIn: onSignInRequired ?? internal.onSignInRequired });
+  latest.current = { mealio, onChange, onClose, signIn: onSignInRequired ?? internal.onSignInRequired };
   const t = mealio.theme;
   const { ui } = mealio;
   const s = useMemo(() => sheetStyles(t), [t]);
@@ -29,38 +36,40 @@ export function MealioStoreSettings({ visible, onClose, onChange }: MealioStoreS
   const load = useCallback(async () => {
     setProblem(null);
     try {
-      const [list, current] = await Promise.all([mealio.stores(), mealio.storePreferences()]);
+      const m = latest.current.mealio;
+      const [list, current] = await Promise.all([m.stores(), m.storePreferences()]);
       setStores(list); setPrefs(current);
     } catch (e: any) {
-      setStores([]); setProblem(e?.message || ui.tr('couldNotLoadYourStores'));
+      setStores([]); setProblem(e?.message || latest.current.mealio.ui.tr('couldNotLoadYourStores'));
     }
-  }, [mealio]);
+  }, []);
 
   useEffect(() => {
     if (!visible) return;
+    if (!mealio.hasUser) { latest.current.signIn?.(); latest.current.onClose(); return; }
     setPicking(null); setStores(null); setPrefs(null);
     load();
-  }, [visible, load]);
+  }, [visible, mealio.userId, load]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const changed = useCallback((next: StorePreferences) => { setPrefs(next); onChange?.(next); }, [onChange]);
+  const changed = useCallback((next: StorePreferences) => { setPrefs(next); latest.current.onChange?.(next); }, []);
 
   const choose = useCallback(async (store: StoreInfo) => {
     // A Kroger family store is a chain: the user still has to say which one.
     if (store.via === 'kroger_api') { setPicking(store); return; }
     setSaving(store.id); setProblem(null);
     try {
-      changed(await mealio.setStore(store.id));
+      changed(await latest.current.mealio.setStore(store.id));
     } catch (e: any) {
-      setProblem(e?.message || ui.tr('couldNotSaveStore'));
+      setProblem(e?.message || latest.current.mealio.ui.tr('couldNotSaveStore'));
     } finally {
       setSaving(null);
     }
-  }, [mealio, changed]);
+  }, [changed]);
 
   const samePick = picking && prefs?.defaultStore === picking.id ? prefs.location : null;
 
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose} statusBarTranslucent>
+    <Modal visible={visible && mealio.hasUser} transparent animationType="slide" onRequestClose={onClose} statusBarTranslucent>
       <View style={s.scrim}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={[s.sheet, sheetHeight(ui.sheet.height)]}>
           <View style={s.grabber} />

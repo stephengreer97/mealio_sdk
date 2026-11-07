@@ -9,6 +9,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator, Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View,
 } from 'react-native';
+import { CancelToken } from '@mealio/sdk-core';
 import type { AddedItem, AddResult, CartItem, CartSession, MealioError, Product, MealioSheetStep, Recipe, Step, StoreInfo, StoreLocation } from '@mealio/sdk-core';
 import { useMealio, useMealioInternal, type MealioUi } from './MealioProvider';
 import type { MealioTheme } from './theme';
@@ -60,6 +61,15 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
   const [error, setError] = useState<{ code: string; message: string } | null>(null);
   const [, setVersion] = useState(0);
   const run = useRef(0);
+  /** The prepare under way, so closing can stop it. */
+  const preparing = useRef<CancelToken | null>(null);
+  /** The add under way. It runs to its end: nothing closes the sheet meanwhile. */
+  const adding = useRef(false);
+  /** The cart of a failed add, so Try again keeps the user's picks. */
+  const failedAdd = useRef<CartSession | null>(null);
+  /** The latest props and cart, for callbacks that outlive a render. */
+  const latest = useRef({ props, cart });
+  latest.current = { props, cart };
   const [store, setStore] = useState<string | null>(props.store ?? null);
   const [stores, setStores] = useState<StoreInfo[] | null>(null);
   const backTo = useRef<Phase>('list');
@@ -83,7 +93,9 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
   const openStores = useCallback(async (from: Phase) => {
     backTo.current = from;
     setPhase('stores');
-    if (!stores) {
+    // An empty list is a load that failed: try again each time.
+    if (!stores || stores.length === 0) {
+      setStores(null);
       try { setStores(await mealio.stores()); } catch { setStores([]); }
     }
   }, [stores, mealio]);
@@ -96,14 +108,19 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
 
   const start = useCallback(async (storeId: string | null) => {
     const id = ++run.current;
+    preparing.current?.cancel();
+    const cancel = new CancelToken();
+    preparing.current = cancel;
+    setStore(storeId);
     setPhase('loading'); setStep('connecting'); setCart(null); setResult(null); setError(null);
     try {
-      const c = await mealio.prepareCart({ store: storeId, recipes }, { onStep: (s) => run.current === id && setStep(s) });
+      const c = await mealio.prepareCart({ store: storeId, recipes }, { cancel, onStep: (s) => run.current === id && setStep(s) });
       if (run.current !== id) return;
+      if (failedAdd.current) { c.restorePicks(failedAdd.current); failedAdd.current = null; }
       setStore(c.store); setCart(c); setPhase('list');
       ui.emit({ type: 'list_shown', store: c.store, items: c.items.length });
     } catch (e: any) {
-      if (run.current !== id) return;
+      if (run.current !== id || e?.code === 'cancelled') return;
       if (e?.code === 'store_required' || e?.code === 'store_not_allowed') { setStore(null); openStores('error'); return; }
       if (e?.code === 'location_required') {
         // Which store the user shops at is theirs to say. With no store named
@@ -114,17 +131,45 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
       setError({ code: e?.code || 'error', message: e?.message || ui.tr('somethingWrongSentence') });
       setPhase('error');
       ui.emit({ type: 'error', code: e?.code || 'error', step: 'loading' });
-      props.onError?.(e);
+      latest.current.props.onError?.(e);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recipes, mealio]);
 
+  /** Stop what can be stopped. Nothing it was doing reports afterwards. */
+  const stop = useCallback(() => {
+    run.current += 1;
+    preparing.current?.cancel();
+    latest.current.cart?.cancelSearches();
+  }, []);
+
+  const openedFor = useRef(mealio.userId);
   useEffect(() => {
-    if (visible) { ui.emit({ type: 'sheet_opened', recipes: recipes.length }); start(props.store ?? null); } else run.current += 1;
+    // Hidden by the partner mid-add: the sheet stays up until the add ends.
+    if (adding.current) return;
+    if (!visible) { stop(); return; }
+    openedFor.current = mealio.userId;
+    failedAdd.current = null;
+    ui.emit({ type: 'sheet_opened', recipes: recipes.length });
+    start(props.store ?? null);
   }, [visible]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  useEffect(() => stop, [stop]);
+
+  // The store prop changed while the sheet is up: a cart still loading moves to
+  // it, and Try again uses it. A finished list stays what it is.
+  const propStore = useRef(props.store);
+  useEffect(() => {
+    if (propStore.current === props.store) return;
+    propStore.current = props.store;
+    if (!visible) return;
+    if (phase === 'loading') start(props.store ?? null);
+    else if (phase === 'error') setStore(props.store ?? null);
+  }, [props.store]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const add = useCallback(async () => {
-    if (!cart) return;
+    if (!cart || adding.current || cart.searching) return;
+    adding.current = true;
     const id = run.current;
     setPhase('adding');
     ui.emit({ type: 'add_started', items: cart.estimate().count });
@@ -134,35 +179,50 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
       if (run.current !== id) return;
       setResult(r); setPhase('done');
       ui.emit({ type: 'cart_added', store: r.store, added: r.added.length, failed: r.failed.length });
-      props.onAdded?.(r);
+      latest.current.props.onAdded?.(r);
     } catch (e: any) {
       if (run.current !== id) return;
+      failedAdd.current = cart;
       setError({ code: e?.code || 'error', message: e?.message || ui.tr('couldNotAdd') });
       setPhase('error');
       ui.emit({ type: 'error', code: e?.code || 'error', step: 'adding' });
-      props.onError?.(e);
+      latest.current.props.onError?.(e);
+    } finally {
+      adding.current = false;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cart]);
 
   const close = useCallback(() => {
-    run.current += 1;
+    // Every way of closing lands here. An add cannot be stopped, so it stays
+    // open, but a sign-in the add asked for can still be dismissed.
+    if (adding.current) { internal.login?.cancel(); return; }
+    stop();
     ui.emit({ type: 'sheet_closed', step: stepNow(), added: phase === 'done' && result ? result.added.length : 0 });
     internal.login?.cancel();
-    props.onClose(phase === 'done' ? result : null);
+    latest.current.props.onClose(phase === 'done' ? result : null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, result, internal.login]);
+
+  // The user changed: what is on screen was theirs. An add finishes first.
+  useEffect(() => {
+    if (visible && phase !== 'adding' && mealio.userId !== openedFor.current) {
+      failedAdd.current = null;
+      close();
+    }
+  }, [mealio.userId, phase]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const storeName = cart?.cart.storeName || (store ? storeLabel(store) : ui.tr('yourStore'));
   const named = !!(cart?.cart.storeName || store);
   const s = useMemo(() => styles(t), [t]);
 
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={close} statusBarTranslucent>
+    <Modal visible={visible || phase === 'adding'} transparent animationType="slide" onRequestClose={close} statusBarTranslucent>
       <View style={s.scrim}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={[s.sheet, sheetHeight(ui.sheet.height)]}>
           <View style={s.grabber} />
-          <Header t={t} recipeTitle={kicker} photos={photos} title={internal.login ? internal.login.title : headerTitle(phase, storeName, named, ui)} onClose={close} />
+          <Header t={t} recipeTitle={kicker} photos={photos} title={internal.login ? internal.login.title : headerTitle(phase, storeName, named, ui)} onClose={close}
+            closeDisabled={phase === 'adding' && !internal.login} />
           {internal.login ? (
             <View style={s.flex}>
               <Text style={s.loginNote}>{ui.tr('loginNote', { store: storeName })}</Text>
@@ -186,7 +246,7 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
             <Done t={t} cart={cart} result={result} storeName={storeName} onDone={close} message={props.doneMessage}
               action={props.doneAction ? { label: props.doneAction.label, onPress: () => { close(); props.doneAction!.onPress(result); } } : null} />
           ) : (
-            <ErrorView t={t} error={error} onRetry={() => start(store)} onClose={close} />
+            <ErrorView t={t} error={error} note={failedAdd.current ? ui.tr('addFailedNote') : null} onRetry={() => start(store)} onClose={close} />
           )}
         </KeyboardAvoidingView>
       </View>
@@ -218,7 +278,7 @@ function storeLabel(id: string): string {
 
 // ── pieces ─────────────────────────────────────────────────────────────
 
-export function Header({ t, recipeTitle, title, onClose, photos }: { t: MealioTheme; recipeTitle?: string; title: string; onClose: () => void; photos?: string[] }) {
+export function Header({ t, recipeTitle, title, onClose, photos, closeDisabled }: { t: MealioTheme; recipeTitle?: string; title: string; onClose: () => void; photos?: string[]; closeDisabled?: boolean }) {
   const s = styles(t);
   const { ui } = useMealio();
   return (
@@ -233,7 +293,8 @@ export function Header({ t, recipeTitle, title, onClose, photos }: { t: MealioTh
         {recipeTitle ? <Text style={s.kicker} numberOfLines={1}>{recipeTitle}</Text> : null}
         <Text style={s.h1} numberOfLines={2} accessibilityRole="header">{title}</Text>
       </View>
-      <Pressable onPress={onClose} accessibilityRole="button" accessibilityLabel={ui.tr('close')} style={s.closeBtn} hitSlop={8}>
+      <Pressable onPress={onClose} disabled={!!closeDisabled} accessibilityRole="button" accessibilityLabel={ui.tr('close')} accessibilityState={{ disabled: !!closeDisabled }}
+        style={[s.closeBtn, closeDisabled && s.ctaOff]} hitSlop={8}>
         <Text style={s.closeX}>✕</Text>
       </Pressable>
     </View>
@@ -337,8 +398,8 @@ export function CartList({ t, cart, storeName, busy, onChange, onAdd, onChangeSt
               : <Text style={s.totalNone}>{ui.tr('pricesAtCheckout')}</Text>}
           </View>
         ) : null}
-        <Pressable onPress={onAdd} disabled={busy || est.count === 0} accessibilityRole="button"
-          style={[s.cta, (busy || est.count === 0) && s.ctaOff]}>
+        <Pressable onPress={onAdd} disabled={busy || est.count === 0 || cart.searching} accessibilityRole="button"
+          style={[s.cta, (busy || est.count === 0 || cart.searching) && s.ctaOff]}>
           {busy ? <ActivityIndicator color={t.onAccent} />
             : <Text style={s.ctaText}>{est.count ? ui.plural('addItems', est.count, { store: storeName }) : ui.tr('selectItems')}</Text>}
         </Pressable>
@@ -385,23 +446,26 @@ function ItemRow({ t, cart, item, storeName, open, onToggleOpen, onChange, disab
 
   const pick = (p: Product, preferenceId: string | null = null) => {
     if (disabled) return;
+    if (!on) ui.emit({ type: 'item_checked', key: item.key });
     cart.select(item.key, p.id, { preferenceId });
     onChange();
   };
 
   const search = async () => {
     const q = query.trim();
-    if (q.length < 2 || searching) return;
+    if (q.length < 2 || searching || disabled) return;
     setSearching(true); setSearchNote(null);
+    const running = cart.search(item.key, q);
+    onChange(); // Add is off from here until the search ends.
     try {
-      const found = await cart.search(item.key, q);
+      const found = await running;
       setSearchNote(found.length ? null : ui.tr('nothingFound', { query: q }));
       setQuery('');
-      onChange();
     } catch (e: any) {
-      setSearchNote(e?.message || ui.tr('searchFailed'));
+      if (e?.code !== 'cancelled') setSearchNote(e?.message || ui.tr('searchFailed'));
     } finally {
       setSearching(false);
+      onChange();
     }
   };
 
@@ -515,7 +579,7 @@ function ItemRow({ t, cart, item, storeName, open, onToggleOpen, onChange, disab
             <TextInput value={query} onChangeText={setQuery} onSubmitEditing={search} returnKeyType="search"
               placeholder={ui.tr('searchPlaceholder', { store: storeName })} placeholderTextColor={t.muted}
               accessibilityLabel={ui.tr('searchPlaceholder', { store: storeName })} style={s.searchInput} editable={!disabled} />
-            <Pressable onPress={search} accessibilityRole="button" style={s.searchBtn} disabled={searching}>
+            <Pressable onPress={search} accessibilityRole="button" style={s.searchBtn} disabled={searching || disabled}>
               {searching ? <ActivityIndicator color={t.onAccent} /> : <Text style={s.searchBtnText}>{ui.tr('search')}</Text>}
             </Pressable>
           </View>
@@ -831,7 +895,7 @@ export function StorePicker({ t, stores, current, onPick, onBack }: {
   );
 }
 
-function ErrorView({ t, error, onRetry, onClose }: { t: MealioTheme; error: { code: string; message: string } | null; onRetry: () => void; onClose: () => void }) {
+function ErrorView({ t, error, note, onRetry, onClose }: { t: MealioTheme; error: { code: string; message: string } | null; note: string | null; onRetry: () => void; onClose: () => void }) {
   const s = styles(t);
   const { ui } = useMealio();
   const msg = error?.code === 'login_cancelled' ? ui.tr('signInClosed')
@@ -841,6 +905,7 @@ function ErrorView({ t, error, onRetry, onClose }: { t: MealioTheme; error: { co
   return (
     <View style={[s.body, s.flex]}>
       <Text style={s.stepText}>{msg}</Text>
+      {note ? <Text style={s.muted} testID="mealio-add-failed-note">{note}</Text> : null}
       <View style={s.flex} />
       <Pressable onPress={onRetry} accessibilityRole="button" style={s.cta}><Text style={s.ctaText}>{ui.tr('tryAgain')}</Text></Pressable>
       <Pressable onPress={onClose} accessibilityRole="button" style={[s.cta, s.ctaQuiet]}><Text style={[s.ctaText, { color: t.text }]}>{ui.tr('close')}</Text></Pressable>

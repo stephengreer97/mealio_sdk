@@ -97,6 +97,25 @@ describe('guard script', () => {
     return { win, posted, fetched };
   }
 
+  it('checks beacons too', () => {
+    const beacons: string[] = [];
+    const posted: string[] = [];
+    const win: any = {
+      location: { href: 'https://www.heb.com/' },
+      navigator: { sendBeacon: (u: string) => { beacons.push(u); return true; } },
+      ReactNativeWebView: { postMessage: (s: string) => posted.push(s) },
+      URL, Date, JSON, Promise, Error, RegExp, String,
+    };
+    win.window = win;
+    vm.createContext(win);
+    vm.runInContext(GUARD_SCRIPT, win);
+    expect(vm.runInContext(`navigator.sendBeacon('/analytics', 'x=1')`, win)).toBe(true);
+    expect(vm.runInContext(`navigator.sendBeacon('/checkout/place-order', 'x')`, win)).toBe(false);
+    expect(vm.runInContext(`navigator.sendBeacon('/graphql', '{"query":"mutation { confirmOrder { id } }"}')`, win)).toBe(false);
+    expect(vm.runInContext(`navigator.sendBeacon('/graphql', new Blob(['x']))`, Object.assign(win, { Blob }))).toBe(false);
+    expect(beacons).toEqual(['/analytics']);
+  });
+
   it('lets a normal request through', async () => {
     const { win, fetched } = sandbox();
     await vm.runInContext(`fetch('/graphql', { method: 'POST', body: '{"operationName":"productSearchPageV2"}' })`, win);
