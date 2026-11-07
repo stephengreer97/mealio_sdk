@@ -206,7 +206,7 @@ export function Header({ t, recipeTitle, title, onClose, photos }: { t: MealioTh
       {ui.sheet.logo ? <Image source={ui.sheet.logo} style={s.logo} resizeMode="contain" accessibilityIgnoresInvertColors /> : null}
       {photos?.length ? (
         <View style={s.photos} testID="mealio-recipe-photos" accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
-          {photos.map((uri, i) => <Image key={uri} source={{ uri }} style={[s.photo, i > 0 && s.photoStacked]} resizeMode="cover" accessibilityIgnoresInvertColors />)}
+          {photos.map((uri, i) => <Image key={`${i}:${uri}`} source={{ uri }} style={[s.photo, i > 0 && s.photoStacked]} resizeMode="cover" accessibilityIgnoresInvertColors />)}
         </View>
       ) : null}
       <View style={s.flex}>

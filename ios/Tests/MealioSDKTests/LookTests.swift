@@ -74,6 +74,23 @@ final class LookTests: XCTestCase {
     }
 
     @MainActor
+    func testAnUncheckedPantryItemSaysSoAndACheckedOneShowsItsPrice() throws {
+        let salt = Product(id: "9", name: "Salt", price: "$1.00", unitPrice: 1)
+        let item = CartItem(key: "salt", ingredient: "salt", status: .remembered, options: [salt],
+                            selectedId: "9", remembered: salt, startUnchecked: true)
+        let config = MealioClientConfig(publishableKey: "pk_test", sessionTokenProvider: { "tok" },
+                                        keys: TestSigner.keys, sdkVersion: "0")
+        let cart = CartSession(client: MealioClient(config: config, host: FakeHost()),
+                               cart: PreparedCart(cartId: "c", store: "heb", items: [item]))
+        let row = MealioItemRow(cart: cart, item: item, t: .default, storeName: "H-E-B", isOpen: false,
+                                disabled: false, onToggleOpen: {})
+        XCTAssertEqual(row.meta(on: false, picked: nil, options: [salt]), "You may already have this")
+
+        try cart.select(key: "salt", productId: "9")
+        XCTAssertEqual(row.meta(on: true, picked: cart.selected(for: "salt"), options: [salt]), "$1.00 \u{00B7} Your usual")
+    }
+
+    @MainActor
     func testDoneActionRunsAfterTheSheetCloses() {
         let model = MealioFlowModel()
         model.open(recipes: [], store: nil, zip: nil, onAdded: nil, onError: nil)

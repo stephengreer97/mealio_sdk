@@ -408,6 +408,8 @@ data class CartItem(
      * each of them. Empty from servers older than multi-recipe.
      */
     val recipes: List<ItemRecipe> = emptyList(),
+    /** A pantry or optional item. It starts unchecked, even when a product is remembered. False from older servers. */
+    val startUnchecked: Boolean = false,
 ) {
     companion object {
         fun fromJson(o: JSONObject): CartItem = fromJson(o, null)
@@ -441,6 +443,7 @@ data class CartItem(
                 rememberedPreferenceId = o.str("rememberedPreferenceId"),
                 weightLb = o.num("weightLb")?.takeIf { it.isFinite() },
                 recipes = o.arr("recipes")?.objects()?.map { ItemRecipe.fromJson(it) } ?: emptyList(),
+                startUnchecked = o.bool("startUnchecked") ?: false,
             )
         }
     }
@@ -633,23 +636,42 @@ data class RecipeIngredient(
     val quantity: Int? = null,
     val amount: Double? = null,
     val unit: String? = null,
+    /** Something most kitchens already have, like salt. It starts unchecked. */
+    val pantry: Boolean? = null,
+    /** The recipe works without it. It starts unchecked. */
+    val optional: Boolean? = null,
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("name", name)
         .putIfNotNull("quantity", quantity)
         .putIfNotNull("amount", amount)
         .putIfNotNull("unit", unit)
+        .putIfNotNull("pantry", pantry)
+        .putIfNotNull("optional", optional)
 }
 
 data class Recipe(
     val id: String,
     val ingredients: List<RecipeIngredient>,
     val title: String? = null,
+    /** How many the recipe as written feeds. */
+    val servings: Number? = null,
+    /**
+     * How many the user is cooking for. With [servings], weights and any
+     * `quantity` you set scale to match, up to 10 times either way. A line with no
+     * quantity stays at one package.
+     */
+    val makeServings: Number? = null,
+    /** An https image of the dish. The drop-in shows it at the top of the sheet. */
+    val photoUrl: String? = null,
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("id", id)
         .putIfNotNull("title", title)
         .put("ingredients", JSONArray(ingredients.map { it.toJson() }))
+        .putIfNotNull("servings", servings)
+        .putIfNotNull("makeServings", makeServings)
+        .putIfNotNull("photoUrl", photoUrl)
 }
 
 /** At most this many recipes in one prepareCart. */

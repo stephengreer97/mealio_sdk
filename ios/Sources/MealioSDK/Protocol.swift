@@ -633,6 +633,9 @@ public struct CartItem: Codable, Equatable, Identifiable {
     /// The recipe's own weight for this line, in lb, when it gave the amount
     /// in a weight unit (lb, oz, g or kg). Nil otherwise.
     public let weightLb: Double?
+    /// A pantry or optional item. It starts unchecked, even when a product is
+    /// remembered. False from older servers.
+    public let startUnchecked: Bool
     public let status: ItemStatus
     /// Every option, best first. The remembered product leads when the store has it.
     public let options: [Product]
@@ -651,12 +654,13 @@ public struct CartItem: Codable, Equatable, Identifiable {
     public init(key: String, ingredient: String, quantity: Int = 1, status: ItemStatus, options: [Product] = [],
                 selectedId: String? = nil, remembered: Product? = nil, rememberedPreferenceId: String? = nil,
                 reason: String? = nil, chosen: Product? = nil, weightLb: Double? = nil,
-                recipes: [ItemRecipe]? = nil) {
+                recipes: [ItemRecipe]? = nil, startUnchecked: Bool = false) {
         self.key = key
         self.ingredient = ingredient
         self.quantity = quantity
         self.recipes = recipes
         self.weightLb = weightLb
+        self.startUnchecked = startUnchecked
         self.status = status
         self.options = options
         self.selectedId = selectedId
@@ -667,7 +671,7 @@ public struct CartItem: Codable, Equatable, Identifiable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case key, ingredient, quantity, recipes, weightLb, status, options, selectedId, remembered, rememberedPreferenceId, reason, chosen
+        case key, ingredient, quantity, recipes, weightLb, startUnchecked, status, options, selectedId, remembered, rememberedPreferenceId, reason, chosen
     }
 
     /// Every field past `key` is optional, so a 0.1 payload (chosen / options /
@@ -679,6 +683,7 @@ public struct CartItem: Codable, Equatable, Identifiable {
         quantity = try c.decodeIfPresent(Int.self, forKey: .quantity) ?? 1
         recipes = try c.decodeIfPresent([ItemRecipe].self, forKey: .recipes)
         weightLb = try c.decodeIfPresent(Double.self, forKey: .weightLb)
+        startUnchecked = try c.decodeIfPresent(Bool.self, forKey: .startUnchecked) ?? false
         reason = try c.decodeIfPresent(String.self, forKey: .reason)
         chosen = try c.decodeIfPresent(Product.self, forKey: .chosen)
         let opts = try c.decodeIfPresent([Product].self, forKey: .options)
@@ -928,12 +933,19 @@ public struct RecipeIngredient: Codable, Equatable {
     public let quantity: Int?
     public let amount: Double?
     public let unit: String?
+    /// Something most kitchens already have, like salt. It starts unchecked.
+    public let pantry: Bool?
+    /// The recipe works without it. It starts unchecked.
+    public let optional: Bool?
 
-    public init(name: String, quantity: Int? = nil, amount: Double? = nil, unit: String? = nil) {
+    public init(name: String, quantity: Int? = nil, amount: Double? = nil, unit: String? = nil,
+                pantry: Bool? = nil, optional: Bool? = nil) {
         self.name = name
         self.quantity = quantity
         self.amount = amount
         self.unit = unit
+        self.pantry = pantry
+        self.optional = optional
     }
 }
 
@@ -941,11 +953,23 @@ public struct Recipe: Codable, Equatable {
     public let id: String
     public let title: String?
     public let ingredients: [RecipeIngredient]
+    /// How many the recipe as written feeds.
+    public let servings: Double?
+    /// How many the user is cooking for. With `servings`, weights and any
+    /// `quantity` you set scale to match, up to 10 times either way. A line
+    /// with no quantity stays at one package.
+    public let makeServings: Double?
+    /// An https image of the dish. The drop-in shows it at the top of the sheet.
+    public let photoUrl: String?
 
-    public init(id: String, title: String? = nil, ingredients: [RecipeIngredient]) {
+    public init(id: String, title: String? = nil, ingredients: [RecipeIngredient],
+                servings: Double? = nil, makeServings: Double? = nil, photoUrl: String? = nil) {
         self.id = id
         self.title = title
         self.ingredients = ingredients
+        self.servings = servings
+        self.makeServings = makeServings
+        self.photoUrl = photoUrl
     }
 }
 

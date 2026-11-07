@@ -65,8 +65,8 @@ fun addedPrice(a: AddedItem, fallback: Product? = null): LinePrice? {
 /**
  * A prepared cart. Port of CartSession in packages/core/src/client.ts.
  *
- * Every item is shown every run. Remembered products start selected; the user
- * can select another option, search for something else, or deselect an item to
+ * Every item is shown every run. Remembered products start selected, except an
+ * item with startUnchecked; the user can select another option, search for something else, or deselect an item to
  * leave it out of THIS run (its remembered choice is kept for next time).
  * Nothing here picks a product on its own.
  */
@@ -84,6 +84,7 @@ class CartSession internal constructor(
     init {
         for (it in items) {
             val id = it.selectedId ?: continue
+            if (it.startUnchecked) continue
             picks[it.key] = Pick(id, it.rememberedPreferenceId)
         }
     }

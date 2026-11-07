@@ -106,6 +106,7 @@ public enum MealioStringKey: String, CaseIterable {
     case a11yMore
     case a11yChangeLocation
     case a11yChangeStore
+    case pantryHint
 }
 
 /// Your words, by key. Keys you leave out keep the default text.
@@ -206,6 +207,7 @@ public let DEFAULT_STRINGS: MealioStrings = [
     .a11yMore: "More {item}",
     .a11yChangeLocation: "Store location: {name}. Change location",
     .a11yChangeStore: "Store: {store}. Change store",
+    .pantryHint: "You may already have this",
 ]
 
 /// Fill {placeholders} in one pass, so a value that itself holds "{store}" is

@@ -101,6 +101,7 @@ const Map<String, String> mealioDefaultStrings = <String, String>{
   "a11yMore": "More {item}",
   "a11yChangeLocation": "Store location: {name}. Change location",
   "a11yChangeStore": "Store: {store}. Change store",
+  "pantryHint": "You may already have this",
 };
 
 final RegExp _placeholder = RegExp(r'\{(\w+)\}');

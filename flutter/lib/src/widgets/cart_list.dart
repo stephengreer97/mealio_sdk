@@ -76,7 +76,8 @@ class _MealioCartListState extends State<MealioCartList> {
   void initState() {
     super.initState();
     for (final CartItem i in widget.session.items) {
-      if (i.status == ItemStatus.choose || i.status == ItemStatus.rememberedUnavailable) {
+      if (i.startUnchecked != true &&
+          (i.status == ItemStatus.choose || i.status == ItemStatus.rememberedUnavailable)) {
         _open = i.key;
         break;
       }
@@ -122,7 +123,7 @@ class _MealioCartListState extends State<MealioCartList> {
                 ),
                 // Said while any item has no saved product, which on a recipe's
                 // first cart is every item: the run where nothing on screen shows it yet.
-                if (s.items.any((CartItem i) => i.status == ItemStatus.choose))
+                if (s.items.any((CartItem i) => i.status == ItemStatus.choose && i.startUnchecked != true))
                   Container(
                     key: const ValueKey<String>('mealio-remember-note'),
                     margin: const EdgeInsets.fromLTRB(12, 0, 12, 10),
@@ -419,6 +420,8 @@ class _ItemRowState extends State<_ItemRow> {
         priceText(picked, ui),
         picked.id == rememberedId ? ui.tr('yourUsual') : null,
       ].whereType<String>().where((String x) => x.isNotEmpty).join(' · ');
+    } else if (item.startUnchecked == true) {
+      meta = ui.tr('pantryHint');
     } else if (item.status == ItemStatus.remembered) {
       meta = ui.tr('notAddingThisTime');
     } else if (item.status == ItemStatus.rememberedUnavailable) {

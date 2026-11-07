@@ -81,6 +81,10 @@ MealioCartButton(
 )
 ```
 
+Recipes can also send `servings` and `makeServings` to scale the cart,
+`photoUrl` (https) for the top of the sheet, and `pantry: true` or
+`optional: true` on an ingredient, which starts it unchecked.
+
 The button opens **one sheet** over your app and runs the whole flow in it:
 
 1. **Loading.** "Checking your H-E-B sign-in", then "Finding your 6 ingredients".
@@ -232,7 +236,7 @@ final session = await MealioCart.instance.prepareCart(
 session.items;                       // every recipe line, in order; item.status is
                                      // remembered, choose, rememberedUnavailable or unavailable
 session.options(item.key);           // options, plus anything found with search()
-session.isSelected(item.key);        // remembered items start selected
+session.isSelected(item.key);        // remembered items start selected, unless marked pantry or optional
 session.select(item.key, product.id, preferenceId: 'sliced');
 session.deselect(item.key);          // leave out of THIS run; the usual pick is kept
 await session.search(item.key, 'minced garlic jar');

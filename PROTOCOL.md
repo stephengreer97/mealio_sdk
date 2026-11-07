@@ -217,6 +217,19 @@ nobody signs in only to be asked a question. A prepared cart then carries
 The drop-in sends no `zip` to prepare. Sent there, it skips the question and
 saves the nearest store of that chain, for partners with their own screens.
 
+## Recipe details
+
+A recipe may send `servings` and `makeServings`. Together they scale that
+recipe's weights and any `quantity` it set, up to 10 times either way. A line
+with no `quantity` stays at one package. Each recipe scales on its own before
+ingredients merge.
+
+An ingredient marked `pantry` or `optional` comes back as an item with
+`startUnchecked: true`. The SDK does not pre-select it, even with a remembered
+product. Merged across recipes, the mark holds only if every recipe set it.
+
+`photoUrl` is for the drop-in and the server ignores it.
+
 ## Warm-up
 
 `POST /api/v1/sdk/warm` with `{ "store"?: string }` runs the login check ahead
