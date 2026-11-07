@@ -30,7 +30,6 @@ public final class CancelToken {
 
     /// Call `fn` on cancel, or now if already cancelled. Returns how to stop listening.
     @discardableResult
-    @discardableResult
     public func onCancel(_ fn: @escaping () -> Void) -> () -> Void {
         if cancelled {
             fn()

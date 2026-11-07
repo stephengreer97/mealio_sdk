@@ -387,7 +387,7 @@ final class JobsTests: XCTestCase {
         let host = ScriptedHost()
         host.login = { request in
             await withCheckedContinuation { (c: CheckedContinuation<LoginOutcome, Never>) in
-                request.cancel?.onCancel { c.resume(returning: LoginOutcome(outcome: .cancelled, messages: [])) }
+                _ = request.cancel?.onCancel { c.resume(returning: LoginOutcome(outcome: .cancelled, messages: [])) }
             }
         }
         let cancel = CancelToken()
