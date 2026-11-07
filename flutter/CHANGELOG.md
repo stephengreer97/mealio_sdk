@@ -14,6 +14,27 @@
   `MealioErrorCode.locationRequired`.
 - `MealioCartFlow` and `MealioCartButton` no longer send `zip` to
   `prepareCart`. The parameter stays and fills the zip box.
+- Look and text. `MealioCart.configure`, `MealioScope` and `MealioThemeScope`
+  now also take `darkTheme`, `colorScheme`, `strings`, `formatMoney` and
+  `sheet`. See "Look and text" in the README.
+- `strings`: every word the drop-in shows comes from `mealioDefaultStrings`,
+  which matches `protocol/strings.json`, with placeholders and `_one`/`_other`
+  plurals. New: `MealioUi`, `mealioFillText`.
+- `formatMoney`: with it set, option prices use the numeric `unitPrice`.
+- Dark mode: `MealioColorScheme` (light, dark, auto), `MealioTheme.dark()`,
+  `MealioTheme.standardDark`, `MealioTheme.resolve`. The search button text is
+  now `onAccent`, not white.
+- `MealioCartButton`: `variant` (`MealioButtonVariant`) and `builder`
+  (`MealioCartButtonDetails`) for your own button.
+- `MealioSheetOptions`: `showTotal`, `height` (`MealioSheetHeight`) and `logo`.
+- Done screen: `doneMessage` and `doneAction` (`MealioDoneAction`) on
+  `MealioCartButton`, `MealioCartFlow` and `MealioCartFlow.show`, which also
+  gains `onClose`.
+- Screen reader labels now come from the table. The busy add button and search
+  button keep their own label ("Adding" and "Searching" are gone), the option
+  hints are gone, and the done screen's item rows read "For onion, Quantity 2".
+- `MealioThemeScope.theme` is now nullable. `MealioTheme.configured` can no
+  longer be set directly: use `MealioCart.configure`.
 
 ## 0.4.2
 

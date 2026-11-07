@@ -8,16 +8,34 @@
 // the hidden WebView uses.
 
 import React, { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react';
-import { Modal, Platform, Pressable, SafeAreaView, StyleSheet, Text, View } from 'react-native';
+import { Modal, Platform, Pressable, SafeAreaView, StyleSheet, Text, useColorScheme, View, type ImageSourcePropType } from 'react-native';
 import { WebView, type WebViewMessageEvent, type WebViewNavigation } from 'react-native-webview';
 import {
-  MealioClient, MealioError, matchesAny, parseMessage,
+  MealioClient, MealioError, matchesAny, parseMessage, textTools,
+  type MealioStrings, type TextTools,
   type CartSession, type Host, type JsonMessage, type Matcher, type PrepareCartInput, type StepListener, type StoreInfo, type StoreLocation, type StorePreferences,
 } from '@mealio/sdk-core';
-import { resolveTheme, type MealioTheme } from './theme';
+import { money, resolveTheme, type MealioColorScheme, type MealioTheme } from './theme';
 import { MealioStoreSettings } from './MealioStoreSettings';
 
 export const SDK_VERSION = '0.4.2';
+
+export interface MealioSheetOptions {
+  /** Show the total and the done screen prices. Defaults to true. Options keep their own prices. */
+  showTotal?: boolean;
+  /** `auto` fits a tall sheet, `full` fills the screen, or a share of the screen from 0.5 to 1. Defaults to `auto`. */
+  height?: 'auto' | 'full' | number;
+  /** Your logo, shown at the top of the sheet. */
+  logo?: ImageSourcePropType;
+}
+
+/** The drop-in's words and prices, resolved once on the provider. */
+export interface MealioUi extends TextTools {
+  money: (amount: number) => string;
+  /** True when the partner set formatMoney, so prices are built from numbers, not the store's text. */
+  customMoney: boolean;
+  sheet: { showTotal: boolean; height: 'auto' | 'full' | number; logo: ImageSourcePropType | null };
+}
 
 export interface EpochStorage {
   get(): Promise<number>;
@@ -33,6 +51,16 @@ export interface MealioProviderProps {
   epochStorage?: EpochStorage;
   /** Your brand: accent color, radius, font. */
   theme?: Partial<MealioTheme>;
+  /** Colors for dark mode. Only used when `colorScheme` is `dark`, or `auto` on a phone set to dark. */
+  darkTheme?: Partial<MealioTheme>;
+  /** `auto` follows the phone. Defaults to `light`. */
+  colorScheme?: MealioColorScheme;
+  /** Change or translate any word the drop-in shows. See DEFAULT_STRINGS for the keys. */
+  strings?: Partial<MealioStrings>;
+  /** How prices read. Defaults to "$12.50". */
+  formatMoney?: (amount: number) => string;
+  /** How the sheet looks and behaves. */
+  sheet?: MealioSheetOptions;
   /** @deprecated use theme.accent */
   accentColor?: string;
   children: React.ReactNode;
@@ -58,6 +86,7 @@ export interface MealioApi {
   /** Open the sheet where the user changes their store or zip. Put it on your settings screen. */
   openStoreSettings(): void;
   theme: MealioTheme;
+  ui: MealioUi;
 }
 
 export interface LoginView {
@@ -180,7 +209,17 @@ function memoryEpoch(): EpochStorage {
 }
 
 export function MealioProvider(props: MealioProviderProps) {
-  const theme = useMemo(() => resolveTheme({ ...(props.accentColor ? { accent: props.accentColor } : {}), ...(props.theme || {}) }), [props.theme, props.accentColor]);
+  const phone = useColorScheme();
+  const theme = useMemo(
+    () => resolveTheme({ ...(props.accentColor ? { accent: props.accentColor } : {}), ...(props.theme || {}) }, props.darkTheme, props.colorScheme, phone),
+    [props.theme, props.accentColor, props.darkTheme, props.colorScheme, phone],
+  );
+  const ui = useMemo<MealioUi>(() => ({
+    ...textTools(props.strings),
+    money: props.formatMoney ?? money,
+    customMoney: !!props.formatMoney,
+    sheet: { showTotal: props.sheet?.showTotal ?? true, height: props.sheet?.height ?? 'auto', logo: props.sheet?.logo ?? null },
+  }), [props.strings, props.formatMoney, props.sheet?.showTotal, props.sheet?.height, props.sheet?.logo]);
   const hidden = useRef<WebView>(null);
   /** The store the hidden page was last opened for, and the allowlist to hold it to. */
   const hiddenStore = useRef<string | null>(null);
@@ -378,6 +417,7 @@ export function MealioProvider(props: MealioProviderProps) {
 
   const api: MealioApi = useMemo(() => ({
     theme,
+    ui,
     prepareCart: (input, opts) => client.prepareCart(input, opts),
     stores: () => client.stores(),
     warm: (opts) => client.warm(opts),
@@ -406,7 +446,7 @@ export function MealioProvider(props: MealioProviderProps) {
         await cookies.clearAll?.(false);
       }
     },
-  }), [client, epochStore, theme]);
+  }), [client, epochStore, theme, ui]);
 
   const internal: Internal = useMemo(() => ({
     login: login && loginWebView ? { title: login.title, webview: loginWebView, cancel: () => endLogin('cancelled') } : null,
@@ -451,7 +491,7 @@ export function MealioProvider(props: MealioProviderProps) {
             <View style={[styles.bar, { borderBottomColor: theme.border }]}>
               <Text style={[styles.title, { color: theme.text, fontFamily: theme.fontFamily }]} numberOfLines={1}>{login?.title}</Text>
               <Pressable accessibilityRole="button" onPress={() => endLogin('cancelled')} hitSlop={12}>
-                <Text style={[styles.close, { color: theme.accent, fontFamily: theme.fontFamily }]}>Close</Text>
+                <Text style={[styles.close, { color: theme.accent, fontFamily: theme.fontFamily }]}>{ui.tr('close')}</Text>
               </Pressable>
             </View>
             {hosts === 0 ? loginWebView : null}

@@ -13,6 +13,7 @@ import '../errors.dart';
 import '../mealio_cart.dart';
 import '../protocol.dart';
 import '../theme.dart';
+import '../ui.dart';
 import '../webview_host.dart';
 import 'cart_list.dart';
 import 'flow_parts.dart';
@@ -68,6 +69,8 @@ class MealioCartFlow extends StatefulWidget {
     this.loadStores,
     this.loadLocations,
     this.saveStore,
+    this.doneMessage,
+    this.doneAction,
   }) : assert(recipe != null || recipes != null, 'Pass recipe or recipes.');
 
   /// One recipe. Pass this or [recipes].
@@ -118,9 +121,16 @@ class MealioCartFlow extends StatefulWidget {
   /// Replaces `MealioCart.instance.setStore`, for tests and custom clients.
   final SaveStore? saveStore;
 
+  /// A line of your own on the done screen, like "Enjoy your meal!".
+  final String? doneMessage;
+
+  /// A button of your own on the done screen, like "Back to meal plan".
+  final MealioDoneAction? doneAction;
+
   /// Shows the flow over the app. Resolves with the result when something was
   /// added, else null. It never opens the store's cart. Pass `recipe` for
-  /// one recipe or `recipes` for several in one cart.
+  /// one recipe or `recipes` for several in one cart. `onClose` is called as
+  /// the sheet closes, with the same result.
   static Future<AddResult?> show(
     BuildContext context, {
     Recipe? recipe,
@@ -135,35 +145,52 @@ class MealioCartFlow extends StatefulWidget {
     LoadStores? loadStores,
     LoadLocations? loadLocations,
     SaveStore? saveStore,
+    String? doneMessage,
+    MealioDoneAction? doneAction,
+    ValueChanged<AddResult?>? onClose,
   }) async {
     assert(recipe != null || recipes != null, 'Pass recipe or recipes.');
-    final t = theme ?? MealioTheme.of(context);
     AddResult? added;
+    AddResult? acted;
+    final carry = mealioCarryScope(context);
     final r = await Navigator.of(context, rootNavigator: true).push<AddResult>(
       MealioSheetRoute<AddResult>(
-        builder: (BuildContext sheetContext) => MealioCartFlow(
-          recipe: recipe,
-          recipes: recipes,
-          store: store,
-          zip: zip,
-          theme: t,
-          prepareCart: prepareCart,
-          prepareCarts: prepareCarts,
-          loadStores: loadStores,
-          loadLocations: loadLocations,
-          saveStore: saveStore,
-          onAdded: (AddResult a) {
-            added = a;
-            onAdded?.call(a);
-          },
-          onError: onError,
-          onClose: (AddResult? a) => Navigator.of(sheetContext).pop(a),
+        barrierLabel: MealioUi.of(context).tr('close'),
+        // No theme unless one was passed: the sheet follows the phone in auto.
+        builder: (BuildContext sheetContext) => carry(
+          MealioCartFlow(
+            recipe: recipe,
+            recipes: recipes,
+            store: store,
+            zip: zip,
+            theme: theme,
+            prepareCart: prepareCart,
+            prepareCarts: prepareCarts,
+            loadStores: loadStores,
+            loadLocations: loadLocations,
+            saveStore: saveStore,
+            doneMessage: doneMessage,
+            // Held until the sheet is closed and reported, as on React Native.
+            doneAction: doneAction == null
+                ? null
+                : MealioDoneAction(label: doneAction.label, onPress: (AddResult a) => acted = a),
+            onAdded: (AddResult a) {
+              added = a;
+              onAdded?.call(a);
+            },
+            onError: onError,
+            onClose: (AddResult? a) => Navigator.of(sheetContext).pop(a),
+          ),
         ),
       ),
     );
     // A tap on the scrim or the back button pops with null; after a fill the
     // result still counts.
-    return r ?? added;
+    final closed = r ?? added;
+    onClose?.call(closed);
+    final tapped = acted;
+    if (tapped != null) doneAction?.onPress(tapped);
+    return closed;
   }
 
   @override
@@ -177,6 +204,9 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
   AddResult? _result;
   String? _errorCode;
   String? _errorMessage;
+
+  /// The table key shown when the error has no message of its own.
+  String _errorKey = 'somethingWrongSentence';
   int _run = 0;
   WebViewHost? _host;
   MealioLoginView? _login;
@@ -291,7 +321,7 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
         }
         return;
       }
-      _fail(e, 'Something went wrong.');
+      _fail(e, 'somethingWrongSentence');
     }
   }
 
@@ -310,14 +340,15 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
       widget.onAdded?.call(r);
     } catch (e) {
       if (_run != id || !mounted) return;
-      _fail(e, 'Could not add to your cart.');
+      _fail(e, 'couldNotAdd');
     }
   }
 
-  void _fail(Object e, String fallback) {
+  void _fail(Object e, String fallbackKey) {
     setState(() {
       _errorCode = e is MealioException ? e.code : 'error';
-      _errorMessage = e is MealioException && e.message.isNotEmpty ? e.message : fallback;
+      _errorMessage = e is MealioException && e.message.isNotEmpty ? e.message : null;
+      _errorKey = fallbackKey;
       _phase = _Phase.error;
     });
     widget.onError?.call(e);
@@ -326,10 +357,10 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
   List<Recipe> get _recipes => _recipeList(widget.recipe, widget.recipes);
 
   /// The header's small line: the recipe's title, or "3 meals".
-  String? get _kicker {
+  String? _kicker(MealioUi ui) {
     final recipes = _recipes;
     if (recipes.length == 1) return recipes.first.title;
-    return recipes.length > 1 ? '${recipes.length} meals' : null;
+    return recipes.length > 1 ? ui.tr('meals', <String, Object?>{'count': recipes.length}) : null;
   }
 
   void _close() {
@@ -338,31 +369,34 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
     widget.onClose(_phase == _Phase.done ? _result : null);
   }
 
-  String _title(String storeName) {
+  String _title(MealioUi ui, String storeName, bool named) {
+    final store = <String, Object?>{'store': storeName};
     switch (_phase) {
       case _Phase.done:
-        return storeName == 'your store' ? 'In your cart' : 'In your $storeName cart';
+        return named ? ui.tr('titleInCart', store) : ui.tr('titleInCartPlain');
       case _Phase.loading:
-        return storeName == 'your store' ? 'Getting your cart ready' : 'Getting your $storeName cart ready';
+        return named ? ui.tr('titleLoading', store) : ui.tr('titleLoadingPlain');
       case _Phase.error:
-        return 'Something went wrong';
+        return ui.tr('somethingWrong');
       case _Phase.stores:
-        return 'Choose your store';
+        return ui.tr('titleStores');
       case _Phase.location:
-        return 'Find your $storeName';
+        return ui.tr('titleLocation', store);
       case _Phase.list:
       case _Phase.adding:
-        return 'Your $storeName list';
+        return ui.tr('titleList', store);
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final t = widget.theme ?? MealioTheme.of(context);
+    final ui = MealioUi.of(context);
     final cart = _cart;
     final result = _result;
     final store = _store;
-    final storeName = cart?.storeName ?? (store != null ? storeLabel(store) : 'your store');
+    final storeName = cart?.storeName ?? (store != null ? storeLabel(store) : ui.tr('yourStore'));
+    final named = cart?.storeName != null || store != null;
     final login = _login;
 
     final Widget body;
@@ -373,7 +407,7 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
           Padding(
             padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
             child: Text(
-              "Sign in on $storeName's own page. Mealio never sees your password.",
+              ui.tr('loginNote', <String, Object?>{'store': storeName}),
               style: t.style(size: 13, color: t.muted),
             ),
           ),
@@ -413,7 +447,7 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
         onPicked: (StoreLocation _) {
           if (mounted) unawaited(_start(store));
         },
-        backLabel: toList ? 'Back to your list' : 'Choose a different store',
+        backLabel: ui.tr(toList ? 'backToList' : 'differentStore'),
         onBack: toList
             ? () => setState(() => _phase = _Phase.list)
             : () => unawaited(_openStores(_Phase.error)),
@@ -429,12 +463,29 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
         theme: t,
       );
     } else if (_phase == _Phase.done && result != null && cart != null) {
-      body = DoneView(theme: t, session: cart, result: result, storeName: storeName, onDone: _close);
+      final action = widget.doneAction;
+      body = DoneView(
+        theme: t,
+        session: cart,
+        result: result,
+        storeName: storeName,
+        onDone: _close,
+        message: widget.doneMessage,
+        action: action == null
+            ? null
+            : MealioDoneAction(
+                label: action.label,
+                onPress: (AddResult r) {
+                  _close();
+                  action.onPress(r);
+                },
+              ),
+      );
     } else {
       body = ErrorView(
         theme: t,
         code: _errorCode,
-        message: _errorMessage,
+        message: _errorMessage ?? ui.tr(_errorKey),
         onRetry: () => unawaited(_start(_store)),
         onClose: _close,
       );
@@ -444,8 +495,8 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
     // a sign-in in progress (WebViewHost.flowClosed).
     return SheetFrame(
       theme: t,
-      kicker: _kicker,
-      title: login != null ? login.title : _title(storeName),
+      kicker: _kicker(ui),
+      title: login != null ? login.title : _title(ui, storeName, named),
       onClose: _close,
       child: body,
     );
@@ -471,6 +522,7 @@ class _StorePicker extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = theme;
+    final ui = MealioUi.of(context);
     final list = stores;
     if (list == null) {
       return Padding(
@@ -489,13 +541,13 @@ class _StorePicker extends StatelessWidget {
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
             children: gapped(<Widget>[
               if (list.isEmpty)
-                Text('Could not load stores. Close and try again.', style: t.style(size: 14, color: t.muted)),
+                Text(ui.tr('couldNotLoadStores'), style: t.style(size: 14, color: t.muted)),
               for (final StoreInfo st in list)
                 Semantics(
                   inMutuallyExclusiveGroup: true,
                   checked: st.id == current,
                   button: true,
-                  label: st.id == current ? '${st.name}, current store' : st.name,
+                  label: st.id == current ? '${st.name}, ${ui.tr('current')}' : st.name,
                   excludeSemantics: true,
                   child: GestureDetector(
                     behavior: HitTestBehavior.opaque,
@@ -518,7 +570,7 @@ class _StorePicker extends StatelessWidget {
                             child: Text(st.name, style: t.style(size: 15, height: 20 / 15, weight: FontWeight.w600)),
                           ),
                           if (st.id == current)
-                            Text('Current', style: t.style(size: 12, height: 17 / 12, color: t.accent)),
+                            Text(ui.tr('current'), style: t.style(size: 12, height: 17 / 12, color: t.accent)),
                         ],
                       ),
                     ),
@@ -528,11 +580,29 @@ class _StorePicker extends StatelessWidget {
           ),
         ),
         if (onBack != null)
-          Footer(theme: t, children: <Widget>[Cta(theme: t, label: 'Back to your list', quiet: true, onTap: onBack)]),
+          Footer(theme: t, children: <Widget>[Cta(theme: t, label: ui.tr('backToList'), quiet: true, onTap: onBack)]),
       ],
     );
   }
 }
+
+/// How [MealioCartButton] draws itself. `solid` is the default, `compact` is
+/// for a recipe card, `icon` is a round cart button.
+enum MealioButtonVariant { solid, outline, compact, icon }
+
+/// What a [MealioCartButton.builder] draws with.
+@immutable
+class MealioCartButtonDetails {
+  const MealioCartButtonDetails({required this.onPressed, required this.disabled, required this.label});
+
+  /// Opens the sheet. Null when [disabled], as Flutter's own buttons expect.
+  final VoidCallback? onPressed;
+  final bool disabled;
+  final String label;
+}
+
+/// Draws your own button. See [MealioCartButton.builder].
+typedef MealioCartButtonBuilder = Widget Function(BuildContext context, MealioCartButtonDetails button);
 
 /// The one-line integration:
 ///
@@ -556,6 +626,10 @@ class MealioCartButton extends StatefulWidget {
     this.onError,
     this.disabled = false,
     this.theme,
+    this.variant = MealioButtonVariant.solid,
+    this.builder,
+    this.doneMessage,
+    this.doneAction,
   }) : assert(recipe != null || recipes != null, 'Pass recipe or recipes.');
 
   /// One recipe. Pass this or [recipes].
@@ -572,8 +646,22 @@ class MealioCartButton extends StatefulWidget {
   /// asks the user which store they shop at. Without it, they type it in.
   final String? zip;
 
-  /// Defaults to "Add to my grocery cart".
+  /// Defaults to the `addToCart` string, or `addToCartShort` on a compact
+  /// button. An icon button speaks it as its accessibility label.
   final String? label;
+
+  /// How the button looks. Ignored when [builder] is set.
+  final MealioButtonVariant variant;
+
+  /// Draw your own button. It keeps the whole flow and the warm-up: call
+  /// `button.onPressed` when it is tapped.
+  final MealioCartButtonBuilder? builder;
+
+  /// A line of your own on the done screen.
+  final String? doneMessage;
+
+  /// A button of your own on the done screen. Tapping it closes the sheet.
+  final MealioDoneAction? doneAction;
 
   /// Called after the cart is filled, before the user taps Done.
   final ValueChanged<AddResult>? onAdded;
@@ -619,7 +707,7 @@ class _MealioCartButtonState extends State<MealioCartButton> {
     if (_open) return;
     _open = true;
     try {
-      final r = await MealioCartFlow.show(
+      await MealioCartFlow.show(
         context,
         recipe: widget.recipe,
         recipes: widget.recipes,
@@ -628,8 +716,10 @@ class _MealioCartButtonState extends State<MealioCartButton> {
         theme: widget.theme,
         onAdded: widget.onAdded,
         onError: widget.onError,
+        doneMessage: widget.doneMessage,
+        doneAction: widget.doneAction,
+        onClose: widget.onClose,
       );
-      widget.onClose?.call(r);
     } finally {
       _open = false;
     }
@@ -637,34 +727,68 @@ class _MealioCartButtonState extends State<MealioCartButton> {
 
   @override
   Widget build(BuildContext context) {
+    final variant = widget.variant;
+    final ui = MealioUi.of(context);
+    final given = widget.label;
+    final label = given != null && given.isNotEmpty
+        ? given
+        : ui.tr(variant == MealioButtonVariant.compact ? 'addToCartShort' : 'addToCart');
+    final disabled = widget.disabled;
+    final onTap = disabled ? null : _tap;
+    final custom = widget.builder;
+    if (custom != null) {
+      return custom(context, MealioCartButtonDetails(onPressed: onTap, disabled: disabled, label: label));
+    }
+
     final t = widget.theme ?? MealioTheme.of(context);
-    final label = widget.label ?? 'Add to my grocery cart';
-    return Semantics(
-      button: true,
-      enabled: !widget.disabled,
-      label: label,
-      excludeSemantics: true,
-      child: Opacity(
-        opacity: widget.disabled ? 0.5 : 1,
-        child: Material(
-          color: t.accent,
-          borderRadius: BorderRadius.circular(t.radius),
-          clipBehavior: Clip.antiAlias,
-          child: InkWell(
-            onTap: widget.disabled ? null : _tap,
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(minHeight: 52),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 20),
-                child: Center(
-                  widthFactor: 1,
-                  child: Text(label, style: t.style(size: 16, weight: FontWeight.w700, color: t.onAccent)),
-                ),
-              ),
+    final compact = variant == MealioButtonVariant.compact;
+    final outline = variant == MealioButtonVariant.outline;
+    final Widget face;
+    if (variant == MealioButtonVariant.icon) {
+      face = SizedBox(
+        width: 48,
+        height: 48,
+        child: Center(child: Icon(Icons.shopping_cart, size: 22, color: t.onAccent)),
+      );
+    } else {
+      face = ConstrainedBox(
+        constraints: BoxConstraints(minHeight: compact ? 36 : 52),
+        child: Padding(
+          padding: EdgeInsets.symmetric(horizontal: compact ? 12 : 20),
+          child: Center(
+            widthFactor: 1,
+            heightFactor: 1,
+            child: Text(
+              label,
+              style: t.style(size: compact ? 14 : 16, weight: FontWeight.w700, color: outline ? t.accent : t.onAccent),
             ),
           ),
         ),
+      );
+    }
+    final Widget button = Semantics(
+      button: true,
+      enabled: !disabled,
+      label: label,
+      excludeSemantics: true,
+      child: Opacity(
+        opacity: disabled ? 0.5 : 1,
+        child: Material(
+          color: outline ? const Color(0x00000000) : t.accent,
+          shape: variant == MealioButtonVariant.icon
+              ? const CircleBorder()
+              : RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(t.radius),
+                  side: outline ? BorderSide(color: t.accent, width: 2) : BorderSide.none,
+                ),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(onTap: onTap, child: face),
+        ),
       ),
     );
+    // Compact and icon keep their own size in a parent that stretches.
+    return compact || variant == MealioButtonVariant.icon
+        ? Align(alignment: AlignmentDirectional.centerStart, widthFactor: 1, heightFactor: 1, child: button)
+        : button;
   }
 }

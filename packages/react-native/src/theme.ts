@@ -37,11 +37,35 @@ export const DEFAULT_THEME: MealioTheme = {
   warnText: '#7A4A06',
 };
 
-export function resolveTheme(t?: Partial<MealioTheme>): MealioTheme {
-  return { ...DEFAULT_THEME, ...(t || {}) };
+export const DEFAULT_DARK_THEME: MealioTheme = {
+  accent: '#5FBF8F',
+  onAccent: '#0E1A14',
+  background: '#1B1B1A',
+  surface: '#2A2A28',
+  text: '#F2F1EE',
+  muted: '#B4B2AC',
+  border: '#3A3A37',
+  radius: 14,
+  fontFamily: undefined,
+  warnBackground: '#3B2A10',
+  warnText: '#F5C27A',
+};
+
+export type MealioColorScheme = 'light' | 'dark' | 'auto';
+
+/**
+ * The colors in force. `auto` follows the phone. Partner values lay over the
+ * default for that mode, and a dark sheet takes the shared shape (radius, font)
+ * from `light` unless `dark` says otherwise.
+ */
+export function resolveTheme(light?: Partial<MealioTheme>, dark?: Partial<MealioTheme>, scheme: MealioColorScheme = 'light', phone?: string | null): MealioTheme {
+  const isDark = scheme === 'dark' || (scheme === 'auto' && phone === 'dark');
+  if (!isDark) return { ...DEFAULT_THEME, ...(light || {}) };
+  const shape = { ...(light?.radius != null ? { radius: light.radius } : {}), ...(light?.fontFamily ? { fontFamily: light.fontFamily } : {}) };
+  return { ...DEFAULT_DARK_THEME, ...shape, ...(dark || {}) };
 }
 
-/** "$31.2" style money, two decimals. */
+/** "$31.20". Partners replace it with `formatMoney` on the provider. */
 export function money(n: number): string {
   return '$' + n.toFixed(2);
 }

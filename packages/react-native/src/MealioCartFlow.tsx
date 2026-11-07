@@ -10,8 +10,8 @@ import {
   ActivityIndicator, Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View,
 } from 'react-native';
 import type { AddedItem, AddResult, CartItem, CartSession, MealioError, Product, Recipe, Step, StoreInfo, StoreLocation } from '@mealio/sdk-core';
-import { useMealio, useMealioInternal } from './MealioProvider';
-import { money, type MealioTheme } from './theme';
+import { useMealio, useMealioInternal, type MealioUi } from './MealioProvider';
+import type { MealioTheme } from './theme';
 
 export interface MealioCartFlowProps {
   visible: boolean;
@@ -39,6 +39,10 @@ export interface MealioCartFlowProps {
   /** Called after the cart is filled, before the user taps Done. */
   onAdded?: (result: AddResult) => void;
   onError?: (e: MealioError | Error) => void;
+  /** A line of your own on the done screen, like "Enjoy your meal!". */
+  doneMessage?: string;
+  /** A button of your own on the done screen, like "Back to meal plan". Tapping it closes the sheet. */
+  doneAction?: { label: string; onPress: (result: AddResult) => void };
 }
 
 type Phase = 'loading' | 'list' | 'adding' | 'done' | 'error' | 'stores' | 'location';
@@ -48,6 +52,7 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
   const mealio = useMealio();
   const internal = useMealioInternal();
   const t = mealio.theme;
+  const { ui } = mealio;
   const [phase, setPhase] = useState<Phase>('loading');
   const [step, setStep] = useState<Step>('connecting');
   const [cart, setCart] = useState<CartSession | null>(null);
@@ -60,7 +65,7 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
   const backTo = useRef<Phase>('list');
   const bump = useCallback(() => setVersion((v) => v + 1), []);
   const recipes = useMemo(() => props.recipes ?? (props.recipe ? [props.recipe] : []), [props.recipes, props.recipe]);
-  const kicker = recipes.length === 1 ? recipes[0].title : recipes.length > 1 ? `${recipes.length} meals` : undefined;
+  const kicker = recipes.length === 1 ? recipes[0].title : recipes.length > 1 ? ui.tr('meals', { count: recipes.length }) : undefined;
   const lineCount = useMemo(() => recipes.reduce((n, r) => n + r.ingredients.length, 0), [recipes]);
 
   useEffect(() => {
@@ -96,7 +101,7 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
         if (storeId) { setStore(storeId); openLocation('error'); } else openStores('error');
         return;
       }
-      setError({ code: e?.code || 'error', message: e?.message || 'Something went wrong.' });
+      setError({ code: e?.code || 'error', message: e?.message || ui.tr('somethingWrongSentence') });
       setPhase('error');
       props.onError?.(e);
     }
@@ -113,7 +118,7 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
       setResult(r); setPhase('done');
       props.onAdded?.(r);
     } catch (e: any) {
-      setError({ code: e?.code || 'error', message: e?.message || 'Could not add to your cart.' });
+      setError({ code: e?.code || 'error', message: e?.message || ui.tr('couldNotAdd') });
       setPhase('error');
       props.onError?.(e);
     }
@@ -127,18 +132,19 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, result, internal.login]);
 
-  const storeName = cart?.cart.storeName || (store ? storeLabel(store) : 'your store');
+  const storeName = cart?.cart.storeName || (store ? storeLabel(store) : ui.tr('yourStore'));
+  const named = !!(cart?.cart.storeName || store);
   const s = useMemo(() => styles(t), [t]);
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={close} statusBarTranslucent>
       <View style={s.scrim}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={s.sheet}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={[s.sheet, sheetHeight(ui.sheet.height)]}>
           <View style={s.grabber} />
-          <Header t={t} recipeTitle={kicker} title={internal.login ? internal.login.title : headerTitle(phase, storeName)} onClose={close} />
+          <Header t={t} recipeTitle={kicker} title={internal.login ? internal.login.title : headerTitle(phase, storeName, named, ui)} onClose={close} />
           {internal.login ? (
             <View style={s.flex}>
-              <Text style={s.loginNote}>Sign in on {storeName}&apos;s own page. Mealio never sees your password.</Text>
+              <Text style={s.loginNote}>{ui.tr('loginNote', { store: storeName })}</Text>
               <View style={s.loginWeb}>{internal.login.webview}</View>
             </View>
           ) : phase === 'loading' ? (
@@ -150,13 +156,14 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
             <LocationPicker t={t} store={store} storeName={storeName} zip={cart?.cart.location?.zip ?? props.zip ?? null} current={cart?.cart.location?.id ?? null}
               onPicked={() => start(store)}
               back={cart && backTo.current === 'list'
-                ? { label: 'Back to your list', onPress: () => setPhase('list') }
-                : { label: 'Choose a different store', onPress: () => openStores('error') }} />
+                ? { label: ui.tr('backToList'), onPress: () => setPhase('list') }
+                : { label: ui.tr('differentStore'), onPress: () => openStores('error') }} />
           ) : (phase === 'list' || phase === 'adding') && cart ? (
             <CartList t={t} cart={cart} storeName={storeName} busy={phase === 'adding'} onChange={bump} onAdd={add}
               onChangeStore={() => openStores('list')} onChangeLocation={() => openLocation('list')} />
           ) : phase === 'done' && result && cart ? (
-            <Done t={t} cart={cart} result={result} storeName={storeName} onDone={close} />
+            <Done t={t} cart={cart} result={result} storeName={storeName} onDone={close} message={props.doneMessage}
+              action={props.doneAction ? { label: props.doneAction.label, onPress: () => { close(); props.doneAction!.onPress(result); } } : null} />
           ) : (
             <ErrorView t={t} error={error} onRetry={() => start(store)} onClose={close} />
           )}
@@ -166,13 +173,21 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
   );
 }
 
-function headerTitle(phase: Phase, storeName: string): string {
-  if (phase === 'done') return storeName === 'your store' ? 'In your cart' : `In your ${storeName} cart`;
-  if (phase === 'loading') return storeName === 'your store' ? 'Getting your cart ready' : `Getting your ${storeName} cart ready`;
-  if (phase === 'error') return 'Something went wrong';
-  if (phase === 'stores') return 'Choose your store';
-  if (phase === 'location') return `Find your ${storeName}`;
-  return `Your ${storeName} list`;
+function headerTitle(phase: Phase, storeName: string, named: boolean, ui: MealioUi): string {
+  const store = { store: storeName };
+  if (phase === 'done') return named ? ui.tr('titleInCart', store) : ui.tr('titleInCartPlain');
+  if (phase === 'loading') return named ? ui.tr('titleLoading', store) : ui.tr('titleLoadingPlain');
+  if (phase === 'error') return ui.tr('somethingWrong');
+  if (phase === 'stores') return ui.tr('titleStores');
+  if (phase === 'location') return ui.tr('titleLocation', store);
+  return ui.tr('titleList', store);
+}
+
+/** `auto` keeps the sheet's own height. */
+export function sheetHeight(h: 'auto' | 'full' | number) {
+  if (h === 'full') return { height: '100%' as const, borderTopLeftRadius: 0, borderTopRightRadius: 0 };
+  if (typeof h === 'number') return { height: `${Math.round(Math.min(1, Math.max(0.5, h)) * 100)}%` as `${number}%` };
+  return null;
 }
 
 function storeLabel(id: string): string {
@@ -184,37 +199,40 @@ function storeLabel(id: string): string {
 
 export function Header({ t, recipeTitle, title, onClose }: { t: MealioTheme; recipeTitle?: string; title: string; onClose: () => void }) {
   const s = styles(t);
+  const { ui } = useMealio();
   return (
     <View style={s.header}>
+      {ui.sheet.logo ? <Image source={ui.sheet.logo} style={s.logo} resizeMode="contain" accessibilityIgnoresInvertColors /> : null}
       <View style={s.flex}>
         {recipeTitle ? <Text style={s.kicker} numberOfLines={1}>{recipeTitle}</Text> : null}
         <Text style={s.h1} numberOfLines={2} accessibilityRole="header">{title}</Text>
       </View>
-      <Pressable onPress={onClose} accessibilityRole="button" accessibilityLabel="Close" style={s.closeBtn} hitSlop={8}>
+      <Pressable onPress={onClose} accessibilityRole="button" accessibilityLabel={ui.tr('close')} style={s.closeBtn} hitSlop={8}>
         <Text style={s.closeX}>✕</Text>
       </Pressable>
     </View>
   );
 }
 
-const STEPS: Array<{ key: Step[]; label: (n: number, store: string) => string }> = [
-  { key: ['connecting', 'checking_sign_in', 'signing_in'], label: (_n, store) => `Checking your ${store} sign-in` },
-  { key: ['searching'], label: (n) => `Finding your ${n} ingredient${n === 1 ? '' : 's'}` },
+const STEPS: Array<{ key: Step[]; label: (ui: MealioUi, n: number, store: string) => string }> = [
+  { key: ['connecting', 'checking_sign_in', 'signing_in'], label: (ui, _n, store) => ui.tr('stepSignIn', { store }) },
+  { key: ['searching'], label: (ui, n) => ui.plural('stepFinding', n) },
 ];
 
 function Loading({ t, step, storeName, count }: { t: MealioTheme; step: Step; storeName: string; count: number }) {
   const s = styles(t);
+  const { ui } = useMealio();
   const at = STEPS.findIndex((x) => x.key.includes(step));
   return (
     <View style={s.body}>
-      <Text style={s.muted}>Checking prices and stock at {storeName}.</Text>
+      <Text style={s.muted}>{ui.tr('loadingNote', { store: storeName })}</Text>
       <View style={s.steps}>
         {STEPS.map((x, i) => (
           <View key={i} style={s.stepRow}>
             {i < at ? <View style={[s.dot, { backgroundColor: t.accent }]}><Text style={s.dotCheck}>✓</Text></View>
               : i === at ? <View style={s.dotSpin}><ActivityIndicator size="small" color={t.accent} /></View>
                 : <View style={[s.dot, s.dotIdle]} />}
-            <Text style={[s.stepText, i === at && s.bold, i > at && s.muted]}>{x.label(count, storeName)}</Text>
+            <Text style={[s.stepText, i === at && s.bold, i > at && s.muted]}>{x.label(ui, count, storeName)}</Text>
           </View>
         ))}
       </View>
@@ -239,6 +257,7 @@ export interface CartListProps {
 /** The list screen on its own, for partners who host it in their own sheet. */
 export function CartList({ t, cart, storeName, busy, onChange, onAdd, onChangeStore, onChangeLocation }: CartListProps) {
   const s = styles(t);
+  const { ui } = useMealio();
   const [open, setOpen] = useState<string | null>(() => cart.items.find((i) => i.status === 'choose' || i.status === 'remembered_unavailable')?.key ?? null);
   const est = cart.estimate();
   const selectable = cart.items.filter((i) => i.status !== 'unavailable');
@@ -249,26 +268,26 @@ export function CartList({ t, cart, storeName, busy, onChange, onAdd, onChangeSt
         <View style={s.locationRow} testID="mealio-location">
           <Text style={[s.small, s.flex]} numberOfLines={2}>{location.name}, {location.address}</Text>
           {onChangeLocation ? (
-            <Pressable onPress={onChangeLocation} disabled={busy} accessibilityRole="button" accessibilityLabel={`Store location: ${location.name}. Change location`} hitSlop={8}>
-              <Text style={[s.small, { color: t.accent }]}>Change</Text>
+            <Pressable onPress={onChangeLocation} disabled={busy} accessibilityRole="button" accessibilityLabel={ui.tr('a11yChangeLocation', { name: location.name })} hitSlop={8}>
+              <Text style={[s.small, { color: t.accent }]}>{ui.tr('change')}</Text>
             </Pressable>
           ) : null}
         </View>
       ) : null}
       <View style={s.chipRow}>
         {onChangeStore ? (
-          <Pressable onPress={onChangeStore} disabled={busy} accessibilityRole="button" accessibilityLabel={`Store: ${storeName}. Change store`} style={s.chip}>
+          <Pressable onPress={onChangeStore} disabled={busy} accessibilityRole="button" accessibilityLabel={ui.tr('a11yChangeStore', { store: storeName })} style={s.chip}>
             <Text style={s.chipText}>{storeName}</Text>
-            <Text style={[s.chipText, { color: t.accent }]}>Change</Text>
+            <Text style={[s.chipText, { color: t.accent }]}>{ui.tr('change')}</Text>
           </Pressable>
         ) : null}
-        <Text style={s.muted}>{est.count} of {selectable.length} selected</Text>
+        <Text style={s.muted}>{ui.tr('selectedCount', { count: est.count, total: selectable.length })}</Text>
       </View>
       {/* Said while any item has no saved product, which on a recipe's first
           cart is every item: the run where nothing on screen shows it yet. */}
       {cart.items.some((i) => i.status === 'choose') ? (
         <View style={s.info} testID="mealio-remember-note">
-          <Text style={s.infoText}>Pick a product for each item and Mealio will remember your preferences.</Text>
+          <Text style={s.infoText}>{ui.tr('rememberNote')}</Text>
         </View>
       ) : null}
       <ScrollView style={s.flex} contentContainerStyle={s.list} keyboardShouldPersistTaps="handled">
@@ -280,20 +299,22 @@ export function CartList({ t, cart, storeName, busy, onChange, onAdd, onChangeSt
       <View style={s.footer}>
         {cart.pendingPreferences().length ? (
           <Text style={[s.small, s.pendingNote]}>
-            {cart.pendingPreferences().length === 1 ? '1 checked item needs' : `${cart.pendingPreferences().length} checked items need`} an option chosen before adding.
+            {ui.plural('pendingOptions', cart.pendingPreferences().length)}
           </Text>
         ) : null}
         {/* No partial totals: one unpriced item and there is no number to show. */}
-        <View style={s.totalRow}>
-          <Text style={s.totalLabel}>{est.total != null && est.estimated ? 'Estimated total' : 'Total'}</Text>
-          {est.total != null
-            ? <Text style={s.totalValue}>{est.estimated ? 'about ' : ''}{money(est.total)}</Text>
-            : <Text style={s.totalNone}>Prices at checkout</Text>}
-        </View>
+        {ui.sheet.showTotal ? (
+          <View style={s.totalRow}>
+            <Text style={s.totalLabel}>{ui.tr(est.total != null && est.estimated ? 'estimatedTotal' : 'total')}</Text>
+            {est.total != null
+              ? <Text style={s.totalValue}>{amountText(ui, est.total, est.estimated)}</Text>
+              : <Text style={s.totalNone}>{ui.tr('pricesAtCheckout')}</Text>}
+          </View>
+        ) : null}
         <Pressable onPress={onAdd} disabled={busy || est.count === 0} accessibilityRole="button"
           style={[s.cta, (busy || est.count === 0) && s.ctaOff]}>
           {busy ? <ActivityIndicator color={t.onAccent} />
-            : <Text style={s.ctaText}>{est.count ? `Add ${est.count} item${est.count === 1 ? '' : 's'} to ${storeName}` : 'Select items to add'}</Text>}
+            : <Text style={s.ctaText}>{est.count ? ui.plural('addItems', est.count, { store: storeName }) : ui.tr('selectItems')}</Text>}
         </Pressable>
       </View>
     </View>
@@ -305,6 +326,7 @@ function ItemRow({ t, cart, item, storeName, open, onToggleOpen, onChange, disab
   onToggleOpen: () => void; onChange: () => void; disabled: boolean;
 }) {
   const s = styles(t);
+  const { ui } = useMealio();
   const [query, setQuery] = useState('');
   const [searching, setSearching] = useState(false);
   const [searchNote, setSearchNote] = useState<string | null>(null);
@@ -320,7 +342,7 @@ function ItemRow({ t, cart, item, storeName, open, onToggleOpen, onChange, disab
           <View style={s.checkSlot}><View style={[s.box, s.boxDisabled]} /></View>
           <View style={s.flex}>
             <Text style={s.ingredient} numberOfLines={1}>{item.ingredient}</Text>
-            <Text style={[s.name, s.muted]}>Not found at {storeName}</Text>
+            <Text style={[s.name, s.muted]}>{ui.tr('notFoundAt', { store: storeName })}</Text>
           </View>
         </View>
       </View>
@@ -347,44 +369,44 @@ function ItemRow({ t, cart, item, storeName, open, onToggleOpen, onChange, disab
     setSearching(true); setSearchNote(null);
     try {
       const found = await cart.search(item.key, q);
-      setSearchNote(found.length ? null : `Nothing found for "${q}".`);
+      setSearchNote(found.length ? null : ui.tr('nothingFound', { query: q }));
       setQuery('');
       onChange();
     } catch (e: any) {
-      setSearchNote(e?.message || 'Search failed. Try again.');
+      setSearchNote(e?.message || ui.tr('searchFailed'));
     } finally {
       setSearching(false);
     }
   };
 
   const meta = picked
-    ? [priceText(picked), picked.id === item.remembered?.id ? 'Your usual' : null].filter(Boolean).join(' · ')
-    : item.status === 'remembered' ? 'Not adding this time'
-      : item.status === 'remembered_unavailable' ? 'Your usual is out of stock'
-        : `${options.length} option${options.length === 1 ? '' : 's'}`;
+    ? [priceText(picked, ui), picked.id === item.remembered?.id ? ui.tr('yourUsual') : null].filter(Boolean).join(' · ')
+    : item.status === 'remembered' ? ui.tr('notAddingThisTime')
+      : item.status === 'remembered_unavailable' ? ui.tr('usualOutOfStock')
+        : ui.plural('options', options.length);
 
   return (
     <View style={[s.card, open && s.cardOpen]}>
       <View style={s.rowInner}>
         <Pressable onPress={toggle} accessibilityRole="checkbox" accessibilityState={{ checked: on, disabled }}
-          accessibilityLabel={(on ? 'Leave out ' : 'Add ') + item.ingredient} style={s.checkSlot}>
+          accessibilityLabel={ui.tr(on ? 'a11yLeaveOut' : 'a11yAdd', { item: item.ingredient })} style={s.checkSlot}>
           <View style={[s.box, on ? { backgroundColor: t.accent, borderWidth: 0 } : null]}>{on ? <Text style={s.boxCheck}>✓</Text> : null}</View>
         </Pressable>
         <Thumb t={t} product={shown || options[0] || null} dim={!on} />
-        <Pressable style={s.flex} onPress={onToggleOpen} accessibilityRole="button" accessibilityHint="Shows the options">
+        <Pressable style={s.flex} onPress={onToggleOpen} accessibilityRole="button">
           <Text style={s.ingredient} numberOfLines={1}>{item.ingredient}</Text>
-          {forRecipes(cart, item.key) ? <Text style={s.forRecipes} numberOfLines={1}>{forRecipes(cart, item.key)}</Text> : null}
-          <Text style={[s.name, !on && (shown ? s.nameOff : s.namePlaceholder)]} numberOfLines={2}>{shown ? shown.name : 'Choose a product'}</Text>
+          {forRecipes(cart, item.key, ui) ? <Text style={s.forRecipes} numberOfLines={1}>{forRecipes(cart, item.key, ui)}</Text> : null}
+          <Text style={[s.name, !on && (shown ? s.nameOff : s.namePlaceholder)]} numberOfLines={2}>{shown ? shown.name : ui.tr('chooseProduct')}</Text>
           <Text style={s.small}>{meta}</Text>
         </Pressable>
         <Pressable onPress={onToggleOpen} accessibilityRole="button" accessibilityState={{ expanded: open }} style={s.changeBtn}>
-          <Text style={s.change}>{open ? 'Done' : on || item.status === 'remembered' ? 'Change' : 'Choose'}</Text>
+          <Text style={s.change}>{ui.tr(open ? 'done' : on || item.status === 'remembered' ? 'change' : 'choose')}</Text>
         </Pressable>
       </View>
 
       {on && picked && cart.needsPreference(item.key) ? (
         <Text style={[s.prefNeeded, { color: t.accent }]} accessibilityLiveRegion="polite">
-          Choose one: {listOr((picked.preferences || []).map((p) => p.label))}
+          {ui.tr('chooseOne', { options: listOr((picked.preferences || []).map((p) => p.label), ui) })}
         </Text>
       ) : null}
 
@@ -404,18 +426,18 @@ function ItemRow({ t, cart, item, storeName, open, onToggleOpen, onChange, disab
         };
         return (
           <View style={s.qtyRow}>
-            <Text style={s.small}>{byWeight ? 'Weight' : 'Quantity'}</Text>
+            <Text style={s.small}>{ui.tr(byWeight ? 'weight' : 'quantity')}</Text>
             <View style={s.stepper}>
               <Pressable onPress={() => step(-1)} disabled={disabled || atMin}
-                accessibilityRole="button" accessibilityLabel={`Less ${item.ingredient}`} accessibilityState={{ disabled: disabled || atMin }}
+                accessibilityRole="button" accessibilityLabel={ui.tr('a11yLess', { item: item.ingredient })} accessibilityState={{ disabled: disabled || atMin }}
                 style={[s.stepBtn, atMin && s.stepOff]}>
                 <Text style={s.qtyText}>−</Text>
               </Pressable>
-              <Text style={[s.stepValue, byWeight && s.stepValueWide]} accessibilityLabel={byWeight ? `Weight ${lbText(lb)}` : `Quantity ${n}`}>
+              <Text style={[s.stepValue, byWeight && s.stepValueWide]} accessibilityLabel={`${ui.tr(byWeight ? 'weight' : 'quantity')} ${byWeight ? lbText(lb) : n}`}>
                 {byWeight ? lbText(lb) : n}
               </Text>
               <Pressable onPress={() => step(1)} disabled={disabled || atMax}
-                accessibilityRole="button" accessibilityLabel={`More ${item.ingredient}`} accessibilityState={{ disabled: disabled || atMax }}
+                accessibilityRole="button" accessibilityLabel={ui.tr('a11yMore', { item: item.ingredient })} accessibilityState={{ disabled: disabled || atMax }}
                 style={[s.stepBtn, atMax && s.stepOff]}>
                 <Text style={s.qtyText}>+</Text>
               </Pressable>
@@ -426,7 +448,9 @@ function ItemRow({ t, cart, item, storeName, open, onToggleOpen, onChange, disab
 
       {item.status === 'remembered_unavailable' && !on ? (
         <View style={s.warn}>
-          <Text style={s.warnText}>Your usual{item.remembered ? `, ${item.remembered.name},` : ''} is {item.reason === 'not_found' ? 'not available' : 'out of stock'} today. Pick another this time. It stays your usual.</Text>
+          <Text style={s.warnText}>{item.remembered
+            ? ui.tr(item.reason === 'not_found' ? 'usualNotAvailableNamed' : 'usualOutNamed', { name: item.remembered.name })
+            : ui.tr(item.reason === 'not_found' ? 'usualNotAvailable' : 'usualOut')}</Text>
         </View>
       ) : null}
 
@@ -441,8 +465,8 @@ function ItemRow({ t, cart, item, storeName, open, onToggleOpen, onChange, disab
                   style={[s.opt, sel && { borderColor: t.accent, borderWidth: 2, margin: 0 }]}>
                   <Thumb t={t} product={o} big />
                   <Text style={[s.optName, o.outOfStock && s.muted]} numberOfLines={3}>{o.name}</Text>
-                  <Text style={s.optPrice}>{o.outOfStock ? 'Out of stock' : priceText(o)}</Text>
-                  {usual ? <Text style={[s.tag, { color: t.accent }]}>Your usual</Text> : o.badge === 'popular' ? <Text style={s.tag}>{o.badgeLabel || 'Crowd favorite'}</Text> : null}
+                  <Text style={s.optPrice}>{o.outOfStock ? ui.tr('outOfStock') : priceText(o, ui)}</Text>
+                  {usual ? <Text style={[s.tag, { color: t.accent }]}>{ui.tr('yourUsual')}</Text> : o.badge === 'popular' ? <Text style={s.tag}>{o.badgeLabel || ui.tr('crowdFavorite')}</Text> : null}
                 </Pressable>
               );
             })}
@@ -462,10 +486,10 @@ function ItemRow({ t, cart, item, storeName, open, onToggleOpen, onChange, disab
           ) : null}
           <View style={s.searchRow}>
             <TextInput value={query} onChangeText={setQuery} onSubmitEditing={search} returnKeyType="search"
-              placeholder={`Search ${storeName} for something else`} placeholderTextColor={t.muted}
-              accessibilityLabel={`Search ${storeName} for something else`} style={s.searchInput} editable={!disabled} />
+              placeholder={ui.tr('searchPlaceholder', { store: storeName })} placeholderTextColor={t.muted}
+              accessibilityLabel={ui.tr('searchPlaceholder', { store: storeName })} style={s.searchInput} editable={!disabled} />
             <Pressable onPress={search} accessibilityRole="button" style={s.searchBtn} disabled={searching}>
-              {searching ? <ActivityIndicator color="#FFFFFF" /> : <Text style={s.searchBtnText}>Search</Text>}
+              {searching ? <ActivityIndicator color={t.onAccent} /> : <Text style={s.searchBtnText}>{ui.tr('search')}</Text>}
             </Pressable>
           </View>
           {searchNote ? <Text style={[s.small, s.pad12]}>{searchNote}</Text> : null}
@@ -489,30 +513,33 @@ function Thumb({ t, product, dim, big }: { t: MealioTheme; product: Product | nu
  * added item has a price. No open-cart button: the user's next step is the
  * store's own app or site, not ours.
  */
-function Done({ t, cart, result, storeName, onDone }: { t: MealioTheme; cart: CartSession; result: AddResult; storeName: string; onDone: () => void }) {
+function Done({ t, cart, result, storeName, onDone, message, action }: {
+  t: MealioTheme; cart: CartSession; result: AddResult; storeName: string; onDone: () => void;
+  message?: string; action?: { label: string; onPress: () => void } | null;
+}) {
   const s = styles(t);
+  const { ui } = useMealio();
   const n = result.added.length;
   const sum = cart.addedTotal(result);
-  const left = leftOut(cart, result, storeName);
+  const left = leftOut(cart, result, storeName, ui);
   const [open, setOpen] = useState(() => result.failed.length > 0);
-  const subtitle = [
-    sum.total != null ? `${sum.estimated ? 'about ' : ''}${money(sum.total)}` : 'Prices at checkout',
-    null,
-  ].filter(Boolean).join(' · ');
-  const title = n ? `${n} item${n === 1 ? '' : 's'} added` : 'Nothing was added';
+  const subtitle = !ui.sheet.showTotal ? '' : sum.total != null ? amountText(ui, sum.total, sum.estimated) : ui.tr('pricesAtCheckout');
+  const title = n ? ui.plural('itemsAdded', n) : ui.tr('nothingAdded');
   return (
     <View style={s.flex}>
       <ScrollView style={s.flex} contentContainerStyle={s.doneBody}>
         <View style={[s.banner, { backgroundColor: n ? soft(t.accent, t.surface) : t.warnBackground }]}
-          accessible accessibilityLabel={n ? `${title}, ${subtitle}` : `${title}. Your cart did not change.`} accessibilityLiveRegion="polite">
+          accessible accessibilityLabel={[title, n ? subtitle : ui.tr('cartUnchanged')].filter(Boolean).join(', ')} accessibilityLiveRegion="polite">
           <View style={[s.bannerIcon, { backgroundColor: n ? t.accent : t.warnText }]}>
             <Text style={[s.bannerCheck, { color: t.onAccent }]}>{n ? '✓' : '!'}</Text>
           </View>
           <View style={s.flex}>
             <Text style={[s.bannerTitle, !n && { color: t.warnText }]}>{title}</Text>
-            <Text style={[s.bannerSub, !n && { color: t.warnText }]}>{n ? subtitle : 'Your cart did not change.'}</Text>
+            {(n ? subtitle : true) ? <Text style={[s.bannerSub, !n && { color: t.warnText }]}>{n ? subtitle : ui.tr('cartUnchanged')}</Text> : null}
           </View>
         </View>
+
+        {message ? <Text style={[s.stepText, s.center]} testID="mealio-done-message">{message}</Text> : null}
 
         {n ? (
           <View style={s.addedCard}>
@@ -523,9 +550,9 @@ function Done({ t, cart, result, storeName, onDone }: { t: MealioTheme; cart: Ca
         {left.length ? (
           <View style={s.leftCard}>
             <Pressable onPress={() => setOpen(!open)} accessibilityRole="button" accessibilityState={{ expanded: open }}
-              accessibilityLabel={`Left out this time: ${left.map((x) => x.label).join(', ')}`} style={s.leftHead}>
+              accessibilityLabel={`${ui.tr('leftOut')}: ${left.map((x) => x.label).join(', ')}`} style={s.leftHead}>
               <View style={s.flex}>
-                <Text style={s.leftTitle}>Left out this time</Text>
+                <Text style={s.leftTitle}>{ui.tr('leftOut')}</Text>
                 {!open ? <Text style={s.small} numberOfLines={2}>{sentence(left.map((x) => x.label).join(', '))}</Text> : null}
               </View>
               <Text style={s.chevron} accessibilityElementsHidden importantForAccessibility="no">{open ? '▴' : '▾'}</Text>
@@ -540,7 +567,8 @@ function Done({ t, cart, result, storeName, onDone }: { t: MealioTheme; cart: Ca
         ) : null}
       </ScrollView>
       <View style={[s.footer, s.doneFooter]}>
-        <Pressable onPress={onDone} accessibilityRole="button" style={s.cta}><Text style={s.ctaText}>Done</Text></Pressable>
+        {action ? <Pressable onPress={action.onPress} accessibilityRole="button" testID="mealio-done-action" style={s.cta}><Text style={s.ctaText}>{action.label}</Text></Pressable> : null}
+        <Pressable onPress={onDone} accessibilityRole="button" style={[s.cta, action && s.ctaQuiet]}><Text style={[s.ctaText, action && { color: t.text }]}>{ui.tr('done')}</Text></Pressable>
         <Text style={[s.small, s.center]}>Cart by Mealio</Text>
       </View>
     </View>
@@ -549,15 +577,16 @@ function Done({ t, cart, result, storeName, onDone }: { t: MealioTheme; cart: Ca
 
 function AddedRow({ t, cart, item, first }: { t: MealioTheme; cart: CartSession; item: AddedItem; first: boolean }) {
   const s = styles(t);
+  const { ui } = useMealio();
   const product = cart.selected(item.key);
   const image = item.imageUrl || product?.imageUrl || null;
   const line = item.ingredient || cart.items.find((i) => i.key === item.key)?.ingredient || '';
   const byWeight = typeof item.weightLb === 'number';
   const amount = byWeight ? lbText(item.weightLb as number) : `×${item.quantity}`;
   const p = cart.addedPrice(item);
-  const price = p ? `${p.estimated ? 'about ' : ''}${money(p.amount)}` : '';
-  const spoken = [item.name, line ? `for ${line}` : null,
-    byWeight ? `${+(item.weightLb as number).toFixed(2)} pounds` : `quantity ${item.quantity}`, price || null].filter(Boolean).join(', ');
+  const price = p && ui.sheet.showTotal ? amountText(ui, p.amount, p.estimated) : '';
+  const spoken = [item.name, line ? ui.tr('forRecipes', { recipes: line }) : null,
+    `${ui.tr(byWeight ? 'weight' : 'quantity')} ${byWeight ? amount : item.quantity}`, price || null].filter(Boolean).join(', ');
   return (
     <View style={[s.addedRow, !first && s.addedRule]} accessible accessibilityLabel={spoken}>
       {image
@@ -578,17 +607,16 @@ function AddedRow({ t, cart, item, first }: { t: MealioTheme; cart: CartSession;
 interface LeftOut { key: string; label: string; why: string; failed: boolean }
 
 /** Everything the store did not take this run: unchecked, skipped, or failed (with its reason). */
-function leftOut(cart: CartSession, result: AddResult, storeName: string): LeftOut[] {
+function leftOut(cart: CartSession, result: AddResult, storeName: string, ui: MealioUi): LeftOut[] {
   const item = (key: string) => cart.items.find((i) => i.key === key);
   const out: LeftOut[] = [];
   for (const f of result.failed) {
-    out.push({ key: f.key, label: item(f.key)?.ingredient || f.name, why: sentence(`${f.name}: ${reasonText(f.reason)}`), failed: true });
+    out.push({ key: f.key, label: item(f.key)?.ingredient || f.name, why: sentence(`${f.name}: ${reasonText(f.reason, ui)}`), failed: true });
   }
   for (const x of result.skipped) {
     const it = item(x.key);
-    const why = it?.status === 'unavailable' ? `Not found at ${storeName}`
-      : x.reason === 'preference_required' ? 'Needed an option chosen'
-        : x.reason === 'deselected' ? 'Unchecked this time' : 'Not chosen';
+    const why = it?.status === 'unavailable' ? ui.tr('notFoundAt', { store: storeName })
+      : ui.tr(x.reason === 'preference_required' ? 'neededOption' : x.reason === 'deselected' ? 'uncheckedThisTime' : 'notChosen');
     out.push({ key: x.key, label: it?.ingredient || x.key, why, failed: false });
   }
   return out;
@@ -621,34 +649,44 @@ function lbText(lb: number): string {
 /** The price as a row shows it. Sold by the pound: "$9.99/lb est.". */
 /** "A, B or C". */
 /** "For Tacos and Pasta", on a cart made from more than one recipe. Null otherwise. */
-export function forRecipes(cart: CartSession, key: string): string | null {
+export function forRecipes(cart: CartSession, key: string, ui?: MealioUi): string | null {
   if (cart.recipes.length < 2) return null;
   const names = cart.recipesFor(key).map((r) => r.title || '').filter(Boolean);
-  return names.length ? `For ${listAnd(names)}` : null;
+  if (!names.length) return null;
+  return ui ? ui.tr('forRecipes', { recipes: listAnd(names, ui) }) : `For ${listAnd(names)}`;
 }
 
-function listAnd(xs: string[]): string {
+function listAnd(xs: string[], ui?: MealioUi): string {
   if (xs.length <= 1) return xs[0] || '';
-  if (xs.length === 2) return `${xs[0]} and ${xs[1]}`;
-  return `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`;
+  const and = ui ? ui.tr('and') : 'and';
+  if (xs.length === 2) return `${xs[0]} ${and} ${xs[1]}`;
+  return `${xs.slice(0, -1).join(', ')} ${and} ${xs[xs.length - 1]}`;
 }
 
-function listOr(xs: string[]): string {
+function listOr(xs: string[], ui: MealioUi): string {
   if (xs.length <= 1) return xs[0] || '';
-  return `${xs.slice(0, -1).join(', ')} or ${xs[xs.length - 1]}`;
+  return `${xs.slice(0, -1).join(', ')} ${ui.tr('or')} ${xs[xs.length - 1]}`;
 }
 
-function priceText(p: Product): string {
-  if (p.soldByWeight && typeof p.pricePerLb === 'number') return `${money(p.pricePerLb)}/lb est.`;
-  return `${p.price || ''}${p.estimated ? ' est.' : ''}`.trim();
+/** "$12.50", or "about $12.50" when the store's own price is an estimate. */
+function amountText(ui: MealioUi, amount: number, estimated: boolean): string {
+  const price = ui.money(amount);
+  return estimated ? ui.tr('aboutPrice', { price }) : price;
 }
 
-function reasonText(r: string): string {
-  if (r === 'not_confirmed') return 'not confirmed in your cart';
-  if (r === 'weight_not_supported') return 'sold by weight, which this store cannot take here';
-  if (/stock/.test(r)) return 'out of stock';
-  if (/timeout|no_answer/.test(r)) return 'the store did not answer';
-  return 'the store refused it';
+function priceText(p: Product, ui: MealioUi): string {
+  if (p.soldByWeight && typeof p.pricePerLb === 'number') return ui.tr('pricePerLb', { price: ui.money(p.pricePerLb) });
+  // The store's own text, unless the partner set how prices read.
+  const price = ui.customMoney && typeof p.unitPrice === 'number' ? ui.money(p.unitPrice) : p.price || '';
+  return p.estimated && price ? ui.tr('priceEstimate', { price }) : price;
+}
+
+function reasonText(r: string, ui: MealioUi): string {
+  if (r === 'not_confirmed') return ui.tr('reasonNotConfirmed');
+  if (r === 'weight_not_supported') return ui.tr('reasonWeight');
+  if (/stock/.test(r)) return ui.tr('reasonOutOfStock');
+  if (/timeout|no_answer/.test(r)) return ui.tr('reasonNoAnswer');
+  return ui.tr('reasonRefused');
 }
 
 const isZip = (z: string) => /^\d{5}$/.test(z);
@@ -666,6 +704,7 @@ export function LocationPicker({ t, store, storeName, zip: startZip, current, on
 }) {
   const s = styles(t);
   const mealio = useMealio();
+  const { ui } = mealio;
   const [zip, setZip] = useState(startZip ?? '');
   const [found, setFound] = useState<{ zip: string; locations: StoreLocation[] } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -682,7 +721,7 @@ export function LocationPicker({ t, store, storeName, zip: startZip, current, on
       const locations = await mealio.storeLocations(store, z);
       if (ask.current === id) setFound({ zip: z, locations });
     } catch (e: any) {
-      if (ask.current === id) setProblem(e?.message || 'Could not look up stores. Try again.');
+      if (ask.current === id) setProblem(e?.message || ui.tr('couldNotLookUp'));
     } finally {
       if (ask.current === id) setBusy(false);
     }
@@ -698,7 +737,7 @@ export function LocationPicker({ t, store, storeName, zip: startZip, current, on
       if (mounted.current) onPicked(l);
     } catch (e: any) {
       if (!mounted.current) return;
-      setProblem(e?.message || 'Could not save that store. Try again.');
+      setProblem(e?.message || ui.tr('couldNotSaveStore'));
       setSaving(null);
     }
   }, [mealio, store, onPicked]);
@@ -706,19 +745,19 @@ export function LocationPicker({ t, store, storeName, zip: startZip, current, on
   return (
     <View style={s.flex}>
       <ScrollView style={s.flex} contentContainerStyle={s.list} keyboardShouldPersistTaps="handled">
-        <Text style={s.muted}>Enter your zip code to see {storeName} stores near you.</Text>
+        <Text style={s.muted}>{ui.tr('zipPrompt', { store: storeName })}</Text>
         <View style={s.zipRow}>
           <TextInput value={zip} onChangeText={(v) => setZip(v.replace(/\D/g, '').slice(0, 5))} onSubmitEditing={() => isZip(zip) && find(zip)}
-            keyboardType="number-pad" returnKeyType="search" maxLength={5} placeholder="Zip code" placeholderTextColor={t.muted}
-            accessibilityLabel="Zip code" testID="mealio-zip" style={s.zipInput} />
+            keyboardType="number-pad" returnKeyType="search" maxLength={5} placeholder={ui.tr('zipCode')} placeholderTextColor={t.muted}
+            accessibilityLabel={ui.tr('zipCode')} testID="mealio-zip" style={s.zipInput} />
           <Pressable onPress={() => find(zip)} disabled={!isZip(zip) || busy} accessibilityRole="button" testID="mealio-find-stores"
             style={[s.zipBtn, (!isZip(zip) || busy) && { opacity: 0.5 }]}>
-            <Text style={s.ctaText}>Find stores</Text>
+            <Text style={s.ctaText}>{ui.tr('findStores')}</Text>
           </Pressable>
         </View>
         {busy ? <ActivityIndicator color={t.accent} /> : null}
         {problem ? <Text style={s.stepText}>{problem}</Text> : null}
-        {found && found.locations.length === 0 ? <Text style={s.muted}>No {storeName} stores near {found.zip}. Try another zip code.</Text> : null}
+        {found && found.locations.length === 0 ? <Text style={s.muted}>{ui.tr('noStoresNear', { store: storeName, zip: found.zip })}</Text> : null}
         {found?.locations.map((l) => (
           <Pressable key={l.id} onPress={() => pick(l)} disabled={saving !== null} accessibilityRole="radio" accessibilityState={{ selected: l.id === current }}
             testID={`mealio-location-${l.id}`} style={[s.locationOption, l.id === current && { borderColor: t.accent, borderWidth: 2 }]}>
@@ -727,7 +766,7 @@ export function LocationPicker({ t, store, storeName, zip: startZip, current, on
               <Text style={s.small}>{l.address}</Text>
             </View>
             {saving === l.id ? <ActivityIndicator size="small" color={t.accent} />
-              : l.id === current ? <Text style={[s.small, { color: t.accent }]}>Current</Text> : null}
+              : l.id === current ? <Text style={[s.small, { color: t.accent }]}>{ui.tr('current')}</Text> : null}
           </Pressable>
         ))}
       </ScrollView>
@@ -742,22 +781,23 @@ export function StorePicker({ t, stores, current, onPick, onBack }: {
   t: MealioTheme; stores: StoreInfo[] | null; current: string | null; onPick: (id: string) => void; onBack: (() => void) | null;
 }) {
   const s = styles(t);
+  const { ui } = useMealio();
   if (!stores) return <View style={s.body}><ActivityIndicator color={t.accent} /></View>;
   return (
     <View style={s.flex}>
       <ScrollView style={s.flex} contentContainerStyle={s.list}>
-        {stores.length === 0 ? <Text style={s.muted}>Could not load stores. Close and try again.</Text> : null}
+        {stores.length === 0 ? <Text style={s.muted}>{ui.tr('couldNotLoadStores')}</Text> : null}
         {stores.map((st) => (
           <Pressable key={st.id} onPress={() => onPick(st.id)} accessibilityRole="radio" accessibilityState={{ selected: st.id === current }}
             style={[s.storeRow, st.id === current && { borderColor: t.accent, borderWidth: 2 }]}>
             <Text style={s.name}>{st.name}</Text>
-            {st.id === current ? <Text style={[s.small, { color: t.accent }]}>Current</Text> : null}
+            {st.id === current ? <Text style={[s.small, { color: t.accent }]}>{ui.tr('current')}</Text> : null}
           </Pressable>
         ))}
       </ScrollView>
       {onBack ? (
         <View style={s.footer}>
-          <Pressable onPress={onBack} accessibilityRole="button" style={[s.cta, s.ctaQuiet]}><Text style={[s.ctaText, { color: t.text }]}>Back to your list</Text></Pressable>
+          <Pressable onPress={onBack} accessibilityRole="button" style={[s.cta, s.ctaQuiet]}><Text style={[s.ctaText, { color: t.text }]}>{ui.tr('backToList')}</Text></Pressable>
         </View>
       ) : null}
     </View>
@@ -766,13 +806,14 @@ export function StorePicker({ t, stores, current, onPick, onBack }: {
 
 function ErrorView({ t, error, onRetry, onClose }: { t: MealioTheme; error: { code: string; message: string } | null; onRetry: () => void; onClose: () => void }) {
   const s = styles(t);
-  const msg = error?.code === 'login_cancelled' ? 'Sign-in was closed before it finished.' : error?.message || 'Something went wrong.';
+  const { ui } = useMealio();
+  const msg = error?.code === 'login_cancelled' ? ui.tr('signInClosed') : error?.message || ui.tr('somethingWrongSentence');
   return (
     <View style={[s.body, s.flex]}>
       <Text style={s.stepText}>{msg}</Text>
       <View style={s.flex} />
-      <Pressable onPress={onRetry} accessibilityRole="button" style={s.cta}><Text style={s.ctaText}>Try again</Text></Pressable>
-      <Pressable onPress={onClose} accessibilityRole="button" style={[s.cta, s.ctaQuiet]}><Text style={[s.ctaText, { color: t.text }]}>Close</Text></Pressable>
+      <Pressable onPress={onRetry} accessibilityRole="button" style={s.cta}><Text style={s.ctaText}>{ui.tr('tryAgain')}</Text></Pressable>
+      <Pressable onPress={onClose} accessibilityRole="button" style={[s.cta, s.ctaQuiet]}><Text style={[s.ctaText, { color: t.text }]}>{ui.tr('close')}</Text></Pressable>
     </View>
   );
 }
@@ -795,6 +836,7 @@ function make(t: MealioTheme) {
     flex: { flex: 1 },
     scrim: { flex: 1, backgroundColor: 'rgba(0,0,0,0.35)', justifyContent: 'flex-end' },
     sheet: { height: '94%', backgroundColor: t.background, borderTopLeftRadius: 20, borderTopRightRadius: 20, overflow: 'hidden' },
+    logo: { width: 36, height: 36, borderRadius: 8 },
     grabber: { alignSelf: 'center', width: 36, height: 5, borderRadius: 3, backgroundColor: t.border, marginTop: 8 },
     header: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, paddingHorizontal: 20, paddingTop: 12, paddingBottom: 8 },
     kicker: { ...f, fontSize: 13, fontWeight: '500', color: t.muted },
@@ -868,7 +910,7 @@ function make(t: MealioTheme) {
     searchRow: { flexDirection: 'row', gap: 8, paddingHorizontal: 12 },
     searchInput: { ...f, flex: 1, minHeight: 44, paddingHorizontal: 12, borderRadius: t.radius - 2, backgroundColor: t.surface, color: t.text, fontSize: 14 },
     searchBtn: { minHeight: 44, minWidth: 76, paddingHorizontal: 14, borderRadius: t.radius - 2, backgroundColor: t.text, alignItems: 'center', justifyContent: 'center' },
-    searchBtnText: { ...f, color: '#FFFFFF', fontSize: 14, fontWeight: '600' },
+    searchBtnText: { ...f, color: t.onAccent, fontSize: 14, fontWeight: '600' },
     info: { marginHorizontal: 12, marginBottom: 10, padding: 12, borderRadius: 10, backgroundColor: t.surface, borderWidth: 1, borderColor: t.border },
     infoText: { ...f, fontSize: 13, lineHeight: 18, color: t.text },
     footer: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 28, gap: 8, borderTopWidth: 1, borderTopColor: t.border, backgroundColor: t.background },

@@ -5,6 +5,7 @@ import 'package:flutter/widgets.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import '../theme.dart';
+import '../ui.dart';
 import '../webview_host.dart';
 
 /// Hosts the SDK's hidden WebView for the whole app.
@@ -25,12 +26,39 @@ import '../webview_host.dart';
 /// If the scope sits below your Navigator instead, `navigatorKey` can be
 /// left out and the nearest Navigator is used.
 class MealioScope extends StatefulWidget {
-  const MealioScope({super.key, required this.child, this.navigatorKey, this.theme});
+  const MealioScope({
+    super.key,
+    required this.child,
+    this.navigatorKey,
+    this.theme,
+    this.darkTheme,
+    this.colorScheme,
+    this.strings,
+    this.formatMoney,
+    this.sheet,
+  });
 
   final Widget child;
 
-  /// Styles the drop-in widgets. Overrides `MealioCart.configure(theme: ...)`.
+  /// Styles the drop-in widgets. Overrides `MealioCart.configure(theme: ...)`,
+  /// as does each setting below that is not null.
   final MealioTheme? theme;
+
+  /// Colors for dark mode. Only used when [colorScheme] is `dark`, or `auto`
+  /// on a phone set to dark. Start from `MealioTheme.dark()`.
+  final MealioTheme? darkTheme;
+
+  /// `auto` follows the phone. Defaults to `light`.
+  final MealioColorScheme? colorScheme;
+
+  /// Change or translate any word. See `mealioDefaultStrings` for the keys.
+  final Map<String, String>? strings;
+
+  /// How prices read. Defaults to "\$12.50".
+  final MealioMoneyFormat? formatMoney;
+
+  /// How the sheet looks and behaves.
+  final MealioSheetOptions? sheet;
 
   /// The Navigator the login sheet is pushed on. When null, the Navigator
   /// above this widget is used, if there is one.
@@ -51,15 +79,24 @@ class _MealioScopeState extends State<MealioScope> {
     super.initState();
     _host = WebViewHost();
     _host.navigatorProvider = _navigator;
-    _host.theme = widget.theme;
+    _host.look = _look;
     WebViewHost.attach(_host);
   }
 
   @override
   void didUpdateWidget(MealioScope oldWidget) {
     super.didUpdateWidget(oldWidget);
-    _host.theme = widget.theme;
+    _host.look = _look;
   }
+
+  MealioLook get _look => MealioLook(
+        theme: widget.theme,
+        darkTheme: widget.darkTheme,
+        colorScheme: widget.colorScheme,
+        strings: widget.strings,
+        formatMoney: widget.formatMoney,
+        sheet: widget.sheet,
+      );
 
   NavigatorState? _navigator() {
     final fromKey = widget.navigatorKey?.currentState;
@@ -77,7 +114,6 @@ class _MealioScopeState extends State<MealioScope> {
 
   @override
   Widget build(BuildContext context) {
-    final theme = widget.theme;
     final Widget stack = Stack(
       // Non-directional alignment, so the Stack works even above the app's
       // Directionality (for example when MealioScope wraps MaterialApp).
@@ -116,6 +152,14 @@ class _MealioScopeState extends State<MealioScope> {
         ),
       ],
     );
-    return theme == null ? stack : MealioThemeScope(theme: theme, child: stack);
+    return MealioThemeScope(
+      theme: widget.theme,
+      darkTheme: widget.darkTheme,
+      colorScheme: widget.colorScheme,
+      strings: widget.strings,
+      formatMoney: widget.formatMoney,
+      sheet: widget.sheet,
+      child: stack,
+    );
   }
 }

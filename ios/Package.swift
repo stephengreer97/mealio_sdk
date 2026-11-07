@@ -24,10 +24,12 @@ let package = Package(
             dependencies: ["MealioSDK"],
             path: "Tests/MealioSDKTests",
             resources: [
-                // test-vectors.json is a copy of ../protocol/test-vectors.json.
+                // test-vectors.json and strings.json are copies of the files in
+                // ../protocol.
                 // guard-script.js and bridge-shim.js are the exact text of
                 // GUARD_SCRIPT and BRIDGE_SHIM generated from the TS reference.
                 .copy("Resources/test-vectors.json"),
+                .copy("Resources/strings.json"),
                 .copy("Resources/guard-script.js"),
                 .copy("Resources/bridge-shim.js"),
             ]

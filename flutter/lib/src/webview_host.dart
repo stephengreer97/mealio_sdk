@@ -26,6 +26,7 @@ import 'host.dart';
 import 'matcher.dart';
 import 'protocol.dart';
 import 'theme.dart';
+import 'ui.dart';
 
 /// The JavaScriptChannel every Mealio WebView registers.
 const String bridgeChannelName = '__mealioNativeBridge';
@@ -250,8 +251,11 @@ class WebViewHost implements MealioHost {
   /// Where the login sheet is pushed. Set by `MealioScope`.
   NavigatorState? Function()? navigatorProvider;
 
+  /// What was given to `MealioScope`, if anything.
+  MealioLook? look;
+
   /// The theme given to `MealioScope`, if any.
-  MealioTheme? theme;
+  MealioTheme? get theme => look?.theme;
 
   /// The sign-in in progress while a cart flow sheet is open, else null.
   /// The flow sheet listens to this and shows [MealioLoginView.webview].
@@ -617,7 +621,6 @@ class WebViewHost implements MealioHost {
       pageBuilder: (BuildContext context, Animation<double> a, Animation<double> b) => _LoginPage(
         title: req.title,
         controller: c,
-        theme: theme ?? MealioTheme.configured ?? MealioTheme.standard,
         onClose: () => finish(LoginOutcome.cancelled),
       ),
       transitionsBuilder: (BuildContext context, Animation<double> a, Animation<double> b, Widget child) {
@@ -695,16 +698,16 @@ class WebViewHost implements MealioHost {
 /// (no AppBar) so it needs no MaterialLocalizations and works under a
 /// CupertinoApp too.
 class _LoginPage extends StatelessWidget {
-  const _LoginPage({required this.title, required this.controller, required this.theme, required this.onClose});
+  const _LoginPage({required this.title, required this.controller, required this.onClose});
 
   final String title;
   final WebViewController controller;
-  final MealioTheme theme;
   final VoidCallback onClose;
 
   @override
   Widget build(BuildContext context) {
-    final t = theme;
+    final t = MealioTheme.of(context);
+    final close = MealioUi.of(context).tr('close');
     return Material(
       color: t.background,
       child: SafeArea(
@@ -729,7 +732,7 @@ class _LoginPage extends StatelessWidget {
                   ),
                   Semantics(
                     button: true,
-                    label: 'Close',
+                    label: close,
                     excludeSemantics: true,
                     child: InkWell(
                       onTap: onClose,
@@ -738,7 +741,7 @@ class _LoginPage extends StatelessWidget {
                         child: Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 12),
                           child: Center(
-                            child: Text('Close', style: t.style(size: 16, weight: FontWeight.w600, color: t.accent)),
+                            child: Text(close, style: t.style(size: 16, weight: FontWeight.w600, color: t.accent)),
                           ),
                         ),
                       ),

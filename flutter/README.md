@@ -137,6 +137,86 @@ any request. Older servers send neither list; both read as empty.
 Pass it to `MealioCart.configure(theme: ...)` or `MealioScope(theme: ...)`
 (the scope wins), or wrap a subtree in `MealioThemeScope`.
 
+### Look and text
+
+Everything below sits beside `theme`, on `MealioCart.configure`, `MealioScope`
+and `MealioThemeScope`. Each setting falls back on its own: scope, then
+configure, then the default.
+
+```dart
+MealioScope(
+  navigatorKey: navigatorKey,
+  theme: const MealioTheme(accent: Color(0xFF0B5FFF), radius: 8),
+  darkTheme: const MealioTheme.dark(accent: Color(0xFF7FB0FF)),
+  colorScheme: MealioColorScheme.auto,
+  strings: const {'addToCart': 'Buy the ingredients', 'done': 'All set'},
+  formatMoney: (amount) => '${amount.toStringAsFixed(2)} EUR',
+  sheet: MealioSheetOptions(
+    showTotal: false,
+    height: MealioSheetHeight.fraction(0.8),
+    logo: const AssetImage('assets/logo.png'),
+  ),
+  child: child!,
+)
+```
+
+**Words.** `strings` changes or translates any word the drop-in shows,
+accessibility labels and the store settings sheet included. `mealioDefaultStrings`
+lists every key. `{store}`-style placeholders are filled in; one that is unknown
+stays visible, so a typo shows. Keys ending `_one` and `_other` are the singular
+and plural of one message. "Cart by Mealio" does not change.
+
+**Money.** `formatMoney` sets how every price reads. The default is `$12.50`.
+With it set, option prices come from the numeric `unitPrice` rather than the
+store's own text, which stays when there is no number.
+
+**Dark mode.** `colorScheme` is `light` (the default), `dark`, or `auto`, which
+follows the phone, even with the sheet open. `MealioTheme.standardDark` is the
+default dark theme. To change it, pass `MealioTheme.dark(...)` as `darkTheme`:
+what you leave out keeps its dark default, and `radius` and `fontFamily` carry
+over from `theme`. A `theme:` passed to one widget is used exactly as given.
+Product photos keep a white background.
+
+**Button.** `variant` is `MealioButtonVariant.solid` (the default), `outline`,
+`compact` (uses the `addToCartShort` string) or `icon` (a round 48 cart button,
+with the label as its accessibility label).
+
+```dart
+MealioCartButton(recipe: recipe, variant: MealioButtonVariant.compact)
+```
+
+To draw your own, pass `builder`. It keeps the whole flow and the warm-up.
+`onPressed` is null when the button is disabled.
+
+```dart
+MealioCartButton(
+  recipe: recipe,
+  builder: (context, button) => FilledButton(onPressed: button.onPressed, child: Text(button.label)),
+)
+```
+
+**Sheet.** `MealioSheetOptions` has `showTotal` (default true; hides the list
+total, the done subtitle price and the done row prices, while options keep
+theirs), `height` (`MealioSheetHeight.auto`, `.full`, or `.fraction(x)`, clamped
+to 0.5 to 1) and `logo` (any `ImageProvider`, shown in the header). A total only
+ever shows when every item has a price.
+
+**Done screen.** `doneMessage` adds a line of your own. `doneAction` adds a
+button: it becomes the main button and Done turns quiet. Tapping it closes the
+sheet, reports `onClose`, then calls `onPress` with the result. Both work on
+`MealioCartButton` and `MealioCartFlow.show`.
+
+```dart
+MealioCartButton(
+  recipe: recipe,
+  doneMessage: 'Enjoy your meal!',
+  doneAction: MealioDoneAction(
+    label: 'Back to meal plan',
+    onPress: (result) => Navigator.of(context).pop(),
+  ),
+)
+```
+
 ## 3. Your own UI (optional)
 
 `CartSession` is the model the sheet uses. It is a `ChangeNotifier`, so a

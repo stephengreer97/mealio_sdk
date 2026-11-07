@@ -6,7 +6,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Modal, Platform, KeyboardAvoidingView, Pressable, ScrollView, Text, View } from 'react-native';
 import type { StoreInfo, StorePreferences } from '@mealio/sdk-core';
 import { useMealio } from './MealioProvider';
-import { Header, LocationPicker, sheetStyles } from './MealioCartFlow';
+import { Header, LocationPicker, sheetHeight, sheetStyles } from './MealioCartFlow';
 
 export interface MealioStoreSettingsProps {
   visible: boolean;
@@ -18,6 +18,7 @@ export interface MealioStoreSettingsProps {
 export function MealioStoreSettings({ visible, onClose, onChange }: MealioStoreSettingsProps) {
   const mealio = useMealio();
   const t = mealio.theme;
+  const { ui } = mealio;
   const s = useMemo(() => sheetStyles(t), [t]);
   const [stores, setStores] = useState<StoreInfo[] | null>(null);
   const [prefs, setPrefs] = useState<StorePreferences | null>(null);
@@ -31,7 +32,7 @@ export function MealioStoreSettings({ visible, onClose, onChange }: MealioStoreS
       const [list, current] = await Promise.all([mealio.stores(), mealio.storePreferences()]);
       setStores(list); setPrefs(current);
     } catch (e: any) {
-      setStores([]); setProblem(e?.message || 'Could not load your stores.');
+      setStores([]); setProblem(e?.message || ui.tr('couldNotLoadYourStores'));
     }
   }, [mealio]);
 
@@ -50,7 +51,7 @@ export function MealioStoreSettings({ visible, onClose, onChange }: MealioStoreS
     try {
       changed(await mealio.setStore(store.id));
     } catch (e: any) {
-      setProblem(e?.message || 'Could not save that store. Try again.');
+      setProblem(e?.message || ui.tr('couldNotSaveStore'));
     } finally {
       setSaving(null);
     }
@@ -61,13 +62,13 @@ export function MealioStoreSettings({ visible, onClose, onChange }: MealioStoreS
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose} statusBarTranslucent>
       <View style={s.scrim}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={s.sheet}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={[s.sheet, sheetHeight(ui.sheet.height)]}>
           <View style={s.grabber} />
-          <Header t={t} title={picking ? `Find your ${picking.name}` : 'Your grocery store'} onClose={onClose} />
+          <Header t={t} title={picking ? ui.tr('titleLocation', { store: picking.name }) : ui.tr('titleSettings')} onClose={onClose} />
           {picking ? (
             <LocationPicker t={t} store={picking.id} storeName={picking.name} zip={samePick?.zip ?? null} current={samePick?.id ?? null}
               onPicked={(location) => { changed({ defaultStore: picking.id, location }); setPicking(null); }}
-              back={{ label: 'Back to your stores', onPress: () => setPicking(null) }} />
+              back={{ label: ui.tr('backToStores'), onPress: () => setPicking(null) }} />
           ) : !stores ? (
             <View style={s.body}><ActivityIndicator color={t.accent} /></View>
           ) : (
@@ -84,13 +85,13 @@ export function MealioStoreSettings({ visible, onClose, onChange }: MealioStoreS
                         {current && prefs?.location ? <Text style={s.small}>{prefs.location.name}, {prefs.location.address}</Text> : null}
                       </View>
                       {saving === st.id ? <ActivityIndicator size="small" color={t.accent} />
-                        : current ? <Text style={[s.small, { color: t.accent }]}>{prefs?.location ? 'Change' : 'Current'}</Text> : null}
+                        : current ? <Text style={[s.small, { color: t.accent }]}>{ui.tr(prefs?.location ? 'change' : 'current')}</Text> : null}
                     </Pressable>
                   );
                 })}
               </ScrollView>
               <View style={s.footer}>
-                <Pressable onPress={onClose} accessibilityRole="button" style={s.cta}><Text style={s.ctaText}>Done</Text></Pressable>
+                <Pressable onPress={onClose} accessibilityRole="button" style={s.cta}><Text style={s.ctaText}>{ui.tr('done')}</Text></Pressable>
               </View>
             </View>
           )}

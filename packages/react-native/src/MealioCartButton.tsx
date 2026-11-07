@@ -2,11 +2,14 @@
 // or recipes={[...]} to fill one cart from several meals.
 // It draws a themed button and runs the whole flow in one sheet.
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, type ReactNode } from 'react';
 import { Pressable, StyleSheet, Text, type StyleProp, type ViewStyle } from 'react-native';
 import type { AddResult, MealioError, Recipe } from '@mealio/sdk-core';
 import { useMealio } from './MealioProvider';
 import { MealioCartFlow } from './MealioCartFlow';
+import type { MealioTheme } from './theme';
+
+export type MealioButtonVariant = 'solid' | 'outline' | 'compact' | 'icon';
 
 export interface MealioCartButtonProps {
   /** One recipe. Pass this or `recipes`. */
@@ -16,11 +19,22 @@ export interface MealioCartButtonProps {
   /** Optional. Without it the user's default store is used, or they pick one. */
   store?: string | null;
   zip?: string | null;
-  /** Defaults to "Add to my grocery cart". */
+  /** Defaults to the `addToCart` string, or `addToCartShort` on a compact button. */
   label?: string;
+  /** `solid` (the default), `outline`, `compact` for a recipe card, or `icon`, a round cart button. */
+  variant?: MealioButtonVariant;
+  /**
+   * Draw your own button. It keeps the whole flow and the warm-up: call
+   * `onPress` when it is tapped.
+   */
+  renderButton?: (button: { onPress: () => void; disabled: boolean; label: string }) => ReactNode;
   onAdded?: (result: AddResult) => void;
   onClose?: (result: AddResult | null) => void;
   onError?: (e: MealioError | Error) => void;
+  /** A line of your own on the done screen. */
+  doneMessage?: string;
+  /** A button of your own on the done screen. Tapping it closes the sheet. */
+  doneAction?: { label: string; onPress: (result: AddResult) => void };
   style?: StyleProp<ViewStyle>;
   disabled?: boolean;
 }
@@ -28,6 +42,11 @@ export interface MealioCartButtonProps {
 export function MealioCartButton(props: MealioCartButtonProps) {
   const mealio = useMealio();
   const t = mealio.theme;
+  const { ui } = mealio;
+  const variant = props.variant ?? 'solid';
+  const label = props.label || ui.tr(variant === 'compact' ? 'addToCartShort' : 'addToCart');
+  const disabled = !!props.disabled;
+  const onPress = () => setOpen(true);
   const [open, setOpen] = useState(false);
   // WARM THE LOGIN CHECK while the user reads the recipe. Only for a known user
   // with a store on file: the server answers "nothing to warm" otherwise. The
@@ -38,14 +57,19 @@ export function MealioCartButton(props: MealioCartButtonProps) {
   }, [props.store, props.disabled]);
   return (
     <>
-      <Pressable
-        onPress={() => setOpen(true)}
-        disabled={props.disabled}
-        accessibilityRole="button"
-        style={[styles.btn, { backgroundColor: t.accent, borderRadius: t.radius, opacity: props.disabled ? 0.5 : 1 }, props.style]}
-      >
-        <Text style={[styles.text, { color: t.onAccent, fontFamily: t.fontFamily }]}>{props.label || 'Add to my grocery cart'}</Text>
-      </Pressable>
+      {props.renderButton ? props.renderButton({ onPress, disabled, label }) : (
+        <Pressable
+          onPress={onPress}
+          disabled={disabled}
+          accessibilityRole="button"
+          accessibilityLabel={label}
+          style={[styles.btn, shapeOf(variant, t), { opacity: disabled ? 0.5 : 1 }, props.style]}
+        >
+          {variant === 'icon'
+            ? <Text style={styles.icon} accessibilityElementsHidden importantForAccessibility="no">🛒</Text>
+            : <Text style={[styles.text, variant === 'compact' && styles.compactText, { color: variant === 'outline' ? t.accent : t.onAccent, fontFamily: t.fontFamily }]}>{label}</Text>}
+        </Pressable>
+      )}
       <MealioCartFlow
         visible={open}
         recipe={props.recipe}
@@ -54,13 +78,24 @@ export function MealioCartButton(props: MealioCartButtonProps) {
         zip={props.zip}
         onAdded={props.onAdded}
         onError={props.onError}
+        doneMessage={props.doneMessage}
+        doneAction={props.doneAction}
         onClose={(r) => { setOpen(false); props.onClose?.(r); }}
       />
     </>
   );
 }
 
+function shapeOf(variant: MealioButtonVariant, t: MealioTheme): ViewStyle {
+  if (variant === 'outline') return { backgroundColor: 'transparent', borderWidth: 2, borderColor: t.accent, borderRadius: t.radius };
+  if (variant === 'compact') return { backgroundColor: t.accent, borderRadius: t.radius, minHeight: 36, paddingHorizontal: 12, alignSelf: 'flex-start' };
+  if (variant === 'icon') return { backgroundColor: t.accent, borderRadius: 24, minHeight: 48, width: 48, paddingHorizontal: 0, alignSelf: 'flex-start' };
+  return { backgroundColor: t.accent, borderRadius: t.radius };
+}
+
 const styles = StyleSheet.create({
   btn: { minHeight: 52, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 20 },
   text: { fontSize: 16, fontWeight: '700' },
+  compactText: { fontSize: 14 },
+  icon: { fontSize: 22 },
 });

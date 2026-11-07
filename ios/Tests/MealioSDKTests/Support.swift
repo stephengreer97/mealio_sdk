@@ -20,6 +20,11 @@ enum Fixtures {
         try XCTUnwrap(JSONValue.parse(try data("test-vectors", "json")))
     }
 
+    /// protocol/strings.json, the table every SDK carries.
+    static func strings() throws -> [String: JSONValue] {
+        try XCTUnwrap(JSONValue.parse(try data("strings", "json"))?.objectValue)
+    }
+
     /// The test key, as the vectors name it ("ktest").
     static func keys(_ vectors: JSONValue) throws -> [String: String] {
         let kid = try XCTUnwrap(vectors["kid"]?.stringValue)

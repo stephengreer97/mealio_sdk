@@ -17,7 +17,7 @@ public extension View {
                              onChange: ((StorePreferences) -> Void)? = nil) -> some View {
         // VERIFY: same as mealioCartFlow, the sheet content closure is formed
         // in a @MainActor function, so the MealioStoreSettings init call is fine.
-        sheet(isPresented: isPresented) {
+        mealioPresent(isPresented: isPresented) {
             MealioStoreSettings(onChange: onChange)
         }
     }
@@ -36,28 +36,27 @@ public struct MealioStoreSettings: View {
     @State private var saving: String?
     @State private var problem: String?
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var systemScheme
 
     /// - Parameter onChange: Called each time the user's store changes.
     public init(onChange: ((StorePreferences) -> Void)? = nil) {
         self.onChange = onChange
     }
 
-    private var t: MealioTheme { MealioCart.theme }
+    private var t: MealioTheme { MealioCart.resolvedTheme(for: systemScheme) }
+    private var ui: MealioText { MealioCart.text }
 
     public var body: some View {
         VStack(spacing: 0) {
-            Capsule()
-                .fill(t.border)
-                .frame(width: 36, height: 5)
-                .padding(.top, 8)
-                .accessibilityHidden(true)
+            MealioGrabber(t: t)
             MealioFlowHeader(t: t, recipeTitle: nil,
-                             title: picking.map { "Find your \($0.name)" } ?? "Your grocery store",
+                             title: picking.map { ui.tr(.titleLocation, ["store": $0.name]) } ?? ui.tr(.titleSettings),
                              onClose: { dismiss() })
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
         .background(t.background.ignoresSafeArea())
+        .mealioSheetSize()
         .task { await load() }
     }
 
@@ -70,7 +69,7 @@ public struct MealioStoreSettings: View {
                                      changed(StorePreferences(defaultStore: picking.id, location: location))
                                      self.picking = nil
                                  },
-                                 back: MealioLocationPicker.Back(label: "Back to your stores",
+                                 back: MealioLocationPicker.Back(label: ui.tr(.backToStores),
                                                                  action: { self.picking = nil }))
         } else if let stores = stores {
             VStack(spacing: 0) {
@@ -90,7 +89,7 @@ public struct MealioStoreSettings: View {
                     .padding(.top, 2)
                     .padding(.bottom, 24)
                 }
-                MealioCTA(t: t, title: "Done", action: { dismiss() })
+                MealioCTA(t: t, title: ui.tr(.done), action: { dismiss() })
                     .padding(.horizontal, 16)
                     .padding(.vertical, 12)
                     .overlay(alignment: .top) { Rectangle().fill(t.border).frame(height: 1) }
@@ -107,7 +106,7 @@ public struct MealioStoreSettings: View {
     private func row(_ st: StoreInfo) -> some View {
         let isCurrent = st.id == prefs?.defaultStore
         let location = isCurrent ? prefs?.location : nil
-        let trailing: String? = isCurrent ? (location != nil ? "Change" : "Current") : nil
+        let trailing: String? = isCurrent ? ui.tr(location != nil ? .change : .current) : nil
         return MealioStoreOption(t: t, title: st.name,
                                  detail: location.map { "\($0.name), \($0.address)" },
                                  selected: isCurrent, saving: saving == st.id, trailing: trailing,
@@ -131,7 +130,7 @@ public struct MealioStoreSettings: View {
             prefs = saved
         } catch {
             stores = []
-            problem = (error as? MealioError)?.message ?? "Could not load your stores."
+            problem = mealioProblem(error, ui.tr(.couldNotLoadYourStores))
         }
     }
 
@@ -153,7 +152,7 @@ public struct MealioStoreSettings: View {
                 let next = try await MealioCart.setStore(store.id)
                 changed(next)
             } catch {
-                problem = (error as? MealioError)?.message ?? "Could not save that store. Try again."
+                problem = mealioProblem(error, ui.tr(.couldNotSaveStore))
             }
             saving = nil
         }

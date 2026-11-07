@@ -3,6 +3,7 @@ export * from './matcher';
 export * from './allowlist';
 export * from './guard';
 export * from './keys';
+export * from './strings';
 export { openEnvelope, checkInstructions, EnvelopeError, base64ToBytes } from './verify';
 export { Runner, FETCH_PER_MINUTE } from './runner';
 export type { Host, Terminal, StepOutcome } from './runner';
