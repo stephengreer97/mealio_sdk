@@ -179,6 +179,12 @@ public enum MealioCart {
         afterSignOut()
     }
 
+    /// The signed-in user changed. Forget the session, so the next call asks
+    /// your server for a new one. Signing out of the stores does this too.
+    public static func resetSession() {
+        client?.resetSession()
+    }
+
     /// The store-session epoch every call reports. Bumped by every sign-out.
     public static var storeEpoch: Int { StoreEpoch.current() }
 
@@ -190,7 +196,7 @@ public enum MealioCart {
     }
 
     private static func afterSignOut() {
-        client?.clearWarm()
+        client?.resetSession()
         host?.resetHiddenPage()
         StoreEpoch.bump()
     }

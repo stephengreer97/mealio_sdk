@@ -148,6 +148,8 @@ public final class MealioClient {
     public let config: MealioClientConfig
     let runner: Runner
     private var token: String?
+    /// Bumped by `resetSession`, so a token still on its way is not kept.
+    private var sessionGen = 0
     private let base: String
 
     /// How long a warm-up is offered to the next prepare. The server holds the same line (WARM_TTL_MS).
@@ -304,6 +306,24 @@ public final class MealioClient {
     }
 
     /// Forget any warm-up, e.g. after signing out of the stores.
+    /// The signed-in user changed. Forget the session, so the next call asks
+    /// your server for a new one. Signing out of the stores does this too.
+    public func resetSession() {
+        sessionGen += 1
+        token = nil
+        clearWarm()
+    }
+
+    /// The current token. One that arrives after a reset belongs to the last user.
+    private func sessionToken() async throws -> String {
+        while true {
+            if let t = token { return t }
+            let gen = sessionGen
+            let t = try await config.sessionTokenProvider()
+            if gen == sessionGen { token = t }
+        }
+    }
+
     public func clearWarm() {
         warmLock.lock(); defer { warmLock.unlock() }
         warmed = nil
@@ -480,13 +500,7 @@ public final class MealioClient {
     }
 
     private func post(_ path: String, data: Data, retried: Bool) async throws -> JSONValue {
-        let token: String
-        if let t = self.token {
-            token = t
-        } else {
-            token = try await config.sessionTokenProvider()
-            self.token = token
-        }
+        let token = try await sessionToken()
         guard let url = URL(string: base + path) else {
             throw MealioError(code: MealioError.Code.network, message: "Could not reach Mealio")
         }

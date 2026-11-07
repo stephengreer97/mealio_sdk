@@ -160,6 +160,8 @@ class MealioClient @JvmOverloads constructor(
     private val runLock = Mutex()
 
     @Volatile private var token: String? = null
+    /** Bumped by resetSession, so a token still on its way is not kept. */
+    private var sessionGen = 0
 
     /** A finished warm-up the next prepare may start from. */
     private class Warmed(val job: String, val store: String, val at: Long, val pageOpens: Int, val epoch: Int)
@@ -286,6 +288,28 @@ class MealioClient @JvmOverloads constructor(
     }
 
     /** Forget any warm-up, e.g. after signing out of the stores. */
+    /**
+     * The signed-in user changed. Forget the session, so the next call asks your
+     * server for a new one. Signing out of the stores does this too.
+     */
+    fun resetSession() {
+        synchronized(this) {
+            sessionGen += 1
+            token = null
+        }
+        clearWarm()
+    }
+
+    /** The current token. One that arrives after a reset belongs to the last user. */
+    private suspend fun sessionToken(): String {
+        while (true) {
+            token?.let { return it }
+            val gen = synchronized(this) { sessionGen }
+            val fresh = fetchToken()
+            synchronized(this) { if (gen == sessionGen) token = fresh }
+        }
+    }
+
     fun clearWarm() {
         synchronized(this) {
             warmed = null
@@ -373,7 +397,7 @@ class MealioClient @JvmOverloads constructor(
     }
 
     private suspend fun post(path: String, body: JSONObject, retried: Boolean = false): JSONObject {
-        val tok = token ?: fetchToken().also { token = it }
+        val tok = sessionToken()
         val headers = LinkedHashMap<String, String>()
         headers["Content-Type"] = "application/json"
         headers["Authorization"] = "Bearer $tok"

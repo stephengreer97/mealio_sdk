@@ -156,6 +156,45 @@ final class ClientTests: XCTestCase {
         XCTAssertEqual(rec.requests.last?.value(forHTTPHeaderField: "Authorization"), "Bearer t2")
     }
 
+    // Same as the TS "gives the next user a new token" test.
+    @MainActor
+    func testResetSessionGivesTheNextUserANewToken() async throws {
+        let rec = Recorder()
+        StubURLProtocol.handler = { req, body in
+            rec.record(req, body: body)
+            return (200, jsonData([:]))
+        }
+        var users = ["alice", "bob"]
+        let client = makeClient(keys: TestSigner.keys, token: { users.removeFirst() })
+        _ = try? await client.storePreferences()
+        client.resetSession()
+        _ = try? await client.storePreferences()
+        XCTAssertEqual(rec.requests.map { $0.value(forHTTPHeaderField: "Authorization") }, ["Bearer alice", "Bearer bob"])
+    }
+
+    // Same as the TS "drops a token that arrives after the reset" test.
+    @MainActor
+    func testATokenThatArrivesAfterTheResetIsDropped() async throws {
+        let rec = Recorder()
+        StubURLProtocol.handler = { req, body in
+            rec.record(req, body: body)
+            return (200, jsonData([:]))
+        }
+        var asked = 0
+        var client: MealioClient?
+        client = makeClient(keys: TestSigner.keys, token: {
+            asked += 1
+            if asked == 1 {
+                // The user changes while their token is on its way.
+                await MainActor.run { client?.resetSession() }
+                return "alice"
+            }
+            return "bob"
+        })
+        _ = try? await client?.storePreferences()
+        XCTAssertEqual(rec.requests.map { $0.value(forHTTPHeaderField: "Authorization") }, ["Bearer bob"])
+    }
+
     @MainActor
     func testTwo401sRaiseSessionExpired() async throws {
         StubURLProtocol.handler = { _, _ in (401, jsonData([:])) }

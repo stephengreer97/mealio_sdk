@@ -117,7 +117,7 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
       props.onError?.(e);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recipes]);
+  }, [recipes, mealio]);
 
   useEffect(() => {
     if (visible) { ui.emit({ type: 'sheet_opened', recipes: recipes.length }); start(props.store ?? null); } else run.current += 1;

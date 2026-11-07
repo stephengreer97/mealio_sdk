@@ -75,6 +75,11 @@ export interface MealioApi {
   stores(): Promise<StoreInfo[]>;
   signOutOfAllStores(): Promise<void>;
   /**
+   * The signed-in user changed. Forget the session, so the next call asks your
+   * server for a new one. signOutOfAllStores does this too.
+   */
+  resetSession(): void;
+  /**
    * Run the login check for the user's store ahead of time, so the next cart
    * starts at search. MealioCartButton does this when it appears. Call it
    * yourself if you start carts another way. Never shows sign-in, never throws.
@@ -432,8 +437,9 @@ export function MealioProvider(props: MealioProviderProps) {
     storePreferences: () => client.storePreferences(),
     setStore: (store, locationId) => client.setStore(store, locationId),
     openStoreSettings: () => setSettingsOpen(true),
+    resetSession() { client.resetSession(); },
     async signOutOfAllStores() {
-      client.clearWarm();
+      client.resetSession();
       await epochStore.set((await epochStore.get()) + 1);
       // Nothing may keep running in, or remember, the old session's page.
       hiddenStore.current = null;
