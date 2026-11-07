@@ -301,6 +301,16 @@ MealioThemeProvider(
 Inside your own composables, `LocalMealioUi.current` gives the same `tr`,
 `plural` and `money`.
 
+### Events
+
+`onEvent` on `MealioThemeProvider` reports every step of the sheet as a
+`MealioEvent`, for your analytics: `MealioThemeProvider(onEvent = { analytics.track(it.type) }) { AppContent() }`.
+`type` is the same name on every Mealio SDK (`sheet_opened`, `store_picked`,
+`location_asked`, `signin_shown`, `list_shown`, `item_unchecked`, `item_checked`,
+`add_started`, `cart_added`, `error`, `sheet_closed`), and `sheet_closed` carries
+the step the user left from. A listener that throws never breaks the sheet.
+Nothing is sent to Mealio.
+
 ### What the user sees
 
 - **Loading:** "Checking your {store} sign-in", then "Finding your N ingredients".
@@ -388,7 +398,8 @@ val LocalMealioTheme; val LocalMealioUi
 @Composable fun MealioThemeProvider(theme: MealioTheme, content: @Composable () -> Unit)   // sets the theme only
 @Composable fun MealioThemeProvider(theme: MealioTheme = MealioTheme.Default, darkTheme: MealioDarkTheme? = null,
     colorScheme: MealioColorScheme = MealioColorScheme.LIGHT, strings: Map<String, String> = emptyMap(),
-    formatMoney: ((Double) -> String)? = null, sheet: MealioSheetOptions = MealioSheetOptions(), content: @Composable () -> Unit)
+    formatMoney: ((Double) -> String)? = null, sheet: MealioSheetOptions = MealioSheetOptions(),
+    onEvent: MealioEventListener? = null, content: @Composable () -> Unit)
 
 // mealio-sdk
 object MealioCart {
@@ -446,6 +457,11 @@ open class TextTools(overrides: Map<String, String> = emptyMap()) {
     fun plural(base: String, count: Int, vararg vars: Pair<String, Any>): String
 }
 class MealioException(val code: String, message: String, cause: Throwable? = null) : Exception
+sealed class MealioEvent(val type: String)                // one per step: SheetOpened, StorePicked, LocationAsked, SigninShown, ListShown,
+                                                          // ItemUnchecked, ItemChecked, AddStarted, CartAdded, Error, SheetClosed
+enum class MealioSheetStep(val wire: String) { LOADING, STORES, LOCATION, SIGNIN, LIST, ADDING, DONE, ERROR }
+typealias MealioEventListener = (MealioEvent) -> Unit
+fun safeListener(fn: MealioEventListener? = null): MealioEventListener
 ```
 
 `CartItem` has `key, ingredient, quantity, status, options, selectedId,

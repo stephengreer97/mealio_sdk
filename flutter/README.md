@@ -221,6 +221,20 @@ MealioCartButton(
 )
 ```
 
+**Events.** `onEvent` reports every step of the sheet, for your analytics.
+Nothing is sent to Mealio, and a listener that throws never breaks the sheet.
+Each `MealioEvent` is a typed subclass with a `type` and `toJson()`:
+`sheet_opened`, `store_picked`, `location_asked`, `signin_shown`, `list_shown`,
+`item_unchecked`, `item_checked`, `add_started`, `cart_added`, `error` and
+`sheet_closed`, whose `step` is where the user left.
+
+```dart
+MealioCart.configure(
+  // ...
+  onEvent: (event) => analytics.track(event.type, event.toJson()),
+);
+```
+
 ## 3. Your own UI (optional)
 
 `CartSession` is the model the sheet uses. It is a `ChangeNotifier`, so a

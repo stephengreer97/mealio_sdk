@@ -4,6 +4,7 @@
 import 'package:flutter/widgets.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
+import '../events.dart';
 import '../theme.dart';
 import '../ui.dart';
 import '../webview_host.dart';
@@ -36,6 +37,7 @@ class MealioScope extends StatefulWidget {
     this.strings,
     this.formatMoney,
     this.sheet,
+    this.onEvent,
   });
 
   final Widget child;
@@ -59,6 +61,9 @@ class MealioScope extends StatefulWidget {
 
   /// How the sheet looks and behaves.
   final MealioSheetOptions? sheet;
+
+  /// Every step of the sheet, for your analytics. Nothing is sent to Mealio.
+  final MealioEventListener? onEvent;
 
   /// The Navigator the login sheet is pushed on. When null, the Navigator
   /// above this widget is used, if there is one.
@@ -96,6 +101,7 @@ class _MealioScopeState extends State<MealioScope> {
         strings: widget.strings,
         formatMoney: widget.formatMoney,
         sheet: widget.sheet,
+        onEvent: widget.onEvent,
       );
 
   NavigatorState? _navigator() {
@@ -159,6 +165,7 @@ class _MealioScopeState extends State<MealioScope> {
       strings: widget.strings,
       formatMoney: widget.formatMoney,
       sheet: widget.sheet,
+      onEvent: widget.onEvent,
       child: stack,
     );
   }

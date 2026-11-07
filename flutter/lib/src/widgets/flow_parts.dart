@@ -64,6 +64,16 @@ class MealioSheetRoute<T> extends PopupRoute<T> {
 
   final WidgetBuilder builder;
 
+  /// Called as the sheet starts to close, by any means. The flow reports the
+  /// step here, not when the closing slide ends.
+  VoidCallback? onPop;
+
+  @override
+  bool didPop(T? result) {
+    onPop?.call();
+    return super.didPop(result);
+  }
+
   @override
   Color? get barrierColor => const Color(0x59000000);
 

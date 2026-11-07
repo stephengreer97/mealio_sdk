@@ -9,6 +9,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 import 'cart_session.dart';
 import 'client.dart';
 import 'errors.dart';
+import 'events.dart';
 import 'host.dart';
 import 'protocol.dart';
 import 'strings.dart';
@@ -75,7 +76,9 @@ class MealioCart {
   ///
   /// `theme` styles the drop-in widgets. `darkTheme`, `colorScheme` (`auto`
   /// follows the phone), `strings` (any word, see [mealioDefaultStrings]),
-  /// `formatMoney` and `sheet` go with it. `MealioScope` overrides each one.
+  /// `formatMoney`, `sheet` and `onEvent` (every step of the sheet, for your
+  /// analytics; nothing is sent to Mealio) go with it. `MealioScope` overrides
+  /// each one.
   static MealioCart configure({
     required String publishableKey,
     required Future<String> Function() sessionTokenProvider,
@@ -87,6 +90,7 @@ class MealioCart {
     Map<String, String>? strings,
     MealioMoneyFormat? formatMoney,
     MealioSheetOptions? sheet,
+    MealioEventListener? onEvent,
   }) {
     MealioLook.configured = MealioLook(
       theme: theme,
@@ -95,6 +99,7 @@ class MealioCart {
       strings: strings,
       formatMoney: formatMoney,
       sheet: sheet,
+      onEvent: onEvent,
     );
     final client = MealioClient(
       ClientConfig(

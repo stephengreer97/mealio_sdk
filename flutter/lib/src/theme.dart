@@ -6,6 +6,7 @@
 import 'package:flutter/foundation.dart' show mapEquals;
 import 'package:flutter/widgets.dart';
 
+import 'events.dart';
 import 'ui.dart';
 import 'webview_host.dart';
 
@@ -184,7 +185,15 @@ class MealioTheme {
 /// `MealioScope` or `MealioThemeScope`. Not exported.
 @immutable
 class MealioLook {
-  const MealioLook({this.theme, this.darkTheme, this.colorScheme, this.strings, this.formatMoney, this.sheet});
+  const MealioLook({
+    this.theme,
+    this.darkTheme,
+    this.colorScheme,
+    this.strings,
+    this.formatMoney,
+    this.sheet,
+    this.onEvent,
+  });
 
   /// Set by `MealioCart.configure`.
   static MealioLook? configured;
@@ -195,6 +204,7 @@ class MealioLook {
   final Map<String, String>? strings;
   final MealioMoneyFormat? formatMoney;
   final MealioSheetOptions? sheet;
+  final MealioEventListener? onEvent;
 
   /// This level, with `base` filling in what it left unset.
   MealioLook over(MealioLook? base) => base == null
@@ -206,6 +216,7 @@ class MealioLook {
           strings: strings ?? base.strings,
           formatMoney: formatMoney ?? base.formatMoney,
           sheet: sheet ?? base.sheet,
+          onEvent: onEvent ?? base.onEvent,
         );
 
   /// What is in force at `context`.
@@ -227,6 +238,7 @@ class MealioThemeScope extends InheritedWidget {
     this.strings,
     this.formatMoney,
     this.sheet,
+    this.onEvent,
     required super.child,
   });
 
@@ -248,6 +260,9 @@ class MealioThemeScope extends InheritedWidget {
   /// How the sheet looks and behaves.
   final MealioSheetOptions? sheet;
 
+  /// Every step of the sheet, for your analytics. Nothing is sent to Mealio.
+  final MealioEventListener? onEvent;
+
   MealioLook get look => MealioLook(
         theme: theme,
         darkTheme: darkTheme,
@@ -255,6 +270,7 @@ class MealioThemeScope extends InheritedWidget {
         strings: strings,
         formatMoney: formatMoney,
         sheet: sheet,
+        onEvent: onEvent,
       );
 
   /// This scope again around `child`. A sheet's route may sit outside it.
@@ -265,9 +281,12 @@ class MealioThemeScope extends InheritedWidget {
         strings: strings,
         formatMoney: formatMoney,
         sheet: sheet,
+        onEvent: onEvent,
         child: child,
       );
 
+  // Not onEvent: the sheet reads it when it emits, so an inline listener does
+  // not rebuild every Mealio widget on each build.
   @override
   bool updateShouldNotify(MealioThemeScope oldWidget) =>
       theme != oldWidget.theme ||

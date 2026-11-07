@@ -4,7 +4,9 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.painter.Painter
 import co.mealio.sdk.AddResult
+import co.mealio.sdk.MealioEventListener
 import co.mealio.sdk.TextTools
+import co.mealio.sdk.safeListener
 
 /** How tall the sheet is. */
 sealed class MealioSheetHeight {
@@ -45,7 +47,11 @@ class MealioUi internal constructor(
     strings: Map<String, String> = emptyMap(),
     private val formatMoney: ((Double) -> String)? = null,
     val sheet: MealioSheetOptions = MealioSheetOptions(),
+    onEvent: MealioEventListener? = null,
 ) : TextTools(strings) {
+    /** Reports a step to the partner's listener. Never throws. */
+    internal val emit: MealioEventListener = safeListener(onEvent)
+
     /** A price as the partner wants it read. Defaults to "$12.50". */
     fun money(amount: Double): String = formatMoney?.invoke(amount) ?: defaultMoney(amount)
 

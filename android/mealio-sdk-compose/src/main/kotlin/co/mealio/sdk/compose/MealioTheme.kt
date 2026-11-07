@@ -4,12 +4,15 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import co.mealio.sdk.MealioEventListener
 import java.util.Locale
 
 /**
@@ -124,6 +127,7 @@ fun MealioThemeProvider(theme: MealioTheme, content: @Composable () -> Unit) {
  *     strings = mapOf("addToCart" to "Add to Kroger"),
  *     formatMoney = { "%.2f EUR".format(it) },
  *     sheet = MealioSheetOptions(showTotal = false),
+ *     onEvent = { analytics.track(it.type) },
  * ) { AppContent() }
  * ```
  *
@@ -133,6 +137,7 @@ fun MealioThemeProvider(theme: MealioTheme, content: @Composable () -> Unit) {
  * @param formatMoney how prices read. Defaults to "$12.50". With it set, option prices are built from
  *   the numeric `unitPrice`, not the store's text.
  * @param sheet how the sheet looks and behaves.
+ * @param onEvent every step of the sheet, for your analytics. Nothing is sent to Mealio.
  */
 @Composable
 fun MealioThemeProvider(
@@ -142,11 +147,14 @@ fun MealioThemeProvider(
     strings: Map<String, String> = emptyMap(),
     formatMoney: ((Double) -> String)? = null,
     sheet: MealioSheetOptions = MealioSheetOptions(),
+    onEvent: MealioEventListener? = null,
     content: @Composable () -> Unit,
 ) {
     val phoneIsDark = isSystemInDarkTheme()
     val resolved = remember(theme, darkTheme, colorScheme, phoneIsDark) { resolveTheme(theme, darkTheme, colorScheme, phoneIsDark) }
-    val ui = remember(strings, formatMoney, sheet) { MealioUi(strings, formatMoney, sheet) }
+    // Updated state, so an inline onEvent does not rebuild everything on each render.
+    val onEventNow by rememberUpdatedState(onEvent)
+    val ui = remember(strings, formatMoney, sheet) { MealioUi(strings, formatMoney, sheet, onEvent = { e -> onEventNow?.invoke(e) }) }
     CompositionLocalProvider(LocalMealioTheme provides resolved, LocalMealioUi provides ui, content = content)
 }
 

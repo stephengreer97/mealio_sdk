@@ -125,14 +125,18 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
 
   const add = useCallback(async () => {
     if (!cart) return;
+    const id = run.current;
     setPhase('adding');
     ui.emit({ type: 'add_started', items: cart.estimate().count });
     try {
       const r = await cart.addToCart();
+      // Closed while adding: the sheet has said goodbye, so nothing more is reported.
+      if (run.current !== id) return;
       setResult(r); setPhase('done');
       ui.emit({ type: 'cart_added', store: r.store, added: r.added.length, failed: r.failed.length });
       props.onAdded?.(r);
     } catch (e: any) {
+      if (run.current !== id) return;
       setError({ code: e?.code || 'error', message: e?.message || ui.tr('couldNotAdd') });
       setPhase('error');
       ui.emit({ type: 'error', code: e?.code || 'error', step: 'adding' });
