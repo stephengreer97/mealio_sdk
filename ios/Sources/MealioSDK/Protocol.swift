@@ -701,6 +701,9 @@ public struct PreparedCart: Codable, Equatable {
     public let store: String
     /// Display name, e.g. "H-E-B".
     public let storeName: String?
+    /// The exact store, on a Kroger family cart. The user can change it. Nil
+    /// on other stores and from servers older than store locations.
+    public let location: StoreLocation?
     /// The recipes this cart was made from, in the order they were sent. Nil
     /// from servers older than multi-recipe.
     public let recipes: [CartRecipe]?
@@ -714,10 +717,11 @@ public struct PreparedCart: Codable, Equatable {
 
     public init(cartId: String, store: String, storeName: String? = nil, items: [CartItem],
                 ready: [CartItem] = [], needsChoice: [CartItem] = [], unavailable: [CartItem] = [],
-                recipes: [CartRecipe]? = nil) {
+                recipes: [CartRecipe]? = nil, location: StoreLocation? = nil) {
         self.cartId = cartId
         self.store = store
         self.storeName = storeName
+        self.location = location
         self.recipes = recipes
         self.items = items
         self.ready = ready
@@ -725,13 +729,14 @@ public struct PreparedCart: Codable, Equatable {
         self.unavailable = unavailable
     }
 
-    private enum CodingKeys: String, CodingKey { case cartId, store, storeName, recipes, items, ready, needsChoice, unavailable }
+    private enum CodingKeys: String, CodingKey { case cartId, store, storeName, location, recipes, items, ready, needsChoice, unavailable }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         cartId = try c.decode(String.self, forKey: .cartId)
         store = try c.decode(String.self, forKey: .store)
         storeName = try c.decodeIfPresent(String.self, forKey: .storeName)
+        location = try c.decodeIfPresent(StoreLocation.self, forKey: .location)
         recipes = try c.decodeIfPresent([CartRecipe].self, forKey: .recipes)
         ready = try c.decodeIfPresent([CartItem].self, forKey: .ready) ?? []
         needsChoice = try c.decodeIfPresent([CartItem].self, forKey: .needsChoice) ?? []
@@ -835,6 +840,33 @@ public struct AddResult: Codable, Equatable {
 
 /// One line the store took. Same as `AddedItem` in core.
 public typealias AddedItem = AddResult.Added
+
+/// One physical store of a Kroger family chain.
+public struct StoreLocation: Codable, Equatable, Identifiable {
+    public let id: String
+    public let name: String
+    /// "123 Main St, Dallas, TX 75201".
+    public let address: String
+    public let zip: String?
+
+    public init(id: String, name: String, address: String, zip: String? = nil) {
+        self.id = id
+        self.name = name
+        self.address = address
+        self.zip = zip
+    }
+}
+
+/// The store carts use by default. `location` is set for a Kroger family store.
+public struct StorePreferences: Codable, Equatable {
+    public let defaultStore: String?
+    public let location: StoreLocation?
+
+    public init(defaultStore: String? = nil, location: StoreLocation? = nil) {
+        self.defaultStore = defaultStore
+        self.location = location
+    }
+}
 
 /// One store the SDK supports, from `GET /api/v1/stores`.
 public struct StoreInfo: Codable, Equatable, Identifiable {

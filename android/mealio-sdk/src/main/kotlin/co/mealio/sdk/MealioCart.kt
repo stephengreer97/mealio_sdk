@@ -72,7 +72,9 @@ object MealioCart {
      * user is not signed in (inside an open MealioCartFlow sheet, else in its
      * own screen), then searches every ingredient. `store` null uses the
      * user's default store; with none yet it fails with "store_required".
-     * Throws MealioException.
+     * A Kroger family store the user has not chosen a location for fails with
+     * "location_required", before any sign-in. Pass `zip` to use the nearest
+     * store instead of asking them. Throws MealioException.
      */
     @JvmOverloads
     suspend fun prepareCart(store: String?, recipe: Recipe, zip: String? = null, onStep: StepListener? = null): CartSession =
@@ -90,6 +92,18 @@ object MealioCart {
 
     /** Stores the SDK supports right now (GET /api/v1/stores). */
     suspend fun stores(): List<StoreInfo> = current().client.stores()
+
+    /** A Kroger family chain's stores near a zip, for your own store screen. */
+    suspend fun storeLocations(store: String, zip: String): List<StoreLocation> =
+        current().client.storeLocations(store, zip)
+
+    /** The user's default store, and their exact store if it is in the Kroger family. */
+    suspend fun storePreferences(): StorePreferences = current().client.storePreferences()
+
+    /** Make a store the user's default. Kroger family stores need `locationId` the first time. */
+    @JvmOverloads
+    suspend fun setStore(store: String, locationId: String? = null): StorePreferences =
+        current().client.setStore(store, locationId)
 
     /**
      * Run the login check for the user's store ahead of time, so the next cart

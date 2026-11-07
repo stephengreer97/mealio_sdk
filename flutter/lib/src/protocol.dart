@@ -790,6 +790,7 @@ class PreparedCart {
     required this.cartId,
     required this.store,
     this.storeName,
+    this.location,
     this.recipes,
     required this.items,
     this.ready = const <CartItem>[],
@@ -811,6 +812,7 @@ class PreparedCart {
       cartId: _str(m['cartId']),
       store: _str(m['store']),
       storeName: _strOrNull(m['storeName']),
+      location: _locationOrNull(m['location']),
       recipes: m['recipes'] is List ? _list(m['recipes']).map(CartRecipe.fromJson).toList() : null,
       items: items,
       ready: ready,
@@ -824,6 +826,10 @@ class PreparedCart {
 
   /// Display name, e.g. "H-E-B".
   final String? storeName;
+
+  /// The exact store, on a Kroger family cart. The user can change it. Null
+  /// on other stores and from servers older than store locations.
+  final StoreLocation? location;
 
   /// The recipes this cart was made from, in the order they were sent. Null
   /// from servers older than multi-recipe.
@@ -843,6 +849,7 @@ class PreparedCart {
   Map<String, Object?> toJson() {
     final out = <String, Object?>{'cartId': cartId, 'store': store};
     _put(out, 'storeName', storeName);
+    _put(out, 'location', location?.toJson());
     _put(out, 'recipes', recipes?.map((CartRecipe r) => r.toJson()).toList());
     out['items'] = items.map((CartItem i) => i.toJson()).toList();
     // ignore: deprecated_member_use_from_same_package
@@ -1024,6 +1031,47 @@ class AddResult {
     _put(out, 'verified', verified);
     return out;
   }
+}
+
+/// One physical store of a Kroger family chain.
+class StoreLocation {
+  const StoreLocation({required this.id, required this.name, required this.address, this.zip});
+
+  factory StoreLocation.fromJson(Object? json) {
+    final m = _mapOrNull(json) ?? const <String, Object?>{};
+    return StoreLocation(
+      id: _str(m['id']),
+      name: _str(m['name']),
+      address: _str(m['address']),
+      zip: _strOrNull(m['zip']),
+    );
+  }
+
+  final String id;
+  final String name;
+
+  /// "123 Main St, Dallas, TX 75201".
+  final String address;
+  final String? zip;
+
+  Map<String, Object?> toJson() => <String, Object?>{'id': id, 'name': name, 'address': address, 'zip': zip};
+}
+
+StoreLocation? _locationOrNull(Object? v) => v is Map ? StoreLocation.fromJson(v) : null;
+
+/// The store carts use by default. [location] is set for a Kroger family store.
+class StorePreferences {
+  const StorePreferences({this.defaultStore, this.location});
+
+  factory StorePreferences.fromJson(Object? json) {
+    final m = _mapOrNull(json) ?? const <String, Object?>{};
+    return StorePreferences(defaultStore: _strOrNull(m['defaultStore']), location: _locationOrNull(m['location']));
+  }
+
+  final String? defaultStore;
+  final StoreLocation? location;
+
+  Map<String, Object?> toJson() => <String, Object?>{'defaultStore': defaultStore, 'location': location?.toJson()};
 }
 
 /// A store the SDK supports, from `GET /api/v1/stores`.

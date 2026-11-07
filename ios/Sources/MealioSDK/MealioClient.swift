@@ -45,6 +45,9 @@ public struct MealioError: Error, LocalizedError, Equatable, CustomStringConvert
         public static let server = "server"
         /// No store was given and the user has no default store yet: let them pick one.
         public static let storeRequired = "store_required"
+        /// A Kroger family store has no saved location for the user: let them
+        /// choose one with `storeLocations` and `setStore`. Raised before any sign-in.
+        public static let locationRequired = "location_required"
         /// `CartSession.select` was given a key that is not in the cart.
         public static let unknownItem = "unknown_item"
         /// `CartSession.select` was given a product that was not offered.
@@ -202,7 +205,43 @@ public final class MealioClient {
         return list.compactMap { try? $0.decode(StoreInfo.self) }
     }
 
+    /// A Kroger family chain's stores near a zip, nearest first, for the user to
+    /// choose from. Save their choice with `setStore`.
+    public func storeLocations(store: String, zip: String) async throws -> [StoreLocation] {
+        struct Body: Encodable { let store: String; let zip: String }
+        let json = try await post("/api/v1/sdk/locations", body: Body(store: store, zip: zip))
+        guard let list = json["locations"]?.arrayValue else { return [] }
+        return list.compactMap { try? $0.decode(StoreLocation.self) }
+    }
+
+    /// The user's default store, and their exact store if it is in the Kroger family.
+    public func storePreferences() async throws -> StorePreferences {
+        // An empty object reads. JSONValue so that it is `{}` on the wire for certain.
+        try await preferences(from: post("/api/v1/sdk/preferences", body: JSONValue.object([:])))
+    }
+
+    /// Make a store the user's default. A Kroger family store needs `locationId`
+    /// from `storeLocations` the first time, and otherwise fails with
+    /// `location_required`. Sending it later moves them to that store.
+    @discardableResult
+    public func setStore(_ store: String, locationId: String? = nil) async throws -> StorePreferences {
+        struct Body: Encodable { let store: String; let locationId: String? }
+        let id = locationId?.isEmpty == true ? nil : locationId
+        return try await preferences(from: post("/api/v1/sdk/preferences", body: Body(store: store, locationId: id)))
+    }
+
+    private func preferences(from json: JSONValue) throws -> StorePreferences {
+        do {
+            return try json.decode(StorePreferences.self)
+        } catch {
+            throw MealioError(code: MealioError.Code.server, message: "Mealio sent store preferences the SDK could not read")
+        }
+    }
+
     /// Start a cart: signs in to the store if needed, searches every ingredient.
+    /// A Kroger family store the user has not chosen a location for fails with
+    /// `location_required`, before any sign-in. Pass `zip` to use the nearest
+    /// store instead of asking them.
     /// `store` is optional: without it Mealio uses the user's default store,
     /// and fails with `store_required` when they have none yet.
     public func prepareCart(store: String? = nil, recipe: Recipe, zip: String? = nil,

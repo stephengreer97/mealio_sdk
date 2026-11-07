@@ -12,7 +12,7 @@ import UIKit
 @MainActor
 public enum MealioCart {
     /// The configured client. Nil until `configure` is called.
-    public private(set) static var client: MealioClient?
+    public internal(set) static var client: MealioClient?
     /// The WebView host. The cart flow sheet reads its sign-in from here.
     static var host: WebViewHost?
     /// The drop-in's look. Set it with `configure(theme:)` or directly.
@@ -87,6 +87,33 @@ public enum MealioCart {
             throw MealioError(code: MealioError.Code.notConfigured, message: "Call MealioCart.configure first")
         }
         return try await client.stores()
+    }
+
+    /// A Kroger family chain's stores near a zip, nearest first, for your own
+    /// store screen. Save the user's choice with `setStore`.
+    public static func storeLocations(store: String, zip: String) async throws -> [StoreLocation] {
+        guard let client = client else {
+            throw MealioError(code: MealioError.Code.notConfigured, message: "Call MealioCart.configure first")
+        }
+        return try await client.storeLocations(store: store, zip: zip)
+    }
+
+    /// The user's default store, and their exact store if it is in the Kroger family.
+    public static func storePreferences() async throws -> StorePreferences {
+        guard let client = client else {
+            throw MealioError(code: MealioError.Code.notConfigured, message: "Call MealioCart.configure first")
+        }
+        return try await client.storePreferences()
+    }
+
+    /// Make a store the user's default. Kroger family stores need `locationId`
+    /// the first time, and otherwise fail with `location_required`.
+    @discardableResult
+    public static func setStore(_ store: String, locationId: String? = nil) async throws -> StorePreferences {
+        guard let client = client else {
+            throw MealioError(code: MealioError.Code.notConfigured, message: "Call MealioCart.configure first")
+        }
+        return try await client.setStore(store, locationId: locationId)
     }
 
     /// Forget the user's login at one store: removes that store's cookies and

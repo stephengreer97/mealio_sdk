@@ -139,7 +139,33 @@ class MealioClient {
     }
   }
 
+  /// A Kroger family chain's stores near a zip, nearest first, for the user
+  /// to choose from. Save their choice with [setStore].
+  Future<List<StoreLocation>> storeLocations(String store, String zip) async {
+    final j = await _post('/api/v1/sdk/locations', <String, Object?>{'store': store, 'zip': zip});
+    final Object? list = j is Map ? j['locations'] : null;
+    return list is List ? list.map(StoreLocation.fromJson).toList() : <StoreLocation>[];
+  }
+
+  /// The user's default store, and their exact store if it is in the Kroger
+  /// family.
+  Future<StorePreferences> storePreferences() async =>
+      StorePreferences.fromJson(await _post('/api/v1/sdk/preferences', <String, Object?>{}));
+
+  /// Make a store the user's default. A Kroger family store needs `locationId`
+  /// from [storeLocations] the first time, and otherwise fails with
+  /// `location_required`. Sending it later moves them to that store.
+  Future<StorePreferences> setStore(String store, {String? locationId}) async => StorePreferences.fromJson(
+        await _post('/api/v1/sdk/preferences', <String, Object?>{
+          'store': store,
+          if (locationId != null && locationId.isNotEmpty) 'locationId': locationId,
+        }),
+      );
+
   /// Start a cart: signs in to the store if needed, searches every ingredient.
+  /// A Kroger family store the user has not chosen a location for fails with
+  /// `location_required`, before any sign-in. Pass `zip` to use the nearest
+  /// store instead of asking them.
   /// `store` is optional: without it Mealio uses the user's default store,
   /// and fails with `store_required` when they have none yet.
   ///

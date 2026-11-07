@@ -6,7 +6,7 @@ import { Allowlist } from './allowlist';
 import { openEnvelope, EnvelopeError } from './verify';
 import { MAX_RECIPES, SUPPORTED_OPS } from './protocol';
 import type {
-  AddedItem, AddResult, AllowlistPayload, CartItem, Envelope, Instruction, ItemRecipe, PreparedCart, PrepareCartInput, Product, SearchResult, Selection, StepRequest, StoreInfo,
+  AddedItem, AddResult, AllowlistPayload, CartItem, Envelope, Instruction, ItemRecipe, PreparedCart, PrepareCartInput, Product, SearchResult, Selection, StepRequest, StoreInfo, StoreLocation, StorePreferences,
 } from './protocol';
 
 export const SDK_CORE_VERSION = '0.2.0';
@@ -90,7 +90,33 @@ export class MealioClient {
   }
 
   /**
+   * A Kroger family chain's stores near a zip, nearest first, for the user to
+   * choose from. Save their choice with setStore.
+   */
+  async storeLocations(store: string, zip: string): Promise<StoreLocation[]> {
+    const j = await this.post<{ locations?: StoreLocation[] }>('/api/v1/sdk/locations', { store, zip });
+    return Array.isArray(j?.locations) ? j.locations : [];
+  }
+
+  /** The user's default store, and their exact store if it is in the Kroger family. */
+  storePreferences(): Promise<StorePreferences> {
+    return this.post<StorePreferences>('/api/v1/sdk/preferences', {});
+  }
+
+  /**
+   * Make a store the user's default. A Kroger family store needs `locationId`
+   * from storeLocations the first time, and otherwise fails with
+   * `location_required`. Sending it later moves them to that store.
+   */
+  setStore(store: string, locationId?: string | null): Promise<StorePreferences> {
+    return this.post<StorePreferences>('/api/v1/sdk/preferences', { store, ...(locationId ? { locationId } : {}) });
+  }
+
+  /**
    * Start a cart: signs in to the store if needed, searches every ingredient.
+   * A Kroger family store the user has not chosen a location for fails with
+   * `location_required`, before any sign-in. Pass `zip` to use the nearest store
+   * instead of asking them.
    * `store` is optional: without it Mealio uses the user's default store, and
    * fails with `store_required` when they have none yet.
    */

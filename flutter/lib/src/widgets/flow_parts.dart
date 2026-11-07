@@ -31,6 +31,13 @@ String storeLabel(String id) {
     'kroger': 'Kroger',
     'safeway': 'Safeway',
     'wegmans': 'Wegmans',
+    'qfc': "QFC",
+    'frys': "Fry's",
+    'smiths': "Smith's",
+    'bakers': "Baker's",
+    'marianos': "Mariano's",
+    'pick_n_save': "Pick 'n Save",
+    'pay_less': "Pay-Less",
   };
   final k = known[id];
   if (k != null) return k;

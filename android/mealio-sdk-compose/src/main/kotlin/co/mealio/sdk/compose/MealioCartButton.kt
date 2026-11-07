@@ -37,6 +37,8 @@ import co.mealio.sdk.Recipe
  *
  * @param store store id, e.g. "heb". Optional: without it the user's default
  *   store is used, or they pick one in the sheet.
+ * @param zip 5-digit zip, if you know it. Fills the zip box when a Kroger family
+ *   store asks the user which store they shop at.
  * @param onClose called when the sheet closes; `result` is null when nothing was added.
  */
 @Composable

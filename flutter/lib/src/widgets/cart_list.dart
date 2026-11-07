@@ -39,6 +39,7 @@ class MealioCartList extends StatefulWidget {
     this.busy = false,
     this.onAdd,
     this.onChangeStore,
+    this.onChangeLocation,
     this.theme,
   });
 
@@ -55,6 +56,10 @@ class MealioCartList extends StatefulWidget {
 
   /// When set, a tappable store chip ("H-E-B  Change") sits above the list.
   final VoidCallback? onChangeStore;
+
+  /// When set, a Change link sits beside the exact store, on a Kroger family
+  /// cart.
+  final VoidCallback? onChangeLocation;
 
   /// Defaults to `MealioTheme.of(context)`.
   final MealioTheme? theme;
@@ -93,9 +98,11 @@ class _MealioCartListState extends State<MealioCartList> {
             final selectable = s.items.where((CartItem i) => i.status != ItemStatus.unavailable).length;
             final canAdd = !widget.busy && est.count > 0 && widget.onAdd != null;
             final pending = s.pendingPreferences().length;
+            final location = s.location;
             return Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: <Widget>[
+                if (location != null) _locationRow(t, location),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
                   child: Row(
@@ -192,6 +199,45 @@ class _MealioCartListState extends State<MealioCartList> {
 }
 
 extension on _MealioCartListState {
+  Widget _locationRow(MealioTheme t, StoreLocation location) {
+    final small = t.style(size: 12, height: 17 / 12, color: t.muted);
+    final onTap = widget.busy ? null : widget.onChangeLocation;
+    return Padding(
+      key: const ValueKey<String>('mealio-location'),
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+      child: Row(
+        children: <Widget>[
+          Expanded(
+            child: Text(
+              '${location.name}, ${location.address}',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: small,
+            ),
+          ),
+          if (widget.onChangeLocation != null) ...<Widget>[
+            const SizedBox(width: 10),
+            Semantics(
+              button: true,
+              enabled: onTap != null,
+              label: 'Store location: ${location.name}. Change location',
+              onTap: onTap,
+              excludeSemantics: true,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: onTap,
+                child: Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: Text('Change', style: small.copyWith(color: t.accent)),
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   Widget _storeChip(MealioTheme t, String storeName) {
     final onTap = widget.busy ? null : widget.onChangeStore;
     final chipText = t.style(size: 13, weight: FontWeight.w600);

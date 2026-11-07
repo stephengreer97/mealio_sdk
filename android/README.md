@@ -30,6 +30,19 @@ or app when they want to; the sheet never opens the store cart.
 sheet asks them to pick one the first time. The user can change store from a
 chip above the list either way.
 
+A Kroger family store is a chain, so the sheet asks the user which store they
+shop at the first time: a zip box, then that chain's stores near them. `zip`
+only fills the box. The list shows the chosen store with a Change link.
+
+To let users change their store outside a cart, put `MealioStoreSettings` on
+your settings screen:
+
+```kotlin
+var open by rememberSaveable { mutableStateOf(false) }
+Button(onClick = { open = true }) { Text("Grocery store") }
+MealioStoreSettings(visible = open, onClose = { open = false })
+```
+
 | Module | What |
 | --- | --- |
 | `mealio-sdk` | The core: protocol, signature checks, allowlist, guard script, runner, client, cart session, WebView host, login screen. No Compose. |
@@ -94,7 +107,7 @@ val recipe = Recipe(
 MealioCartButton(
     recipe = recipe,
     store = "heb",                 // optional
-    zip = "78701",                 // needed for Kroger family stores
+    zip = "78701",                 // optional: fills the zip box for Kroger family stores
     label = "Add to my grocery cart",
     onAdded = { result -> analytics.log("added", result.added.size) },
     onClose = { result -> /* null when nothing was added */ },
@@ -190,6 +203,7 @@ lifecycleScope.launch {
     } catch (e: MealioException) {
         when (e.code) {
             "store_required" -> { /* no default store yet: ask which store */ }
+            "location_required" -> { /* Kroger family: storeLocations, then setStore, or pass zip */ }
             "login_cancelled" -> { /* user closed the sign-in */ }
             "store_unavailable" -> { /* try later */ }
             else -> showError(e.message)
@@ -226,7 +240,10 @@ WebView in your app, not only the stores'.
     theme: MealioTheme = LocalMealioTheme.current)
 // MealioCartButton and MealioCartFlow each have a twin taking `recipes: List<Recipe>` in place of `recipe`.
 @Composable fun MealioCartList(cart: CartSession, storeName: String, busy: Boolean, onAdd: () -> Unit,
-    modifier: Modifier = Modifier, onChange: () -> Unit = {}, onChangeStore: (() -> Unit)? = null, theme: MealioTheme = ...)
+    modifier: Modifier = Modifier, onChange: () -> Unit = {}, onChangeStore: (() -> Unit)? = null, theme: MealioTheme = ...,
+    onChangeLocation: (() -> Unit)? = null)
+@Composable fun MealioStoreSettings(visible: Boolean, onClose: () -> Unit, onChange: (StorePreferences) -> Unit = {},
+    theme: MealioTheme = LocalMealioTheme.current)
 data class MealioTheme(accent, onAccent, background, surface, text, muted, border, radius, fontFamily, warnBackground, warnText)
 val LocalMealioTheme; @Composable fun MealioThemeProvider(theme: MealioTheme, content: @Composable () -> Unit)
 
@@ -240,6 +257,9 @@ object MealioCart {
     suspend fun prepareCart(store: String?, recipe: Recipe, zip: String? = null, onStep: StepListener? = null): CartSession
     suspend fun prepareCart(store: String?, recipes: List<Recipe>, zip: String? = null, onStep: StepListener? = null): CartSession
     suspend fun stores(): List<StoreInfo>
+    suspend fun storeLocations(store: String, zip: String): List<StoreLocation>   // a Kroger family chain's stores near a zip
+    suspend fun storePreferences(): StorePreferences                              // defaultStore, location
+    suspend fun setStore(store: String, locationId: String? = null): StorePreferences
     suspend fun signOutOfStore(store: String)
     suspend fun signOutOfAllStores()
 }
@@ -292,6 +312,8 @@ read back.
 Error codes are the ones in PROTOCOL.md: `bad_envelope`, `blocked`,
 `store_unavailable`, `login_cancelled`, `session_expired`, `network`,
 `unsupported`, plus `store_required` (no store given and no default yet),
+`location_required` (a Kroger family store with no location chosen, before any
+sign-in),
 `server` (Mealio answered with an error), `unknown_item` /
 `unknown_product` from `select`, and `bad_recipe` / `too_many_recipes` from
 `prepareCart` with no recipes or more than 10.
@@ -355,7 +377,8 @@ The unit tests run on the JVM (JUnit 4):
 - `ClientTest` covers the drive loop, the 401 retry, headers and the
   `sdk`/`epoch` body fields, `recipe` vs `recipes` in the cart body and the
   recipe count limits, the store list, optional store and
-  `store_required`, allowlist widening, error mapping, and the 0.1 server
+  `store_required`, store locations and `location_required`, allowlist
+  widening, error mapping, and the 0.1 server
   shape through the deprecated API.
 - `CartSessionTest` covers remembered items pre-selected, deselect, search
   merging options, `estimate()` with server unit prices ("2 for $1.05"),

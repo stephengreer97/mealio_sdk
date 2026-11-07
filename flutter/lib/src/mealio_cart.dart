@@ -2,6 +2,7 @@
 // MealioClient with the WebView host from MealioScope and the stored
 // store-session epoch.
 
+import 'package:flutter/widgets.dart' show BuildContext, ValueChanged;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
@@ -12,6 +13,7 @@ import 'host.dart';
 import 'protocol.dart';
 import 'theme.dart';
 import 'webview_host.dart';
+import 'widgets/store_settings.dart';
 
 const String _epochKey = 'mealio_sdk.store_epoch';
 
@@ -115,9 +117,34 @@ class MealioCart {
   /// Stores the SDK supports right now.
   Future<List<StoreInfo>> stores() => _client.stores();
 
+  /// A Kroger family chain's stores near a zip, for your own store screen.
+  Future<List<StoreLocation>> storeLocations(String store, String zip) => _client.storeLocations(store, zip);
+
+  /// The user's default store, and their exact store if it is in the Kroger
+  /// family.
+  Future<StorePreferences> storePreferences() => _client.storePreferences();
+
+  /// Make a store the user's default. Kroger family stores need `locationId`
+  /// the first time.
+  Future<StorePreferences> setStore(String store, {String? locationId}) =>
+      _client.setStore(store, locationId: locationId);
+
+  /// Opens the sheet where the user changes their store or zip. Put it on
+  /// your settings screen. `onChange` is called each time their store
+  /// changes. Same as [MealioStoreSettings.show].
+  Future<void> openStoreSettings(
+    BuildContext context, {
+    ValueChanged<StorePreferences>? onChange,
+    MealioTheme? theme,
+  }) =>
+      MealioStoreSettings.show(context, onChange: onChange, theme: theme);
+
   /// Start a cart for `recipe` at `store`: signs the user in to the store if
   /// needed and searches every ingredient. Without `store`, Mealio uses the
   /// user's default store and fails with `store_required` when there is none.
+  /// A Kroger family store the user has not chosen a location for fails with
+  /// `location_required`, before any sign-in. Pass `zip` to use the nearest
+  /// store instead of asking them.
   /// `onStep` reports progress. Throws [MealioException].
   ///
   /// Pass `recipes` instead of `recipe` to fill one cart from up to

@@ -202,6 +202,8 @@ export interface PreparedCart {
   store: string;
   /** Display name, e.g. "H-E-B". */
   storeName?: string;
+  /** The exact store, on a Kroger family cart. The user can change it. */
+  location?: StoreLocation;
   /** The recipes this cart was made from, in the order they were sent. */
   recipes?: Array<{ id: string; title: string | null }>;
   /** Every recipe line, in recipe order. Show them all. */
@@ -252,6 +254,21 @@ export interface AddResult {
   storeCartUrl: string | null;
   /** True when a cart read after adding confirmed every added item. */
   verified?: boolean;
+}
+
+/** One physical store of a Kroger family chain. */
+export interface StoreLocation {
+  id: string;
+  name: string;
+  /** "123 Main St, Dallas, TX 75201". */
+  address: string;
+  zip: string | null;
+}
+
+/** The store carts use by default. `location` is set for a Kroger family store. */
+export interface StorePreferences {
+  defaultStore: string | null;
+  location: StoreLocation | null;
 }
 
 export interface StoreInfo {
