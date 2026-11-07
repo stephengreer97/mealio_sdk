@@ -249,6 +249,90 @@
       "url": "https://evil.b2clogin.com/x",
       "use": "login",
       "ok": false
+    },
+    {
+      "store": "heb",
+      "url": "https://www.heb.com/place_order",
+      "use": "fetch",
+      "ok": false
+    },
+    {
+      "store": "heb",
+      "url": "https://www.heb.com/api/order/submit",
+      "use": "fetch",
+      "ok": false
+    },
+    {
+      "store": "heb",
+      "url": "https://www.heb.com/orders/place?x=1",
+      "use": "fetch",
+      "ok": false
+    },
+    {
+      "store": "heb",
+      "url": "https://www.heb.com/cart/confirm",
+      "use": "page",
+      "ok": false
+    },
+    {
+      "store": "heb",
+      "url": "https://www.heb.com/purchase",
+      "use": "fetch",
+      "ok": false
+    },
+    {
+      "store": "heb",
+      "url": "https://www.heb.com/purchase/review",
+      "use": "fetch",
+      "ok": false
+    },
+    {
+      "store": "heb",
+      "url": "https://www.heb.com/orders/placed",
+      "use": "page",
+      "ok": true
+    },
+    {
+      "store": "heb",
+      "url": "https://www.heb.com/my-account/purchases",
+      "use": "page",
+      "ok": true
+    },
+    {
+      "store": "safeway",
+      "url": "https://www.safeway.com/abs/pub/xapi/pgmsearch/v1/search/products?q=milk",
+      "use": "fetch",
+      "ok": true
+    },
+    {
+      "store": "safeway",
+      "url": "https://www.safeway.com/abs/pub/erums/cartservice/api/v2/cart/items",
+      "use": "fetch",
+      "ok": true
+    },
+    {
+      "store": "safeway",
+      "url": "https://www.safeway.com/abs/pub/erums/cartservice/api/v2/cart/customer/",
+      "use": "fetch",
+      "ok": true
+    },
+    {
+      "store": "wegmans",
+      "url": "https://www.wegmans.com/commerce/cart/carts/lineitems",
+      "use": "fetch",
+      "ok": true
+    },
+    {
+      "store": "wegmans",
+      "url": "https://www.wegmans.com/commerce/order/orders/activeorders",
+      "use": "fetch",
+      "ok": true
+    },
+    {
+      "store": "aldi",
+      "url": "https://www.aldi.us/graphql",
+      "use": "fetch",
+      "ok": true
     }
   ],
   "blockedBodies": [
@@ -282,6 +366,74 @@
     },
     {
       "body": "",
+      "blocked": false
+    },
+    {
+      "body": "{\"query\":\"mutation Go { placeOrder(input:{}) { id } }\"}",
+      "blocked": true
+    },
+    {
+      "body": "{\"query\":\"mutation { placeOrder { id } }\"}",
+      "blocked": true
+    },
+    {
+      "body": "{\"query\":\"mutation($a:ID!){ checkoutComplete(id:$a){id} }\"}",
+      "blocked": true
+    },
+    {
+      "body": "{\"query\":\"mutation Go { cart { submitOrder { id } } }\"}",
+      "blocked": true
+    },
+    {
+      "body": "{\"query\":\"mutation Go { done: place_order { id } }\"}",
+      "blocked": true
+    },
+    {
+      "body": "{\"query\":\"mutation Go { ...F } fragment F on Mutation { placeOrder { id } }\"}",
+      "blocked": true
+    },
+    {
+      "body": "{\"operationName\":\"place_order\"}",
+      "blocked": true
+    },
+    {
+      "body": "operationName=PlaceOrder&query=mutation+PlaceOrder",
+      "blocked": true
+    },
+    {
+      "body": "operationName=Search&query=mutation+Go+%7B+placeOrder+%7B+id+%7D+%7D",
+      "blocked": true
+    },
+    {
+      "body": "mutation { submit_order { id } }",
+      "blocked": true
+    },
+    {
+      "body": "{\"query\":\"query Wallet { me { paymentMethods { id } } }\"}",
+      "blocked": false
+    },
+    {
+      "body": "{\"query\":\"mutation Add($p: String!) { addItem(note: \\\"checkout\\\", purchasePreferenceId: $p) { ... on PaymentError { message } } } # placeOrder\"}",
+      "blocked": false
+    },
+    {
+      "body": "operationName=Search&query=query+Search+%7B+a+%7D",
+      "blocked": false
+    },
+    {
+      "body": "{\"operationName\":\"cartItemV2\",\"variables\":{},\"query\":\"mutation cartItemV2($productId: String!, $skuId: String!, $quantity: Int, $purchasePreferenceId: String) { addItemToCartV2(productId: $productId, skuId: $skuId, quantity: $quantity, purchasePreferenceId: $purchasePreferenceId) { __typename ... on Cart { id } ... on AddOnsCart { id cart { id } } ... on AddItemToCartV2Error { message title code } ... on AddItemToCartV2TimeslotError { message title errorCode: code } } }\"}",
+      "blocked": false
+    },
+    {
+      "body": "{\"operationName\":\"cartItemsV2\",\"variables\":{},\"query\":\"mutation cartItemsV2($p0: String!, $s0: String!, $w0: Float, $r0: String) { a0: addItemToCartV2(productId: $p0, skuId: $s0, weight: $w0, purchasePreferenceId: $r0) { __typename ... on Cart { id } } }\"}",
+      "blocked": false
+    },
+    {
+      "body": "{\"operationName\":\"MergeAndGetCart\",\"variables\":{}}",
+      "blocked": false
+    },
+    {
+      "body": "{\"operationName\":\"updateItems\",\"variables\":{}}",
       "blocked": false
     }
   ],

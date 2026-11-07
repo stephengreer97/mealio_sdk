@@ -368,12 +368,15 @@ checkout
 payment
 billing
 wallet
-place-?order
-submit-?order
-order-?confirm
+place[-_]?order
+submit[-_]?order
+order[-_]?confirm
 gift-?card
 /account/(delete|close|security|password)
 /addresses?/(add|edit|delete|new)
+/orders?/(submit|place)(/|\?|$)
+/cart/confirm
+/purchase(/|\?|$)
 ```
 
 The bundled allowlist is in `packages/core/src/allowlist.ts` (`STORES`). The
@@ -385,11 +388,27 @@ never touch `BLOCKED_PATTERNS`.
 ## Guard script
 
 `GUARD_SCRIPT` (in `packages/core/src/guard.ts`) is injected before every
-server script. It wraps `window.fetch` and `XMLHttpRequest` in the page so a
-request whose URL matches `BLOCKED_PATTERNS`, or whose body names a GraphQL
-operation matching `/checkout|placeorder|submitorder|payment/i`, throws
-instead of leaving the device. It also caps requests at 240 per minute per
-page. This is defense in depth. The signature is the primary control.
+server script. It wraps `window.fetch`, `XMLHttpRequest` and
+`navigator.sendBeacon` in the page so a request whose URL matches
+`BLOCKED_PATTERNS`, or whose body is a blocked operation, throws (or, for a
+beacon, returns false) instead of leaving the device. It also caps requests at
+240 per minute per page. This is defense in depth. The signature is the
+primary control.
+
+A body is a blocked operation when its `operationName`, or the name or any
+selected field of any `mutation` in its `query` (named or anonymous, at any
+depth, including fragments), matches `BLOCKED_GRAPHQL_OPERATION`:
+
+```
+check_?out|place_?order|submit_?order|confirm_?order|create_?order|purchase|payment
+```
+
+Form-encoded `operationName` counts too. `Request`, `Blob`, `ArrayBuffer`,
+`URLSearchParams` and `FormData` bodies are read before the check. A beacon
+cannot wait for a body to be read, so a beacon whose body is not text is
+refused. The cases every SDK must agree on are in `protocol/test-vectors.json`
+(`blockedBodies`), and `node protocol/check-rails.mjs` confirms none of the
+rails' own paths or operations are blocked.
 
 ## Rate caps
 
@@ -405,6 +424,43 @@ envelopes with more than 64 instructions.
 Rotating a key means shipping the new public key in an SDK release first,
 then switching the server's `kid`.
 
+## One job at a time
+
+Every job that drives the hidden page (prepare, search, add and warm) runs
+through one queue in the client, so no two jobs ever overlap on the page. A
+page load or script result belongs to the job that asked for it.
+
+Every wait is bounded. Each HTTP request to Mealio, and each call to the
+partner's session function, times out after 30 seconds (`network` or
+`session_failed`). A host that never answers an instruction is cut off 5
+seconds after that instruction's own timeout.
+
+A prepare or search can be cancelled, for example when the user closes the
+sheet. It stops after the current step, sends nothing more, never shows
+sign-in, and frees the queue. An add cannot be cancelled once it starts, so
+the drop-in cannot be closed while adding. A second add on the same cart
+returns the first one's result.
+
+## Users
+
+`setUser(id)` (React Native: the provider's `userId` prop) tells the SDK who
+is signed in. When the id changes, the SDK cancels any prepare or search,
+forgets the session, and if a user was signed in before, signs out of the
+stores. While the id is null nobody is signed in: no session is requested,
+warm-ups do nothing, and the drop-in button calls `onSignInRequired`.
+`resetSession()` forgets the session alone.
+
+## Warnings
+
+A prepared cart may carry `warnings: [{ code, message }]`. The SDK exposes
+them as `cart.warnings` and logs them in debug builds.
+
+| code | meaning |
+| --- | --- |
+| `ingredients_dropped` | A recipe had more than 60 ingredients. Only the first 60 were used |
+| `lines_dropped` | The cart had more than 100 items. Only the first 100 were used |
+| `servings_ignored` | `makeServings` was sent without `servings`, so nothing scaled |
+
 ## Errors the SDK raises to the app
 
 | code | meaning |
@@ -413,7 +469,12 @@ then switching the server's `kid`.
 | `blocked` | An instruction broke the allowlist |
 | `store_unavailable` | The server says the store cannot be reached now |
 | `login_cancelled` | The user closed the login sheet |
-| `session_expired` | The SDK session token expired; get a new one from your server |
+| `session_expired` | Mealio refused the session twice in a row |
+| `session_failed` | The partner's session function threw or timed out. The message is the partner's own |
+| `not_signed_in` | A cart was started while `userId` is null |
+| `cancelled` | The job was cancelled, for example by closing the sheet or a user change |
+| `cart_expired` | The prepared cart is too old to add. Prepare it again |
+| `too_many_searches` | This cart reached its search limit |
 | `network` | Could not reach Mealio |
 | `unsupported` | An instruction `op` this SDK does not know |
 | `cart_cap_reached` | The app reached the monthly cap set in its dashboard. The drop-in shows `capReached` |

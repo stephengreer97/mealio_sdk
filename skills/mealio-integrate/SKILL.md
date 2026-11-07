@@ -149,7 +149,7 @@ Read the current docs if you can fetch them:
 - https://developers.mealio.co/docs/pricing
 - The page for this platform: `/docs/react-native`, `/docs/ios`, `/docs/android` or `/docs/flutter`
 
-**This skill needs SDK 0.5 or later.** Older versions lack button `variant` and own button, `strings`, `formatMoney`, `darkTheme` and `colorScheme`, `sheet`, `onEvent`, `doneMessage` and `doneAction`, `servings`, `makeServings`, `pantry`, `optional`, `photoUrl`, and the store settings and location screens. If the app already pins an older version, plan an upgrade to the newest one.
+**This skill needs SDK 0.6 or later.** 0.6 is what makes user changes, guests and closing the sheet safe without extra code. If the app pins an older version, plan an upgrade to the newest one.
 
 **Read the real API before you plan.** This changes nothing in the repo. On React Native, run `npm pack @mealio/react-native-cart @mealio/sdk-core` in your system's temporary folder and read the `.d.ts` files. On other platforms, read the public source at the newest tag. A plan built on this does not need reopening later.
 
@@ -322,57 +322,36 @@ Confirm every option in the plan exists. If one does not, drop it and tell the d
 
 The publishable key is safe to ship, but read it from the app's public config, for example `EXPO_PUBLIC_MEALIO_PUBLISHABLE_KEY`, so sandbox and live can differ. Add the name to the app's example env file. The session function calls the endpoint from Step 1, using the app's existing API client and login.
 
-**One session per user.** The SDK keeps a session token until it expires, up to 15 minutes, and store sign-out does not clear it. If one person signs out and another signs in on the same phone, or the app switches accounts directly, the second could reuse the first person's session, including their saved picks and Kroger connection. Follow the pattern for your platform below, so a new user always gets a new session. From SDK 0.5.1, signing out of the stores clears the session too, and `resetSession` clears it on its own. Use it if the installed types have it.
+**Tell the SDK who is signed in.** This is the one thing every platform must get right. When the signed-in user changes, the SDK stops any cart in progress, starts a new Mealio session, and signs the last user out of the grocery stores, so the next person on the phone never sees the last one's store account or picks. While nobody is signed in, the SDK asks your server for nothing, and the button sends people to sign in instead.
 
-**React Native.** Place the provider high enough to wrap all navigation, and inside the app's auth provider. Make `getSessionToken` stable for one user and new for the next: the SDK keeps its client for as long as the function stays the same, so an inline arrow rebuilds it on every render, and a function that never changes causes the leak above. Read the user id inside the function, so it stays a real dependency that a lint fix will not remove.
+**React Native.** Place the provider high enough to wrap all navigation, and inside the app's auth provider. Pass the current user's stable id as `userId`, and `null` when nobody is signed in. Pass `onSignInRequired` to open the app's own sign-in. Account switches, sign-out and account deletion are then all handled, because they all change `userId`.
 
 ```tsx
-import React, { useCallback, useEffect, useRef } from 'react';
-import { MealioProvider, useMealio, type EpochStorage } from '@mealio/react-native-cart';
+import { MealioProvider, type EpochStorage } from '@mealio/react-native-cart';
 
 const epochStorage: EpochStorage = {
   async get() { return Number(await AsyncStorage.getItem('mealio-epoch')) || 0; },
   async set(n) { await AsyncStorage.setItem('mealio-epoch', String(n)); },
 };
 
-// useMealio only works inside the provider, so sign-out is watched from here.
-// Comparing ids also catches a direct switch from one user to another.
-function StoreSignOut() {
-  const { user } = useAuth();
-  const { signOutOfAllStores } = useMealio();
-  const previous = useRef(user);
-  useEffect(() => {
-    if (previous.current && previous.current.id !== user?.id) signOutOfAllStores().catch(logError);
-    previous.current = user;
-  }, [user, signOutOfAllStores]);
-  return null;
-}
-
 export function AppMealio({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
-  const userId = user?.id;
-  const getSessionToken = useCallback(
-    async () => {
-      if (!userId) throw new Error('Sign in first');
-      return (await api.post<{ sessionToken: string }>('/mealio/session')).sessionToken;
-    },
-    [userId],
-  );
   return (
     <MealioProvider
       publishableKey={MEALIO_PUBLISHABLE_KEY}
-      getSessionToken={getSessionToken}
+      getSessionToken={async () => (await api.post<{ sessionToken: string }>('/mealio/session')).sessionToken}
+      userId={user?.id ?? null}
+      onSignInRequired={() => navigation.navigate('SignIn')}
       epochStorage={epochStorage}
       theme={MEALIO_THEME}
     >
-      <StoreSignOut />
       {children}
     </MealioProvider>
   );
 }
 ```
 
-Define `theme` outside the component, or memoize it.
+Define `theme` outside the component, or memoize it. If the app has no navigation object at this level, keep a ref to it or open sign-in through the app's own auth context.
 
 `epochStorage` must survive sign-out. `AsyncStorage.clear()` takes no exclusions and resets it, so if the app clears storage, remove keys selectively:
 
@@ -396,7 +375,7 @@ MealioCart.configure(
 )
 ```
 
-Whenever the signed-in user changes, call `MealioCart.resetSession()` if the installed SDK has it. Otherwise call `configure` again, so the new user starts with a new session.
+Call `MealioCart.setUser(user?.id)` wherever the app's signed-in user changes, including on launch, sign-out and account deletion. Pass `nil` when nobody is signed in.
 
 **Android.** Configure in `Application.onCreate`. Wrap Compose content in the theme provider.
 
@@ -413,7 +392,7 @@ MealioThemeProvider(
 ) { AppContent() }
 ```
 
-Whenever the signed-in user changes, call `MealioCart.resetSession()` if the installed SDK has it. Otherwise call `MealioCart.configure` again, so the new user starts with a new session.
+Call `MealioCart.setUser(user?.id)` wherever the app's signed-in user changes, including on launch, sign-out and account deletion. Pass `null` when nobody is signed in.
 
 **Flutter.** `MealioScope` hosts the store WebView, so it must sit above every page. It needs the navigator key. With a router package, pass that router's root navigator key.
 
@@ -434,7 +413,7 @@ MaterialApp(
 );
 ```
 
-Whenever the signed-in user changes, call `MealioCart.resetSession()` if the installed SDK has it. Otherwise call `MealioCart.configure` again, so the new user starts with a new session.
+Call `MealioCart.instance.setUser(user?.id)` wherever the app's signed-in user changes, including on launch, sign-out and account deletion. Pass `null` when nobody is signed in.
 
 **Map the theme.** `MealioTheme` has `accent`, `onAccent`, `background`, `surface`, `text`, `muted`, `border`, `radius`, `fontFamily` (`fontName` on iOS), `warnBackground` and `warnText`. Set the ones the app has tokens for. Keep `muted` at 4.5:1 contrast against `background`. If the app has dark mode, set `darkTheme` and `colorScheme` to `auto`. The sheet is light unless you say otherwise. Only use a font the app has actually loaded.
 
@@ -509,7 +488,6 @@ The drop-in runs the whole flow in one sheet: store choice, zip for Kroger famil
 import { MealioCartButton } from '@mealio/react-native-cart';
 
 <MealioCartButton
-  key={user.id}
   recipe={toMealioRecipe(recipe, servings)}
   onAdded={(result) => markShopped(result.added)}
   renderButton={({ onPress, disabled, label }) => (
@@ -517,10 +495,10 @@ import { MealioCartButton } from '@mealio/react-native-cart';
   )}
 />
 
-<MealioCartButton key={user.id} recipes={planToRecipes(plan)} variant="compact" />
+<MealioCartButton recipes={planToRecipes(plan)} variant="compact" />
 ```
 
-Other props: `store`, `zip`, `label`, `onClose`, `onError`, `doneMessage`, `doneAction`, `style`, `disabled`. `variant` and `style` have no effect with `renderButton`. Always set `key={user.id}`: before SDK 0.5.1, a button that stays mounted across a user change, such as one on a tab, keeps the last user's session. Only use `onAdded` if the app has something to do with the result.
+Other props: `store`, `zip`, `label`, `onClose`, `onError`, `onSignInRequired`, `doneMessage`, `doneAction`, `style`, `disabled`. `variant` and `style` have no effect with `renderButton`. Only use `onAdded` if the app has something to do with the result.
 
 **iOS**
 
@@ -553,9 +531,9 @@ Good placement:
 - **Meal plan or shopping list:** one button with `recipes`, not one per row.
 - **Label:** defaults to "Add to my grocery cart", or "Add to cart" on `compact`. Keep it plain, and let `label` show a count if it helps.
 - **No ingredients:** set `disabled`, or hide the button.
-- **Guests:** a mounted button asks for a session right away, unless it is `disabled`, to check the store sign-in ahead of the tap. So for a guest, do not mount it. Show the app's own button that opens sign-in, and swap in `MealioCartButton` once they are in. Hide any store settings row from guests too, because it also asks for a session. A device id also works, if the developer chose that.
+- **Guests:** show the button to guests too. While the user is null, the button asks for nothing and calls `onSignInRequired` when tapped, and so does store settings. Without `onSignInRequired`, the button is disabled. A device id as the user also works, if the developer chose that.
 
-The sheet shows its own errors. Use `onError` for logging, not for a second alert.
+The sheet shows its own errors. Use `onError` for logging, not for a second alert. The sheet cannot be closed while it is adding, so a cart is never left half filled. Closing it at any other time stops the work in progress.
 
 ### Step 7: Add the extras from the plan
 
@@ -596,13 +574,17 @@ const result = await cart.addToCart();
 
 Rules for custom screens:
 
-- Call `warm` when the screen appears, so sign-in is checked ahead of time.
+- Call `warm` when the screen appears, so sign-in is checked ahead of time. Jobs run one at a time, so a prepare waits for a warm-up or search to end.
 - If the user has no store, `prepareCart` fails with `store_required`. List choices with `stores`.
 - Kroger family stores also need `storeLocations` and `setStore`, or `location_required` comes back before any sign-in. Read the saved store with `storePreferences`.
 - Before adding, check `needsPreference` and `pendingPreferences`. A ticked item waiting on a preference stays out of the add.
 - For items sold by weight, use `isWeight`, `weight` and `setWeight`. For the rest, use `quantity` and `setQuantity`.
 - With several recipes, `recipesFor(key)` says which meals an item is for.
 - If `estimate` gives a null `total`, show no total at all. Never total only the priced items.
+- `cart.warnings` lists anything the server left out, such as ingredients past 60. Show or log them.
+- Pass a `CancelToken` to `prepareCart` and `search`, and cancel it when the user leaves the screen. Never cancel an add.
+- On React Native, `useMealio().hasUser` says whether a user is set, for showing sign-in before a cart. `resetSession` forgets the session alone, without signing out of the stores. Setting the user already does this, so it is rarely needed.
+- After a failed add, prepare again and call `restorePicks` with the old cart, and tell the user some items may already be in their cart.
 
 `MealioCartSheet` is a ready-made picker for a cart you prepared yourself. `MealioCartFlow` and `MealioCartList` are smaller drop-in pieces. Check the installed types before using them.
 
@@ -617,7 +599,12 @@ Handle every code your screens can hit:
 | `store_unavailable` | Show the message and suggest trying later |
 | `store_not_allowed` | The app does not offer that store. Show the allowed ones, or change Choose stores in the dashboard |
 | `unsupported_store` | Unknown store id. Check `GET /api/v1/stores` |
-| `session_expired` | Mealio refused the session twice. Check the endpoint and the secret key. If the app's own session function throws, React Native passes that error through with no Mealio code, so handle it too |
+| `session_expired` | Mealio refused the session twice. Check the endpoint and the secret key |
+| `session_failed` | The app's own session function threw or took over 30 seconds. The message is the app's own |
+| `not_signed_in` | A cart was started while the user is null. Open sign-in |
+| `cancelled` | The work was stopped, by closing or a user change. Show nothing |
+| `cart_expired` | The cart sat too long before adding. Prepare it again |
+| `too_many_searches` | This cart hit its search limit. Ask the user to pick from what is shown |
 | `network` | The phone could not reach Mealio |
 | `cart_cap_reached` | The app hit its monthly cap. Developer action, in the dashboard |
 | `too_many_carts` | This user started too many carts. Ask them to try later |
@@ -636,7 +623,7 @@ Handle every code your screens can hit:
 
 ### Step 8: Respect the user's lifecycle
 
-- **App sign-out:** store logins live in the phone's WebView and survive an app sign-out, so the next person on that phone could reach the first person's store account. Call `signOutOfAllStores` whenever the current user goes away or changes: on sign-out, on account deletion, and on a direct account switch. On React Native that is the `StoreSignOut` watcher in Step 4, because `useMealio` cannot be called above the provider. Do not let a failure block sign-out.
+- **App sign-out:** store logins live in the phone's WebView and survive an app sign-out. Setting the user in Step 4 signs the last user out of the stores on sign-out, on account deletion and on a direct account switch. Check every path where the app's user changes reaches it, including launch with a saved session.
 - **Other WebViews:** on React Native and Android, `signOutOfAllStores` clears every WebView cookie in the app. On Flutter, `signOutOfStore` and `signOutOfAllStores` do too. Only iOS limits it to store domains. If the app uses WebViews for its own login, flag this in the plan.
 - **Account deletion:** in the server's deletion path, call `DELETE /api/v1/users/{externalUserId}` with the secret key, using `encodeURIComponent` on the id. It removes everything Mealio holds for the user. Do it before the app's own record is gone, and treat a failure the way the app treats other data it must delete.
 - **Privacy policy:** tell the developer it should mention that recipe and product choices go to Mealio.
@@ -652,10 +639,10 @@ Add tests that fit the repo:
 
 - The recipe mapper, including a stable id, missing fields, an http photo, and a repeated recipe in a plan.
 - The session endpoint: it refuses a logged-out request, and it uses the verified user id.
-- Store sign-out running on sign-out, on account deletion and on a direct user switch.
+- The user passed to the SDK following sign-in, sign-out, account deletion and a direct user switch.
 - `mealio-epoch` surviving whatever the app does to storage on sign-out.
 
-In unit tests, mock the SDK with a factory: `jest.mock('@mealio/react-native-cart', () => ({ ... }))`. It does not load under the usual jest presets, so an automatic mock fails too. Include every runtime export the app uses, such as `MAX_RECIPES`. Existing tests of a screen with the button need this, and may also need the app's auth provider and a storage mock, because the screen now reads the user.
+In React Native unit tests, use the SDK's ready mock: `jest.mock('@mealio/react-native-cart', () => require('@mealio/react-native-cart/jest'))`. The real package does not load under the usual jest presets. Existing tests of a screen with the button need this.
 
 Check for leaks, and confirm nothing comes back from app code or tracked files:
 

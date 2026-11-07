@@ -42,12 +42,15 @@ public final class Allowlist {
         "payment",
         "billing",
         "wallet",
-        "place-?order",
-        "submit-?order",
-        "order-?confirm",
+        "place[-_]?order",
+        "submit[-_]?order",
+        "order[-_]?confirm",
         "gift-?card",
         "/account/(delete|close|security|password)",
         "/addresses?/(add|edit|delete|new)",
+        "/orders?/(submit|place)(/|\\?|$)",
+        "/cart/confirm",
+        "/purchase(/|\\?|$)",
     ]
 
     /// Hosts every store's login may return to.
@@ -131,8 +134,18 @@ public final class Allowlist {
         try! NSRegularExpression(pattern: #""operationName"\s*:\s*"([^"]*)""#, options: [])
     }()
 
-    private static let mutationRegex: NSRegularExpression = {
-        try! NSRegularExpression(pattern: #"\bmutation\s+([A-Za-z_][A-Za-z0-9_]*)"#, options: [])
+    /// Strings, block strings and comments, which hold no GraphQL names.
+    private static let gqlNoiseRegex: NSRegularExpression = {
+        // Starts with a group: a raw string may not open with three quotes.
+        try! NSRegularExpression(pattern: #"(?:"""[\s\S]*?""")|"(?:[^"\\]|\\.)*"|#[^\n\r]*"#, options: [])
+    }()
+
+    private static let gqlTokenRegex: NSRegularExpression = {
+        try! NSRegularExpression(pattern: #"[A-Za-z_][A-Za-z0-9_]*|[{}()]"#, options: [])
+    }()
+
+    private static let formFieldRegex: NSRegularExpression = {
+        try! NSRegularExpression(pattern: #"(?:^|&)(operationName|query)=([^&]*)"#, options: [])
     }()
 
     /// A URL split into scheme, host and path + query, or nil if it is not one
@@ -195,33 +208,69 @@ public final class Allowlist {
         }
     }
 
+    /// Every name a GraphQL document's mutations use: the operation's name and
+    /// the fields it selects at any depth, aliases included, plus the fields of
+    /// its fragments. Arguments and `on Type` conditions are not fields. Empty
+    /// when the document has no mutation, so a query may read a field called
+    /// paymentMethods. Mirrors `mutationNames` in allowlist.ts.
+    public static func mutationNames(_ doc: String) -> [String] {
+        let dn = doc as NSString
+        let text = gqlNoiseRegex.stringByReplacingMatches(in: doc, options: [], range: NSRange(location: 0, length: dn.length), withTemplate: " ")
+        let tn = text as NSString
+        let tokens = gqlTokenRegex.matches(in: text, options: [], range: NSRange(location: 0, length: tn.length)).map { tn.substring(with: $0.range) }
+        var names: [String] = []
+        var braces = 0, parens = 0
+        var kind = ""
+        var mutation = false, afterOn = false
+        for t in tokens {
+            if t == "(" { parens += 1 }
+            else if t == ")" { parens = max(0, parens - 1) }
+            else if parens > 0 { continue }
+            else if t == "{" { braces += 1 }
+            else if t == "}" { braces = max(0, braces - 1); if braces == 0 { kind = "" } }
+            else if braces == 0 && kind.isEmpty && ["mutation", "query", "subscription", "fragment"].contains(t) {
+                kind = t
+                if t == "mutation" { mutation = true }
+            } else if afterOn { afterOn = false }
+            else if t == "on" { afterOn = true }
+            else if kind == "mutation" || kind == "fragment" { names.append(t) }
+        }
+        return mutation ? names : []
+    }
+
     /// Does a request body name a blocked operation? Reads `operationName` the
     /// way the server will (after JSON parsing, so `\u004f` escapes do not hide
-    /// it), for a single request or a batch, and the names of any mutations in
-    /// `query`. The guard script applies the same rule to requests a page script
-    /// makes; this applies it to the runner's own `fetch` op, which never passes
-    /// through the page.
+    /// it), for a single request or a batch, or form-encoded, and every name in
+    /// any mutation (see `mutationNames`). A persisted query that sends only an
+    /// innocent name and a hash cannot be read here; the signature on the
+    /// envelope covers it. The guard script applies the same rule to requests a
+    /// page script makes; this applies it to the runner's own `fetch` op, which
+    /// never passes through the page.
     public static func bodyBlocked(_ body: String?) -> Bool {
         guard let body = body, !body.isEmpty else { return false }
         var names: [String] = []
+        var docs: [String] = []
         let ns = body as NSString
         for m in operationNameRegex.matches(in: body, options: [], range: NSRange(location: 0, length: ns.length)) {
             names.append(ns.substring(with: m.range(at: 1)))
         }
         if let data = body.data(using: .utf8),
-           let j = try? JSONSerialization.jsonObject(with: data, options: []) {
+           let j = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
             let list: [Any] = (j as? [Any]) ?? [j]
             for item in list {
                 guard let o = item as? [String: Any] else { continue }
                 if let n = o["operationName"] as? String { names.append(n) }
-                if let q = o["query"] as? String {
-                    let qs = q as NSString
-                    for m in mutationRegex.matches(in: q, options: [], range: NSRange(location: 0, length: qs.length)) {
-                        names.append(qs.substring(with: m.range(at: 1)))
-                    }
-                }
+                if let q = o["query"] as? String { docs.append(q) }
+            }
+        } else {
+            // Not JSON: form-encoded, or a bare GraphQL document.
+            docs.append(body)
+            for m in formFieldRegex.matches(in: body, options: [], range: NSRange(location: 0, length: ns.length)) {
+                let v = decodePercent(ns.substring(with: m.range(at: 2)).replacingOccurrences(of: "+", with: " "))
+                if ns.substring(with: m.range(at: 1)) == "query" { docs.append(v) } else { names.append(v) }
             }
         }
+        for d in docs { names.append(contentsOf: mutationNames(d)) }
         return names.contains { n in
             blockedOperationRegex.firstMatch(in: n, options: [], range: NSRange(location: 0, length: (n as NSString).length)) != nil
         }

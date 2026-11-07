@@ -1,7 +1,8 @@
 // GUARD_SCRIPT runs in the store page before any server script. It is defense
 // in depth: the signature on every envelope is the primary control. It stops a
 // request that names checkout, payment or an order from leaving the device,
-// and caps the page at 240 requests a minute.
+// whatever form the body takes (string, Request, Blob, form data), and caps the
+// page at 240 requests a minute.
 //
 // It must stay plain ES5 with no dependencies, because it is injected as text
 // into WebViews on four platforms. The text below is byte-for-byte the text
@@ -32,9 +33,29 @@ const String _guardTemplate = r'''(function(){
     var p = pathOf(u);
     return BLOCK.test(p) || BLOCK.test(decoded(p));
   }
+  function mutationNames(doc) {
+    var text = doc.replace(/"""[\s\S]*?"""|"(?:[^"\\]|\\.)*"|#[^\n\r]*/g, ' ');
+    var tokens = text.match(/[A-Za-z_][A-Za-z0-9_]*|[{}()]/g) || [];
+    var names = [], braces = 0, parens = 0, kind = '', mutation = false, afterOn = false, i, t;
+    for (i = 0; i < tokens.length; i++) {
+      t = tokens[i];
+      if (t === '(') parens++;
+      else if (t === ')') parens = Math.max(0, parens - 1);
+      else if (parens > 0) continue;
+      else if (t === '{') braces++;
+      else if (t === '}') { braces = Math.max(0, braces - 1); if (braces === 0) kind = ''; }
+      else if (braces === 0 && !kind && (t === 'mutation' || t === 'query' || t === 'subscription' || t === 'fragment')) {
+        kind = t;
+        if (t === 'mutation') mutation = true;
+      } else if (afterOn) afterOn = false;
+      else if (t === 'on') afterOn = true;
+      else if (kind === 'mutation' || kind === 'fragment') names.push(t);
+    }
+    return mutation ? names : [];
+  }
   function bodyBlocked(b) {
-    if (typeof b !== 'string') return false;
-    var names = [], re = /"operationName"\s*:\s*"([^"]*)"/g, m, i;
+    if (typeof b !== 'string' || !b) return false;
+    var names = [], docs = [], re = /"operationName"\s*:\s*"([^"]*)"/g, m, i;
     while ((m = re.exec(b))) names.push(m[1]);
     try {
       var j = JSON.parse(b);
@@ -43,14 +64,49 @@ const String _guardTemplate = r'''(function(){
         var o = list[i];
         if (!o || typeof o !== 'object') continue;
         if (typeof o.operationName === 'string') names.push(o.operationName);
-        if (typeof o.query === 'string') {
-          var q = /\bmutation\s+([A-Za-z_][A-Za-z0-9_]*)/g, k;
-          while ((k = q.exec(o.query))) names.push(k[1]);
-        }
+        if (typeof o.query === 'string') docs.push(o.query);
       }
-    } catch (e) {}
+    } catch (e) {
+      docs.push(b);
+      var form = /(?:^|&)(operationName|query)=([^&]*)/g;
+      while ((m = form.exec(b))) {
+        var v = decoded(m[2].replace(/\+/g, ' '));
+        if (m[1] === 'query') docs.push(v); else names.push(v);
+      }
+    }
+    for (i = 0; i < docs.length; i++) names = names.concat(mutationNames(docs[i]));
     for (i = 0; i < names.length; i++) if (OPS.test(names[i])) return true;
     return false;
+  }
+  function isA(v, name) {
+    return typeof window[name] === 'function' && v instanceof window[name];
+  }
+  function fromForm(f) {
+    var q = [], keys = ['operationName', 'query'], i, k;
+    for (i = 0; i < keys.length; i++) { k = f.get(keys[i]); if (typeof k === 'string') q.push(keys[i] + '=' + encodeURIComponent(k)); }
+    return q.join('&');
+  }
+  // A body as text: a string now, or a promise for one when it has to be read.
+  function bodyText(b) {
+    if (b === null || b === undefined || typeof b === 'string') return b;
+    if (isA(b, 'URLSearchParams')) return String(b);
+    if (isA(b, 'FormData')) return fromForm(b);
+    if (isA(b, 'Blob')) return b.text();
+    if (isA(b, 'ArrayBuffer') || (window.ArrayBuffer && window.ArrayBuffer.isView && window.ArrayBuffer.isView(b))) return new window.Blob([b]).text();
+    return null;
+  }
+  // What a fetch call sends. init.body wins over a Request's own, as in fetch.
+  function fetchBody(input, init) {
+    if (init && init.body !== undefined && init.body !== null) return bodyText(init.body);
+    if (!input || typeof input !== 'object') return null;
+    if (typeof input.body === 'string') return input.body;
+    if (typeof input.clone !== 'function' || /^(GET|HEAD)$/i.test(input.method || 'GET')) return null;
+    return input.clone().text();
+  }
+  // Text that cannot be read goes through: fetch itself will fail on it.
+  function settled(text, go) {
+    if (!text || typeof text.then !== 'function') return go(text);
+    return text.then(go, function () { return go(null); });
   }
   function overRate() {
     var now = Date.now();
@@ -67,11 +123,24 @@ const String _guardTemplate = r'''(function(){
   if (f) {
     window.fetch = function (input, init) {
       var url = (input && typeof input === 'object' && input.url) ? input.url : input;
-      var body = init && init.body;
+      var self = this, args = arguments;
       if (pathBlocked(url)) return Promise.reject(refuse('blocked_path'));
-      if (bodyBlocked(body)) return Promise.reject(refuse('blocked_operation'));
-      if (overRate()) return Promise.reject(refuse('rate'));
-      return f.apply(this, arguments);
+      return settled(fetchBody(input, init), function (body) {
+        if (bodyBlocked(body)) return Promise.reject(refuse('blocked_operation'));
+        if (overRate()) return Promise.reject(refuse('rate'));
+        return f.apply(self, args);
+      });
+    };
+  }
+  var nav = window.navigator, beacon = nav && nav.sendBeacon;
+  if (beacon) {
+    // A beacon cannot wait for a Blob to be read, so only text bodies are allowed.
+    nav.sendBeacon = function (url, data) {
+      if (pathBlocked(url)) { refuse('blocked_path'); return false; }
+      var text = data == null ? '' : bodyText(data);
+      if (text && typeof text.then === 'function') { refuse('blocked_operation'); return false; }
+      if (bodyBlocked(text)) { refuse('blocked_operation'); return false; }
+      return beacon.apply(nav, arguments);
     };
   }
   var X = window.XMLHttpRequest;
@@ -79,10 +148,16 @@ const String _guardTemplate = r'''(function(){
     var open = X.prototype.open, send = X.prototype.send;
     X.prototype.open = function (m, u) { this.__mealioUrl = u; return open.apply(this, arguments); };
     X.prototype.send = function (b) {
+      var self = this, args = arguments, text = bodyText(b);
       if (pathBlocked(this.__mealioUrl)) throw refuse('blocked_path');
-      if (bodyBlocked(b)) throw refuse('blocked_operation');
-      if (overRate()) throw refuse('rate');
-      return send.apply(this, arguments);
+      function go(body) {
+        if (bodyBlocked(body)) throw refuse('blocked_operation');
+        if (overRate()) throw refuse('rate');
+        return send.apply(self, args);
+      }
+      if (!text || typeof text.then !== 'function') return go(text);
+      // send() cannot wait, so a Blob is read first and sent after. A refused one never goes.
+      text.then(go, function () { return send.apply(self, args); }).then(null, function () { try { self.abort(); } catch (e) {} });
     };
   }
 })(); true;''';
