@@ -1,8 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import vm from 'node:vm';
 import vectors from '../../../protocol/test-vectors.json';
+import sharedStrings from '../../../protocol/strings.json';
 import {
-  Allowlist, GUARD_SCRIPT, Runner, matches, bodyBlocked, parseUrl, openEnvelope, checkInstructions, EnvelopeError, MealioClient, CartSession, addedPrice,
+  Allowlist, GUARD_SCRIPT, Runner, matches, bodyBlocked, parseUrl, openEnvelope, checkInstructions, EnvelopeError, MealioClient, CartSession, addedPrice, DEFAULT_STRINGS, fillText, textTools,
   type AddResult, type Host, type Envelope, type Matcher,
 } from '../src';
 
@@ -606,5 +607,28 @@ describe('store locations', () => {
   it('a cart with no store chosen fails with location_required', async () => {
     const { c } = client(() => ({ status: 409, json: { error: { code: 'location_required', message: 'Choose' } } }));
     await expect(c.prepareCart({ store: 'kroger', recipe: { id: 'r', ingredients: [{ name: 'garlic' }] } })).rejects.toMatchObject({ code: 'location_required' });
+  });
+});
+
+describe('strings', () => {
+  it('matches the shared table', () => { expect(DEFAULT_STRINGS).toEqual(sharedStrings); });
+  it('fills placeholders and leaves unknown ones showing', () => {
+    expect(fillText('Your {store} list', { store: 'H-E-B' })).toBe('Your H-E-B list');
+    expect(fillText('Your {stroe} list', { store: 'H-E-B' })).toBe('Your {stroe} list');
+  });
+  it('picks singular or plural', () => {
+    const { plural } = textTools();
+    expect(plural('addItems', 1, { store: 'ALDI' })).toBe('Add 1 item to ALDI');
+    expect(plural('addItems', 3, { store: 'ALDI' })).toBe('Add 3 items to ALDI');
+  });
+  it('a partner override wins, and the rest stay', () => {
+    const { tr } = textTools({ done: 'Listo' });
+    expect(tr('done')).toBe('Listo');
+    expect(tr('total')).toBe('Total');
+  });
+  it('every plural has both forms', () => {
+    for (const k of Object.keys(DEFAULT_STRINGS)) {
+      if (k.endsWith('_one')) expect(DEFAULT_STRINGS).toHaveProperty(k.replace(/_one$/, '_other'));
+    }
   });
 });
