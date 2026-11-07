@@ -1,5 +1,8 @@
 ## Unreleased
 
+- `stores()` sends the publishable key, so it lists only the stores your dashboard allows.
+- A `store` your app does not offer now shows the store picker.
+
 - Sheet events. `MealioCart.configure`, `MealioScope` and `MealioThemeScope`
   take `onEvent`, which reports every step of the sheet as a `MealioEvent`:
   `sheet_opened`, `store_picked`, `location_asked`, `signin_shown`,

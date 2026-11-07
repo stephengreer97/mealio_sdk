@@ -416,5 +416,6 @@ then switching the server's `kid`.
 | `session_expired` | The SDK session token expired; get a new one from your server |
 | `network` | Could not reach Mealio |
 | `unsupported` | An instruction `op` this SDK does not know |
+| `store_not_allowed` | The app's dashboard limit leaves out that store. The drop-in shows the picker |
 | `location_required` | A Kroger family store with no store chosen yet. The drop-in asks the user |
 | `bad_weight` | A selection's `weightLb` was not a number above 0 and at most 20 |

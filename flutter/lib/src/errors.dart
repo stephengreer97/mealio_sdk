@@ -13,6 +13,7 @@ abstract final class MealioErrorCode {
 
   /// No store was given and the user has no default store yet.
   static const String storeRequired = 'store_required';
+  static const String storeNotAllowed = 'store_not_allowed';
 
   /// A Kroger family store has no saved location for this user. Raised before
   /// any sign-in. `MealioCart.setStore` saves one.

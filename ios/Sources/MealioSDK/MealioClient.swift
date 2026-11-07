@@ -45,6 +45,7 @@ public struct MealioError: Error, LocalizedError, Equatable, CustomStringConvert
         public static let server = "server"
         /// No store was given and the user has no default store yet: let them pick one.
         public static let storeRequired = "store_required"
+        public static let storeNotAllowed = "store_not_allowed"
         /// A Kroger family store has no saved location for the user: let them
         /// choose one with `storeLocations` and `setStore`. Raised before any sign-in.
         public static let locationRequired = "location_required"
@@ -184,13 +185,14 @@ public final class MealioClient {
          config.epochProvider())
     }
 
-    /// Stores the SDK supports right now. Public: no session token is sent.
+    /// The stores this app offers right now. No session token is sent.
     public func stores() async throws -> [StoreInfo] {
         guard let url = URL(string: base + "/api/v1/stores") else {
             throw MealioError(code: MealioError.Code.network, message: "Could not reach Mealio")
         }
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
+        req.setValue(config.publishableKey, forHTTPHeaderField: "X-Mealio-Publishable-Key")
         let data: Data
         do {
             let (d, _) = try await config.urlSession.data(for: req)

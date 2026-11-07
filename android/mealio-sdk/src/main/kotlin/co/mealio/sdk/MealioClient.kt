@@ -169,10 +169,10 @@ class MealioClient @JvmOverloads constructor(
     /** The allowlist in force, including hosts a signed widening added. */
     val allowlist: Allowlist get() = runner.allowlist
 
-    /** Stores the SDK supports right now. Public, no session needed. Throws MealioException "network". */
+    /** The stores this app offers right now. No session needed. Throws MealioException "network". */
     suspend fun stores(): List<StoreInfo> {
         val res = try {
-            transport.get("$base/api/v1/stores", mapOf("Accept" to "application/json"))
+            transport.get("$base/api/v1/stores", mapOf("Accept" to "application/json", "X-Mealio-Publishable-Key" to config.publishableKey))
         } catch (e: CancellationException) {
             throw e
         } catch (e: IOException) {

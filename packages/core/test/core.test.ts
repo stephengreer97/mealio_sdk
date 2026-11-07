@@ -662,3 +662,13 @@ describe('events', () => {
     expect(() => safeListener()({ type: 'sheet_opened', recipes: 1 })).not.toThrow();
   });
 });
+
+describe('store limits', () => {
+  it('asks for the stores this app offers', async () => {
+    let headers: any = null;
+    const fetchImpl = (async (_url: string, init: any) => { headers = init?.headers; return new Response(JSON.stringify({ stores: [] })); }) as unknown as typeof fetch;
+    const c = new MealioClient({ publishableKey: 'pk_x', getSessionToken: async () => 't', platform: 'web-test', sdkVersion: '0', baseUrl: 'https://mealio.test', fetchImpl, keys: KEYS }, fakeHost());
+    await c.stores();
+    expect(headers['x-mealio-publishable-key']).toBe('pk_x');
+  });
+});

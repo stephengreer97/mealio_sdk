@@ -127,10 +127,10 @@ class MealioClient {
   /// The allowlist in force, after any widening.
   Allowlist get allowlist => _runner.allowlist;
 
-  /// Stores the SDK supports right now. Public, no session needed.
+  /// The stores this app offers right now. No session needed.
   Future<List<StoreInfo>> stores() async {
     try {
-      final res = await _http.get(Uri.parse('$_base/api/v1/stores'));
+      final res = await _http.get(Uri.parse('$_base/api/v1/stores'), headers: <String, String>{'X-Mealio-Publishable-Key': _cfg.publishableKey});
       final Object? j = jsonDecode(utf8.decode(res.bodyBytes));
       final Object? list = j is Map ? j['stores'] : null;
       return list is List ? list.map(StoreInfo.fromJson).toList() : <StoreInfo>[];
