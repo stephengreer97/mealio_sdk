@@ -60,7 +60,7 @@ dependencyResolutionManagement {
 
 // app/build.gradle.kts
 dependencies {
-    implementation("co.mealio:mealio-sdk-compose:0.5.0") // pulls in mealio-sdk
+    implementation("co.mealio:mealio-sdk-compose:0.5.1") // pulls in mealio-sdk
 }
 ```
 

@@ -1,3 +1,10 @@
+## 0.5.1
+
+- Fixed: signing out of the stores now ends the Mealio session too. Before, a
+  second user on the same phone could reuse the first user's session for up to
+  15 minutes.
+- New: `MealioCart.resetSession()`, for when the signed-in user changes.
+
 ## 0.5.0
 
 - The sheet shows a clear message for the monthly cart cap and per-user cart limits.
