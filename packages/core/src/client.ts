@@ -349,7 +349,7 @@ export class CartSession {
 
   constructor(private client: MealioClient, public readonly cart: PreparedCart) {
     for (const it of this.items) {
-      if (it.selectedId) this.picks.set(it.key, { productId: it.selectedId, preferenceId: it.rememberedPreferenceId ?? null });
+      if (it.selectedId && !it.startUnchecked) this.picks.set(it.key, { productId: it.selectedId, preferenceId: it.rememberedPreferenceId ?? null });
     }
   }
 
