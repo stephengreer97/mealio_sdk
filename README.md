@@ -33,6 +33,19 @@ back what the store answered. See [PROTOCOL.md](PROTOCOL.md).
 
 Use of the SDK is subject to the [Mealio Cart SDK License](LICENSE).
 
+## Integrate with an AI agent
+
+[`skills/mealio-integrate/SKILL.md`](skills/mealio-integrate/SKILL.md) walks any
+coding agent through adding Mealio to an app: it studies the app, asks a few
+design questions, writes a plan, then builds it. See
+https://developers.mealio.co/docs/skill.
+
+When the public API changes, update the skill too. `node scripts/check-skill.mjs`
+fails if the skill names something the SDK lacks, or the SDK offers something the
+skill does not teach. The site serves a copy: run
+`scripts/sync-developer-skill.sh` in mealio_central after editing it. A release
+fails if the two differ.
+
 ## Releasing
 
 Bump every version together (`node scripts/check-versions.mjs` must pass),

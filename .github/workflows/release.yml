@@ -34,6 +34,8 @@ jobs:
         with:
           node-version: 20
       - run: node scripts/check-versions.mjs "${GITHUB_REF_NAME}"
+      # Partners download the skill from the site, so that copy has to be current.
+      - run: node scripts/check-skill.mjs --hosted
 
   tests:
     needs: versions
