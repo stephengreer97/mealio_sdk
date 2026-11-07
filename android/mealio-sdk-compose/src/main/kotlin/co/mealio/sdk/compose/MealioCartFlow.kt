@@ -1659,7 +1659,10 @@ private fun ColumnScope.StorePicker(
 @Composable
 private fun ColumnScope.ErrorView(t: MealioTheme, error: FlowError?, onRetry: () -> Unit, onClose: () -> Unit) {
     val ui = LocalMealioUi.current
-    val msg = if (error?.code == "login_cancelled") ui.tr("signInClosed") else error?.message ?: ui.tr("somethingWrongSentence")
+    val msg = if (error?.code == "login_cancelled") ui.tr("signInClosed")
+    else if (error?.code == "cart_cap_reached") ui.tr("capReached")
+    else if (error?.code == "too_many_carts") ui.tr("tooManyCarts")
+    else error?.message ?: ui.tr("somethingWrongSentence")
     Column(Modifier.weight(1f).fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(msg, style = t.ts(15))
         Spacer(Modifier.weight(1f))

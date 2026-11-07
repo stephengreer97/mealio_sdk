@@ -834,7 +834,10 @@ export function StorePicker({ t, stores, current, onPick, onBack }: {
 function ErrorView({ t, error, onRetry, onClose }: { t: MealioTheme; error: { code: string; message: string } | null; onRetry: () => void; onClose: () => void }) {
   const s = styles(t);
   const { ui } = useMealio();
-  const msg = error?.code === 'login_cancelled' ? ui.tr('signInClosed') : error?.message || ui.tr('somethingWrongSentence');
+  const msg = error?.code === 'login_cancelled' ? ui.tr('signInClosed')
+    : error?.code === 'cart_cap_reached' ? ui.tr('capReached')
+      : error?.code === 'too_many_carts' ? ui.tr('tooManyCarts')
+        : error?.message || ui.tr('somethingWrongSentence');
   return (
     <View style={[s.body, s.flex]}>
       <Text style={s.stepText}>{msg}</Text>

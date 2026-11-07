@@ -1,5 +1,7 @@
 ## Unreleased
 
+- The sheet shows a clear message for the monthly cart cap and per-user cart limits.
+  The words are the `capReached` and `tooManyCarts` strings.
 - `stores()` sends the publishable key, so it lists only the stores your dashboard allows.
 - A `store` your app does not offer now shows the store picker.
 

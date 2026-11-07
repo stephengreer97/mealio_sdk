@@ -46,6 +46,8 @@ public struct MealioError: Error, LocalizedError, Equatable, CustomStringConvert
         /// No store was given and the user has no default store yet: let them pick one.
         public static let storeRequired = "store_required"
         public static let storeNotAllowed = "store_not_allowed"
+        public static let cartCapReached = "cart_cap_reached"
+        public static let tooManyCarts = "too_many_carts"
         /// A Kroger family store has no saved location for the user: let them
         /// choose one with `storeLocations` and `setStore`. Raised before any sign-in.
         public static let locationRequired = "location_required"

@@ -1989,6 +1989,8 @@ struct MealioErrorView: View {
 
     private var message: String {
         if error?.code == MealioError.Code.loginCancelled { return ui.tr(.signInClosed) }
+        if error?.code == MealioError.Code.cartCapReached { return ui.tr(.capReached) }
+        if error?.code == MealioError.Code.tooManyCarts { return ui.tr(.tooManyCarts) }
         if let m = error?.message, !m.isEmpty { return m }
         return ui.tr(.somethingWrongSentence)
     }
