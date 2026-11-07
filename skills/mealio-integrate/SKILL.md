@@ -375,7 +375,7 @@ MealioCart.configure(
 )
 ```
 
-Call `MealioCart.setUser(user?.id)` wherever the app's signed-in user changes, including on launch, sign-out and account deletion. Pass `nil` when nobody is signed in.
+Call `MealioCart.setUser(user?.id)` wherever the app's signed-in user changes, including on launch, sign-out and account deletion. Pass `nil` when nobody is signed in. Set `MealioCart.onSignInRequired` to open the app's sign-in.
 
 **Android.** Configure in `Application.onCreate`. Wrap Compose content in the theme provider.
 
@@ -392,7 +392,7 @@ MealioThemeProvider(
 ) { AppContent() }
 ```
 
-Call `MealioCart.setUser(user?.id)` wherever the app's signed-in user changes, including on launch, sign-out and account deletion. Pass `null` when nobody is signed in.
+Call `MealioCart.setUser(user?.id)` wherever the app's signed-in user changes, including on launch, sign-out and account deletion. Pass `null` when nobody is signed in. Set `MealioCart.onSignInRequired` to open the app's sign-in.
 
 **Flutter.** `MealioScope` hosts the store WebView, so it must sit above every page. It needs the navigator key. With a router package, pass that router's root navigator key.
 
@@ -413,7 +413,7 @@ MaterialApp(
 );
 ```
 
-Call `MealioCart.instance.setUser(user?.id)` wherever the app's signed-in user changes, including on launch, sign-out and account deletion. Pass `null` when nobody is signed in.
+Call `MealioCart.instance.setUser(user?.id)` wherever the app's signed-in user changes, including on launch, sign-out and account deletion. Pass `null` when nobody is signed in. Pass `onSignInRequired` to `MealioCart.configure` to open the app's sign-in.
 
 **Map the theme.** `MealioTheme` has `accent`, `onAccent`, `background`, `surface`, `text`, `muted`, `border`, `radius`, `fontFamily` (`fontName` on iOS), `warnBackground` and `warnText`. Set the ones the app has tokens for. Keep `muted` at 4.5:1 contrast against `background`. If the app has dark mode, set `darkTheme` and `colorScheme` to `auto`. The sheet is light unless you say otherwise. Only use a font the app has actually loaded.
 
