@@ -25,7 +25,7 @@ import kotlinx.coroutines.launch
  * ```
  */
 object MealioCart {
-    const val SDK_VERSION = "0.5.0"
+    const val SDK_VERSION = "0.6.0"
 
     private class State(val client: MealioClient, val host: WebViewHost, val sessions: StoreSessions)
 

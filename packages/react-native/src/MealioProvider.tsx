@@ -18,7 +18,7 @@ import {
 import { money, resolveTheme, type MealioColorScheme, type MealioTheme } from './theme';
 import { MealioStoreSettings } from './MealioStoreSettings';
 
-export const SDK_VERSION = '0.5.0';
+export const SDK_VERSION = '0.6.0';
 
 declare const __DEV__: boolean | undefined;
 

@@ -26,9 +26,9 @@ back what the store answered. See [PROTOCOL.md](PROTOCOL.md).
 | Platform | Install |
 | --- | --- |
 | React Native | `npm install @mealio/react-native-cart react-native-webview` |
-| iOS (Swift Package Manager) | `.package(url: "https://github.com/stephengreer97/mealio_sdk.git", from: "0.5.0")` |
-| iOS (CocoaPods) | `pod 'MealioSDK', :git => 'https://github.com/stephengreer97/mealio_sdk.git', :tag => 'v0.5.0'` (installed from GitHub: CocoaPods Trunk stops taking releases on 2026-12-02) |
-| Android | `implementation("co.mealio:mealio-sdk:0.5.0")`, plus `co.mealio:mealio-sdk-compose:0.5.0` for the Compose sheet |
+| iOS (Swift Package Manager) | `.package(url: "https://github.com/stephengreer97/mealio_sdk.git", from: "0.6.0")` |
+| iOS (CocoaPods) | `pod 'MealioSDK', :git => 'https://github.com/stephengreer97/mealio_sdk.git', :tag => 'v0.6.0'` (installed from GitHub: CocoaPods Trunk stops taking releases on 2026-12-02) |
+| Android | `implementation("co.mealio:mealio-sdk:0.6.0")`, plus `co.mealio:mealio-sdk-compose:0.6.0` for the Compose sheet |
 | Flutter | `flutter pub add mealio_sdk` |
 
 Use of the SDK is subject to the [Mealio Cart SDK License](LICENSE).
