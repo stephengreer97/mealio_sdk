@@ -500,6 +500,8 @@ public struct Product: Codable, Equatable, Identifiable {
     /// Why this option sits where it does: "picked_before", "popular" or
     /// "partner_pick". Ranking only, never an automatic pick.
     public let badge: String?
+    /// The words for the badge, when it has any: "Crowd favorite for Tacos".
+    public let badgeLabel: String?
     /// Variants the user must pick one of before this product can be added.
     /// Pass the chosen id as `preferenceId`.
     public let preferences: [ProductPreference]?
@@ -520,7 +522,7 @@ public struct Product: Codable, Equatable, Identifiable {
     public let pricePerLb: Double?
 
     public init(id: String, name: String, price: String? = nil, imageUrl: String? = nil, size: String? = nil,
-                outOfStock: Bool? = nil, badge: String? = nil, preferences: [ProductPreference]? = nil,
+                outOfStock: Bool? = nil, badge: String? = nil, badgeLabel: String? = nil, preferences: [ProductPreference]? = nil,
                 unitPrice: Double? = nil, estimated: Bool = false, maxQuantity: Int? = nil,
                 soldByWeight: Bool? = nil, weightOptions: [Double]? = nil, pricePerLb: Double? = nil) {
         self.id = id
@@ -530,6 +532,7 @@ public struct Product: Codable, Equatable, Identifiable {
         self.size = size
         self.outOfStock = outOfStock
         self.badge = badge
+        self.badgeLabel = badgeLabel
         self.preferences = preferences
         self.unitPrice = unitPrice
         self.estimated = estimated
@@ -540,7 +543,7 @@ public struct Product: Codable, Equatable, Identifiable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, price, imageUrl, size, outOfStock, badge, preferences, unitPrice, estimated
+        case id, name, price, imageUrl, size, outOfStock, badge, badgeLabel, preferences, unitPrice, estimated
         case maxQuantity, soldByWeight, weightOptions, pricePerLb
     }
 
@@ -553,6 +556,7 @@ public struct Product: Codable, Equatable, Identifiable {
         size = try c.decodeIfPresent(String.self, forKey: .size)
         outOfStock = try c.decodeIfPresent(Bool.self, forKey: .outOfStock)
         badge = try c.decodeIfPresent(String.self, forKey: .badge)
+        badgeLabel = try c.decodeIfPresent(String.self, forKey: .badgeLabel)
         preferences = try c.decodeIfPresent([ProductPreference].self, forKey: .preferences)
         unitPrice = try c.decodeIfPresent(Double.self, forKey: .unitPrice)
         estimated = try c.decodeIfPresent(Bool.self, forKey: .estimated) ?? false

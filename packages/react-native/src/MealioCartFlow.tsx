@@ -411,7 +411,7 @@ function ItemRow({ t, cart, item, storeName, open, onToggleOpen, onChange, disab
                   <Thumb t={t} product={o} big />
                   <Text style={[s.optName, o.outOfStock && s.muted]} numberOfLines={3}>{o.name}</Text>
                   <Text style={s.optPrice}>{o.outOfStock ? 'Out of stock' : priceText(o)}</Text>
-                  {usual ? <Text style={[s.tag, { color: t.accent }]}>Your usual</Text> : o.badge === 'popular' ? <Text style={s.tag}>Popular</Text> : null}
+                  {usual ? <Text style={[s.tag, { color: t.accent }]}>Your usual</Text> : o.badge === 'popular' ? <Text style={s.tag}>{o.badgeLabel || 'Crowd favorite'}</Text> : null}
                 </Pressable>
               );
             })}

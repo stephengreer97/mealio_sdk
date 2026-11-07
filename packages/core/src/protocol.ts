@@ -131,6 +131,8 @@ export interface Product {
   outOfStock?: boolean;
   /** Why this option sits where it does. Ranking only, never an automatic pick. */
   badge?: 'picked_before' | 'popular' | 'partner_pick' | null;
+  /** The words for the badge, when it has any: "Crowd favorite for Tacos". `popular` is the Crowd Favorite. */
+  badgeLabel?: string | null;
   /**
    * Variants the user must pick one of before this product can be added
    * (H-E-B: "sliced or shaved?"). Pass the chosen id as Selection.preferenceId.

@@ -519,6 +519,7 @@ class Product {
     this.size,
     this.outOfStock = false,
     this.badge,
+    this.badgeLabel,
     this.preferences = const <ProductPreference>[],
     this.unitPrice,
     this.estimated = false,
@@ -538,6 +539,7 @@ class Product {
       size: _strOrNull(m['size']),
       outOfStock: _bool(m['outOfStock']),
       badge: _strOrNull(m['badge']),
+      badgeLabel: _strOrNull(m['badgeLabel']),
       preferences: _list(m['preferences']).map(ProductPreference.fromJson).toList(),
       unitPrice: m['unitPrice'] is num ? (m['unitPrice']! as num).toDouble() : null,
       estimated: _bool(m['estimated']),
@@ -562,6 +564,9 @@ class Product {
   /// Why this option sits where it does: `picked_before`, `popular` or
   /// `partner_pick`. Ranking only, never an automatic pick.
   final String? badge;
+
+  /// The words for the badge, when it has any: "Crowd favorite for Tacos".
+  final String? badgeLabel;
 
   /// Variants the user must pick one of before this product can be added.
   /// Pass the chosen id as `preferenceId`.
@@ -594,6 +599,7 @@ class Product {
     _put(out, 'size', size);
     out['outOfStock'] = outOfStock;
     _put(out, 'badge', badge);
+    _put(out, 'badgeLabel', badgeLabel);
     if (preferences.isNotEmpty) out['preferences'] = preferences.map((ProductPreference p) => p.toJson()).toList();
     _put(out, 'unitPrice', unitPrice);
     if (estimated) out['estimated'] = true;
