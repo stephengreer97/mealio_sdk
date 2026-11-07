@@ -230,6 +230,14 @@ product. Merged across recipes, the mark holds only if every recipe set it.
 
 `photoUrl` is for the drop-in and the server ignores it.
 
+## Sheet events
+
+The drop-in reports each step to the partner's `onEvent`, and nothing goes to
+Mealio. The names are in `packages/core/src/events.ts`: `sheet_opened`,
+`store_picked`, `location_asked`, `signin_shown`, `list_shown`, `item_unchecked`,
+`item_checked`, `add_started`, `cart_added`, `error` and `sheet_closed`, which
+carries the step the user left from.
+
 ## Warm-up
 
 `POST /api/v1/sdk/warm` with `{ "store"?: string }` runs the login check ahead

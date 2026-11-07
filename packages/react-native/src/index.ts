@@ -12,5 +12,5 @@ export { DEFAULT_THEME, DEFAULT_DARK_THEME } from './theme';
 export type { MealioTheme, MealioColorScheme } from './theme';
 export { CartSession, MealioError, MAX_RECIPES, DEFAULT_STRINGS } from '@mealio/sdk-core';
 export type {
-  AddResult, CartItem, ItemRecipe, ItemStatus, PreparedCart, PrepareCartInput, Product, Recipe, RecipeIngredient, MealioStrings, Selection, Step, StoreInfo, StoreLocation, StorePreferences,
+  AddResult, CartItem, ItemRecipe, ItemStatus, PreparedCart, PrepareCartInput, Product, Recipe, RecipeIngredient, MealioEvent, MealioEventListener, MealioSheetStep, MealioStrings, Selection, Step, StoreInfo, StoreLocation, StorePreferences,
 } from '@mealio/sdk-core';
