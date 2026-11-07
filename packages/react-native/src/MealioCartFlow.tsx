@@ -9,7 +9,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator, Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View,
 } from 'react-native';
-import type { AddedItem, AddResult, CartItem, CartSession, MealioError, Product, Recipe, Step, StoreInfo, StoreLocation } from '@mealio/sdk-core';
+import type { AddedItem, AddResult, CartItem, CartSession, MealioError, Product, MealioSheetStep, Recipe, Step, StoreInfo, StoreLocation } from '@mealio/sdk-core';
 import { useMealio, useMealioInternal, type MealioUi } from './MealioProvider';
 import type { MealioTheme } from './theme';
 
@@ -76,6 +76,10 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
 
+  const stepNow = (): MealioSheetStep => (internal.login ? 'signin' : phase === 'adding' ? 'adding' : phase);
+  const signingIn = !!internal.login;
+  useEffect(() => { if (visible && signingIn) ui.emit({ type: 'signin_shown', store }); }, [signingIn]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const openStores = useCallback(async (from: Phase) => {
     backTo.current = from;
     setPhase('stores');
@@ -85,6 +89,10 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
   }, [stores, mealio]);
 
   const openLocation = useCallback((from: Phase) => { backTo.current = from; setPhase('location'); }, []);
+  const askLocation = useCallback((storeId: string, from: Phase) => {
+    ui.emit({ type: 'location_asked', store: storeId });
+    openLocation(from);
+  }, [ui, openLocation]);
 
   const start = useCallback(async (storeId: string | null) => {
     const id = ++run.current;
@@ -93,34 +101,45 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
       const c = await mealio.prepareCart({ store: storeId, recipes }, { onStep: (s) => run.current === id && setStep(s) });
       if (run.current !== id) return;
       setStore(c.store); setCart(c); setPhase('list');
+      ui.emit({ type: 'list_shown', store: c.store, items: c.items.length });
     } catch (e: any) {
       if (run.current !== id) return;
       if (e?.code === 'store_required') { openStores('error'); return; }
       if (e?.code === 'location_required') {
         // Which store the user shops at is theirs to say. With no store named
         // there is nothing to look up, so they pick the chain first.
-        if (storeId) { setStore(storeId); openLocation('error'); } else openStores('error');
+        if (storeId) { setStore(storeId); askLocation(storeId, 'error'); } else openStores('error');
         return;
       }
       setError({ code: e?.code || 'error', message: e?.message || ui.tr('somethingWrongSentence') });
       setPhase('error');
+      ui.emit({ type: 'error', code: e?.code || 'error', step: 'loading' });
       props.onError?.(e);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recipes]);
 
-  useEffect(() => { if (visible) start(props.store ?? null); else run.current += 1; }, [visible]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (visible) { ui.emit({ type: 'sheet_opened', recipes: recipes.length }); start(props.store ?? null); } else run.current += 1;
+  }, [visible]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const add = useCallback(async () => {
     if (!cart) return;
+    const id = run.current;
     setPhase('adding');
+    ui.emit({ type: 'add_started', items: cart.estimate().count });
     try {
       const r = await cart.addToCart();
+      // Closed while adding: the sheet has said goodbye, so nothing more is reported.
+      if (run.current !== id) return;
       setResult(r); setPhase('done');
+      ui.emit({ type: 'cart_added', store: r.store, added: r.added.length, failed: r.failed.length });
       props.onAdded?.(r);
     } catch (e: any) {
+      if (run.current !== id) return;
       setError({ code: e?.code || 'error', message: e?.message || ui.tr('couldNotAdd') });
       setPhase('error');
+      ui.emit({ type: 'error', code: e?.code || 'error', step: 'adding' });
       props.onError?.(e);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -128,6 +147,7 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
 
   const close = useCallback(() => {
     run.current += 1;
+    ui.emit({ type: 'sheet_closed', step: stepNow(), added: phase === 'done' && result ? result.added.length : 0 });
     internal.login?.cancel();
     props.onClose(phase === 'done' ? result : null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -151,7 +171,7 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
           ) : phase === 'loading' ? (
             <Loading t={t} step={step} storeName={storeName} count={lineCount} />
           ) : phase === 'stores' ? (
-            <StorePicker t={t} stores={stores} current={store} onPick={(id) => { setStore(id); start(id); }}
+            <StorePicker t={t} stores={stores} current={store} onPick={(id) => { ui.emit({ type: 'store_picked', store: id }); setStore(id); start(id); }}
               onBack={cart && backTo.current === 'list' ? () => setPhase('list') : null} />
           ) : phase === 'location' && store ? (
             <LocationPicker t={t} store={store} storeName={storeName} zip={cart?.cart.location?.zip ?? props.zip ?? null} current={cart?.cart.location?.id ?? null}
@@ -161,7 +181,7 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
                 : { label: ui.tr('differentStore'), onPress: () => openStores('error') }} />
           ) : (phase === 'list' || phase === 'adding') && cart ? (
             <CartList t={t} cart={cart} storeName={storeName} busy={phase === 'adding'} onChange={bump} onAdd={add}
-              onChangeStore={() => openStores('list')} onChangeLocation={() => openLocation('list')} />
+              onChangeStore={() => openStores('list')} onChangeLocation={() => store && askLocation(store, 'list')} />
           ) : phase === 'done' && result && cart ? (
             <Done t={t} cart={cart} result={result} storeName={storeName} onDone={close} message={props.doneMessage}
               action={props.doneAction ? { label: props.doneAction.label, onPress: () => { close(); props.doneAction!.onPress(result); } } : null} />
@@ -357,8 +377,8 @@ function ItemRow({ t, cart, item, storeName, open, onToggleOpen, onChange, disab
 
   const toggle = () => {
     if (disabled) return;
-    if (on) cart.deselect(item.key);
-    else if (item.status === 'remembered' && item.selectedId) cart.select(item.key, item.selectedId, { preferenceId: item.rememberedPreferenceId ?? null });
+    if (on) { cart.deselect(item.key); ui.emit({ type: 'item_unchecked', key: item.key }); }
+    else if (item.status === 'remembered' && item.selectedId) { ui.emit({ type: 'item_checked', key: item.key }); cart.select(item.key, item.selectedId, { preferenceId: item.rememberedPreferenceId ?? null }); }
     else { if (!open) onToggleOpen(); return; }
     onChange();
   };

@@ -370,6 +370,10 @@ struct RecipeApp: App {
   `sheet:`: the drop-in's look and words (see "Theme" above and the sections
   after it). `MealioCart.configure(theme:...)` takes the same six on their own,
   any time. What you leave out stays as it is.
+- `onEvent:` gets every step of the sheet as a `MealioEvent`, for your analytics.
+  `event.type` is its name (`sheet_opened` ... `sheet_closed`, which carries the
+  step the user left from). Nothing is sent to Mealio. It works on its own too:
+  `MealioCart.configure(onEvent: { event in ... })`.
 - `presenter:` returns the view controller to present the store login sheet
   from when no cart flow sheet is open (for example if you call
   `prepareCart` yourself). The default is the key window's top-most view

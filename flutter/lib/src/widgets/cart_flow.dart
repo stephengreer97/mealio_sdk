@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 import '../cart_session.dart';
 import '../client.dart';
 import '../errors.dart';
+import '../events.dart';
 import '../mealio_cart.dart';
 import '../protocol.dart';
 import '../theme.dart';
@@ -213,6 +214,10 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
   String? _store;
   List<StoreInfo>? _stores;
   _Phase _backTo = _Phase.list;
+  bool _closeReported = false;
+
+  /// Set each build, for a sheet closed from `dispose`, which cannot look it up.
+  MealioUi _ui = const MealioUi();
 
   @override
   void initState() {
@@ -225,11 +230,27 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
       _login = h.login.value;
     }
     _store = widget.store;
-    unawaited(_start(_store));
+    // After this build: inherited widgets can't be read in initState, and a
+    // listener may call setState.
+    scheduleMicrotask(() {
+      if (!mounted) return;
+      _emit(MealioSheetOpened(recipes: _recipes.length));
+      if (_login != null) _emit(MealioSigninShown(store: _store));
+      unawaited(_start(_store));
+    });
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of<Object?>(context);
+    if (route is MealioSheetRoute) route.onPop = _onPop;
   }
 
   @override
   void dispose() {
+    // Removed without a pop we could see, for example in a partner's own route.
+    _reportClose(_ui);
     _run += 1;
     final h = _host;
     if (h != null) {
@@ -241,7 +262,42 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
   }
 
   void _onLogin() {
-    if (mounted) setState(() => _login = _host?.login.value);
+    if (!mounted) return;
+    final shown = _login != null;
+    final next = _host?.login.value;
+    setState(() => _login = next);
+    if (!shown && next != null) _emit(MealioSigninShown(store: _store));
+  }
+
+  void _emit(MealioEvent event) => MealioUi.of(context).emit(event);
+
+  MealioSheetStep get _stepNow {
+    if (_login != null) return MealioSheetStep.signin;
+    return switch (_phase) {
+      _Phase.loading => MealioSheetStep.loading,
+      _Phase.list => MealioSheetStep.list,
+      _Phase.adding => MealioSheetStep.adding,
+      _Phase.done => MealioSheetStep.done,
+      _Phase.error => MealioSheetStep.error,
+      _Phase.stores => MealioSheetStep.stores,
+      _Phase.location => MealioSheetStep.location,
+    };
+  }
+
+  /// `sheet_closed`, once, however the sheet was closed.
+  void _reportClose(MealioUi ui) {
+    if (_closeReported) return;
+    _closeReported = true;
+    final r = _result;
+    ui.emit(MealioSheetClosed(step: _stepNow, added: _phase == _Phase.done && r != null ? r.added.length : 0));
+  }
+
+  /// The scrim, the back button, or the pop `_close` asked for. As with
+  /// `_close`, nothing is reported after this.
+  void _onPop() {
+    if (!mounted) return;
+    _run += 1;
+    _reportClose(MealioUi.of(context));
   }
 
   Future<void> _openStores(_Phase from) async {
@@ -267,7 +323,13 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
     });
   }
 
+  void _askLocation(String storeId, _Phase from) {
+    _emit(MealioLocationAsked(store: storeId));
+    _openLocation(from);
+  }
+
   void _pickStore(String id) {
+    _emit(MealioStorePicked(store: id));
     _store = id;
     unawaited(_start(id));
   }
@@ -304,6 +366,7 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
         _cart = c;
         _phase = _Phase.list;
       });
+      _emit(MealioListShown(store: _store ?? c.store, items: c.items.length));
     } catch (e) {
       if (_run != id || !mounted) return;
       if (e is MealioException && e.code == MealioErrorCode.storeRequired) {
@@ -315,13 +378,13 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
         // there is nothing to look up, so they pick the chain first.
         if (storeId != null) {
           _store = storeId;
-          _openLocation(_Phase.error);
+          _askLocation(storeId, _Phase.error);
         } else {
           unawaited(_openStores(_Phase.error));
         }
         return;
       }
-      _fail(e, 'somethingWrongSentence');
+      _fail(e, 'somethingWrongSentence', MealioSheetStep.loading);
     }
   }
 
@@ -330,6 +393,7 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
     if (c == null || _phase == _Phase.adding) return;
     final id = _run;
     setState(() => _phase = _Phase.adding);
+    _emit(MealioAddStarted(items: c.estimate().count));
     try {
       final r = await c.addToCart();
       if (_run != id || !mounted) return;
@@ -337,20 +401,23 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
         _result = r;
         _phase = _Phase.done;
       });
+      _emit(MealioCartAdded(store: r.store, added: r.added.length, failed: r.failed.length));
       widget.onAdded?.call(r);
     } catch (e) {
       if (_run != id || !mounted) return;
-      _fail(e, 'couldNotAdd');
+      _fail(e, 'couldNotAdd', MealioSheetStep.adding);
     }
   }
 
-  void _fail(Object e, String fallbackKey) {
+  void _fail(Object e, String fallbackKey, MealioSheetStep step) {
+    final code = e is MealioException ? e.code : 'error';
     setState(() {
-      _errorCode = e is MealioException ? e.code : 'error';
+      _errorCode = code;
       _errorMessage = e is MealioException && e.message.isNotEmpty ? e.message : null;
       _errorKey = fallbackKey;
       _phase = _Phase.error;
     });
+    _emit(MealioErrorEvent(code: code, step: step));
     widget.onError?.call(e);
   }
 
@@ -373,6 +440,7 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
 
   void _close() {
     _run += 1;
+    _reportClose(MealioUi.of(context));
     _login?.cancel();
     widget.onClose(_phase == _Phase.done ? _result : null);
   }
@@ -399,7 +467,7 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
   @override
   Widget build(BuildContext context) {
     final t = widget.theme ?? MealioTheme.of(context);
-    final ui = MealioUi.of(context);
+    final ui = _ui = MealioUi.of(context);
     final cart = _cart;
     final result = _result;
     final store = _store;
@@ -467,7 +535,9 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
         busy: _phase == _Phase.adding,
         onAdd: _add,
         onChangeStore: () => unawaited(_openStores(_Phase.list)),
-        onChangeLocation: () => _openLocation(_Phase.list),
+        onChangeLocation: () {
+          if (store != null) _askLocation(store, _Phase.list);
+        },
         theme: t,
       );
     } else if (_phase == _Phase.done && result != null && cart != null) {

@@ -1,5 +1,12 @@
 ## Unreleased
 
+- Sheet events. `MealioCart.configure`, `MealioScope` and `MealioThemeScope`
+  take `onEvent`, which reports every step of the sheet as a `MealioEvent`:
+  `sheet_opened`, `store_picked`, `location_asked`, `signin_shown`,
+  `list_shown`, `item_unchecked`, `item_checked`, `add_started`, `cart_added`,
+  `error` and `sheet_closed`, which carries the `MealioSheetStep` the user left
+  from. Nothing is sent to Mealio, and a listener that throws never breaks the
+  sheet. New: `mealioSafeListener`, `MealioUi.emit`.
 - Kroger family stores: the user chooses their exact store. When a cart answers
   `location_required`, the sheet asks for a zip and lists that chain's stores
   (the store picker comes first if no store is known). The list shows the

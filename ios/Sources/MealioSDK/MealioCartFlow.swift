@@ -286,16 +286,38 @@ final class MealioFlowModel: ObservableObject {
         self.zip = zip
         self.onAdded = onAdded
         self.onError = onError
+        MealioCart.emit(.sheetOpened(recipes: recipes.count))
         if let host = MealioCart.host {
             self.host = host
             host.hostLogin(true)
-            login = host.login
+            loginChanged(host.login)
             // VERIFY: the sink closure is formed in this @MainActor method and
             // is not @Sendable, so it is main-actor isolated; WebViewHost only
             // sets `login` on the main actor, so values arrive there.
-            loginSub = host.$login.sink { [weak self] value in self?.login = value }
+            loginSub = host.$login.sink { [weak self] value in self?.loginChanged(value) }
         }
         start()
+    }
+
+    /// The sign-in coming up is the event. One replacing another is not.
+    func loginChanged(_ value: LoginSheet?) {
+        let shown = login == nil && value != nil
+        login = value
+        if shown { MealioCart.emit(.signinShown(store: store)) }
+    }
+
+    /// The step the user is on, for `error` and `sheet_closed`.
+    var sheetStep: MealioSheetStep {
+        if login != nil { return .signin }
+        switch phase {
+        case .loading: return .loading
+        case .list: return .list
+        case .adding: return .adding
+        case .done: return .done
+        case .error: return .error
+        case .stores: return .stores
+        case .location: return .location
+        }
     }
 
     func start() {
@@ -319,6 +341,7 @@ final class MealioFlowModel: ObservableObject {
                 self.store = c.store
                 self.cart = c
                 self.phase = .list
+                MealioCart.emit(.listShown(store: c.store, items: c.items.count))
             } catch {
                 guard let self = self, self.run == id else { return }
                 let code = (error as? MealioError)?.code
@@ -333,7 +356,7 @@ final class MealioFlowModel: ObservableObject {
                     if store != nil { self.openLocation(from: .error) } else { self.openStores(from: .error) }
                     return
                 }
-                self.fail(error)
+                self.fail(error, step: .loading)
             }
         }
     }
@@ -352,6 +375,7 @@ final class MealioFlowModel: ObservableObject {
 
     /// Show the zip and location step for `store`.
     func openLocation(from: Phase) {
+        if let store = store { MealioCart.emit(.locationAsked(store: store)) }
         backTo = from
         phase = .location
     }
@@ -368,6 +392,7 @@ final class MealioFlowModel: ObservableObject {
 
     /// Prepare the cart again at another store.
     func pick(_ id: String) {
+        MealioCart.emit(.storePicked(store: id))
         store = id
         start()
     }
@@ -382,16 +407,18 @@ final class MealioFlowModel: ObservableObject {
         guard let cart = cart, phase == .list else { return }
         let id = run
         phase = .adding
+        MealioCart.emit(.addStarted(items: cart.estimate().count))
         Task { [weak self] in
             do {
                 let r = try await cart.addToCart()
                 guard let self = self, self.run == id else { return }
                 self.result = r
                 self.phase = .done
+                MealioCart.emit(.cartAdded(store: r.store, added: r.added.count, failed: r.failed.count))
                 self.onAdded?(r)
             } catch {
                 guard let self = self, self.run == id else { return }
-                self.fail(error, fallback: MealioCart.text.tr(.couldNotAdd))
+                self.fail(error, step: .adding, fallback: MealioCart.text.tr(.couldNotAdd))
             }
         }
     }
@@ -411,6 +438,7 @@ final class MealioFlowModel: ObservableObject {
         hosting = false
         run += 1
         let outcome = phase == .done ? result : nil
+        MealioCart.emit(.sheetClosed(step: sheetStep, added: outcome?.added.count ?? 0))
         login?.cancel()
         loginSub?.cancel()
         loginSub = nil
@@ -422,13 +450,14 @@ final class MealioFlowModel: ObservableObject {
         after?()
     }
 
-    private func fail(_ e: Error, fallback: String? = nil) {
+    private func fail(_ e: Error, step: MealioSheetStep, fallback: String? = nil) {
         var shown = (e as? MealioError) ?? MealioError(code: "error", message: e.localizedDescription)
         if shown.message.isEmpty, let fallback = fallback {
             shown = MealioError(code: shown.code, message: fallback)
         }
         error = shown
         phase = .error
+        MealioCart.emit(.error(code: shown.code, step: step))
         onError?(e)
     }
 }
@@ -1151,11 +1180,13 @@ struct MealioItemRow: View {
         .accessibilityAddTraits(sel ? [.isButton, .isSelected] : .isButton)
     }
 
-    private func toggle(on: Bool) {
+    func toggle(on: Bool) {
         guard !disabled else { return }
         if on {
             cart.deselect(key: item.key)
+            MealioCart.emit(.itemUnchecked(key: item.key))
         } else if item.status == .remembered, let id = item.selectedId {
+            MealioCart.emit(.itemChecked(key: item.key))
             try? cart.select(key: item.key, productId: id, preferenceId: item.rememberedPreferenceId)
         } else if !isOpen {
             onToggleOpen()

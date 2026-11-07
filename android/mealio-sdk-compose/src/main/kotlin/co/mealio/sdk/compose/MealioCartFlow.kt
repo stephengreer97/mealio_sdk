@@ -104,8 +104,10 @@ import co.mealio.sdk.CartSession
 import co.mealio.sdk.InlineLogin
 import co.mealio.sdk.ItemStatus
 import co.mealio.sdk.MealioCart
+import co.mealio.sdk.MealioEvent
 import co.mealio.sdk.MealioException
 import co.mealio.sdk.MealioInlineLogin
+import co.mealio.sdk.MealioSheetStep
 import co.mealio.sdk.Product
 import co.mealio.sdk.Recipe
 import co.mealio.sdk.Step
@@ -292,9 +294,21 @@ private fun FlowSheet(
         onDispose { detach() }
     }
 
-    fun fail(e: Exception, fallback: String) {
-        error = FlowError((e as? MealioException)?.code ?: "error", e.message ?: fallback)
+    fun stepNow(): MealioSheetStep = if (login != null) MealioSheetStep.SIGNIN else when (phase) {
+        Phase.LOADING -> MealioSheetStep.LOADING
+        Phase.LIST -> MealioSheetStep.LIST
+        Phase.ADDING -> MealioSheetStep.ADDING
+        Phase.DONE -> MealioSheetStep.DONE
+        Phase.ERROR -> MealioSheetStep.ERROR
+        Phase.STORES -> MealioSheetStep.STORES
+        Phase.LOCATION -> MealioSheetStep.LOCATION
+    }
+
+    fun fail(e: Exception, fallback: String, at: MealioSheetStep) {
+        val code = (e as? MealioException)?.code ?: "error"
+        error = FlowError(code, e.message ?: fallback)
         phase = Phase.ERROR
+        ui.emit(MealioEvent.Error(code, at))
         onErrorNow(e)
     }
 
@@ -319,6 +333,11 @@ private fun FlowSheet(
         phase = Phase.LOCATION
     }
 
+    fun askLocation(storeId: String, from: Phase) {
+        ui.emit(MealioEvent.LocationAsked(storeId))
+        openLocation(from)
+    }
+
     fun start(storeId: String?) {
         job?.cancel()
         phase = Phase.LOADING; step = Step.CONNECTING; cart = null; result = null; error = null
@@ -328,6 +347,7 @@ private fun FlowSheet(
                 store = c.store
                 cart = c
                 phase = Phase.LIST
+                ui.emit(MealioEvent.ListShown(c.store, c.items.size))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: MealioException) {
@@ -337,14 +357,14 @@ private fun FlowSheet(
                     // named there is nothing to look up, so they pick the chain first.
                     "location_required" -> if (storeId != null) {
                         store = storeId
-                        openLocation(Phase.ERROR)
+                        askLocation(storeId, Phase.ERROR)
                     } else {
                         openStores(Phase.ERROR)
                     }
-                    else -> fail(e, ui.tr("somethingWrongSentence"))
+                    else -> fail(e, ui.tr("somethingWrongSentence"), MealioSheetStep.LOADING)
                 }
             } catch (e: Exception) {
-                fail(e, ui.tr("somethingWrongSentence"))
+                fail(e, ui.tr("somethingWrongSentence"), MealioSheetStep.LOADING)
             }
         }
     }
@@ -352,22 +372,25 @@ private fun FlowSheet(
     fun add() {
         val c = cart ?: return
         phase = Phase.ADDING
+        ui.emit(MealioEvent.AddStarted(c.estimate().count))
         job = scope.launch {
             try {
                 val r = c.addToCart()
                 result = r
                 phase = Phase.DONE
+                ui.emit(MealioEvent.CartAdded(r.store, r.added.size, r.failed.size))
                 onAddedNow(r)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                fail(e, ui.tr("couldNotAdd"))
+                fail(e, ui.tr("couldNotAdd"), MealioSheetStep.ADDING)
             }
         }
     }
 
     fun close() {
         job?.cancel()
+        ui.emit(MealioEvent.SheetClosed(stepNow(), if (phase == Phase.DONE) result?.added?.size ?: 0 else 0))
         login?.cancel()
         onCloseNow(if (phase == Phase.DONE) result else null)
     }
@@ -375,7 +398,13 @@ private fun FlowSheet(
     // Back: inside the store's sign-in pages first, then close the sheet.
     backRef.value = { if (login?.goBack() != true) close() }
 
-    LaunchedEffect(Unit) { start(initialStore) }
+    LaunchedEffect(Unit) {
+        ui.emit(MealioEvent.SheetOpened(recipes.size))
+        start(initialStore)
+    }
+
+    val signingIn = login != null
+    LaunchedEffect(signingIn) { if (signingIn) ui.emit(MealioEvent.SigninShown(store)) }
 
     val storeName = cart?.storeName ?: store?.let { storeLabel(it) } ?: ui.tr("yourStore")
     val named = cart?.storeName != null || store != null
@@ -395,7 +424,7 @@ private fun FlowSheet(
             phase == Phase.LOADING -> Loading(t, step, storeName, lineCount)
             phase == Phase.STORES -> StorePicker(
                 t, stores, store,
-                onPick = { id -> store = id; start(id) },
+                onPick = { id -> ui.emit(MealioEvent.StorePicked(id)); store = id; start(id) },
                 onBack = if (c != null && backTo == Phase.LIST) ({ phase = Phase.LIST }) else null,
             )
             phase == Phase.LOCATION && at != null -> {
@@ -413,7 +442,7 @@ private fun FlowSheet(
                 MealioCartList(
                     c, storeName, busy = phase == Phase.ADDING, onAdd = ::add, theme = t, modifier = Modifier.weight(1f),
                     onChangeStore = { openStores(Phase.LIST) },
-                    onChangeLocation = { openLocation(Phase.LIST) },
+                    onChangeLocation = { at?.let { askLocation(it, Phase.LIST) } },
                 )
             phase == Phase.DONE && r != null && c != null -> Done(
                 t, c, r, storeName, onDone = ::close,
@@ -822,10 +851,13 @@ private fun ItemRow(
 
     fun toggle() {
         if (disabled) return
-        if (on) cart.deselect(item.key)
-        else if (item.status == ItemStatus.REMEMBERED && item.selectedId != null) {
+        if (on) {
+            cart.deselect(item.key)
+            ui.emit(MealioEvent.ItemUnchecked(item.key))
+        } else if (item.status == ItemStatus.REMEMBERED && item.selectedId != null) {
             try {
                 cart.select(item.key, item.selectedId!!, item.rememberedPreferenceId)
+                ui.emit(MealioEvent.ItemChecked(item.key))
             } catch (e: MealioException) {
                 if (!open) onToggleOpen()
                 return

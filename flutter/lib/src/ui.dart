@@ -4,6 +4,7 @@
 
 import 'package:flutter/widgets.dart';
 
+import 'events.dart';
 import 'protocol.dart';
 import 'strings.dart';
 import 'theme.dart';
@@ -73,12 +74,17 @@ class MealioDoneAction {
   final void Function(AddResult result) onPress;
 }
 
-/// The words, prices and sheet options in force.
+/// The words, prices, sheet options and event listener in force.
 @immutable
 class MealioUi {
-  const MealioUi({Map<String, String>? strings, MealioMoneyFormat? formatMoney, this.sheet = const MealioSheetOptions()})
-      : _strings = strings,
-        _formatMoney = formatMoney;
+  const MealioUi({
+    Map<String, String>? strings,
+    MealioMoneyFormat? formatMoney,
+    this.sheet = const MealioSheetOptions(),
+    MealioEventListener? onEvent,
+  })  : _strings = strings,
+        _formatMoney = formatMoney,
+        _onEvent = onEvent;
 
   /// What is in force at `context`, set by the nearest `MealioThemeScope`,
   /// then `MealioScope`, then `MealioCart.configure`. Each setting falls back
@@ -89,11 +95,13 @@ class MealioUi {
       strings: look.strings,
       formatMoney: look.formatMoney,
       sheet: look.sheet ?? const MealioSheetOptions(),
+      onEvent: look.onEvent,
     );
   }
 
   final Map<String, String>? _strings;
   final MealioMoneyFormat? _formatMoney;
+  final MealioEventListener? _onEvent;
   final MealioSheetOptions sheet;
 
   /// True when the partner set `formatMoney`, so prices are built from
@@ -110,4 +118,7 @@ class MealioUi {
 
   /// A price, as the partner wants it read. Defaults to [mealioMoney].
   String money(double amount) => (_formatMoney ?? mealioMoney)(amount);
+
+  /// Tells the partner's `onEvent`. Their listener never breaks the sheet.
+  void emit(MealioEvent event) => mealioSafeListener(_onEvent)(event);
 }

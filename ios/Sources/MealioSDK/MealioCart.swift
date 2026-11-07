@@ -27,6 +27,8 @@ public enum MealioCart {
     public static var formatMoney: ((Double) -> String)?
     /// How the sheet looks and behaves.
     public static var sheet = MealioSheetOptions()
+    /// Every step of the sheet, for your analytics. Nothing is sent to Mealio.
+    public static var onEvent: MealioEventListener?
     /// The drop-in's words and prices as they stand now.
     public static var text: MealioText { MealioText(strings: strings, formatMoney: formatMoney) }
 
@@ -48,6 +50,8 @@ public enum MealioCart {
     ///   - formatMoney: How prices read. With it set, option prices are built
     ///     from the numeric `unitPrice`, not the store's text.
     ///   - sheet: How the sheet looks and behaves.
+    ///   - onEvent: Every step of the sheet, for your analytics. Nothing is
+    ///     sent to Mealio.
     public static func configure(publishableKey: String,
                                  sessionTokenProvider: @escaping () async throws -> String,
                                  baseURL: URL = DEFAULT_BASE_URL,
@@ -58,9 +62,10 @@ public enum MealioCart {
                                  colorScheme: MealioColorScheme? = nil,
                                  strings: MealioStrings? = nil,
                                  formatMoney: ((Double) -> String)? = nil,
-                                 sheet: MealioSheetOptions? = nil) {
+                                 sheet: MealioSheetOptions? = nil,
+                                 onEvent: MealioEventListener? = nil) {
         configure(theme: theme, darkTheme: darkTheme, colorScheme: colorScheme,
-                  strings: strings, formatMoney: formatMoney, sheet: sheet)
+                  strings: strings, formatMoney: formatMoney, sheet: sheet, onEvent: onEvent)
         let host = WebViewHost(presenter: presenter)
         let config = MealioClientConfig(publishableKey: publishableKey,
                                         sessionTokenProvider: sessionTokenProvider,
@@ -79,19 +84,26 @@ public enum MealioCart {
     }
 
     /// Change the drop-in's look after `configure`. What you leave out stays
-    /// as it is. To clear `formatMoney`, set `MealioCart.formatMoney = nil`.
+    /// as it is. To clear `formatMoney` or `onEvent`, set it to nil directly.
     public static func configure(theme: MealioTheme? = nil,
                                  darkTheme: MealioDarkTheme? = nil,
                                  colorScheme: MealioColorScheme? = nil,
                                  strings: MealioStrings? = nil,
                                  formatMoney: ((Double) -> String)? = nil,
-                                 sheet: MealioSheetOptions? = nil) {
+                                 sheet: MealioSheetOptions? = nil,
+                                 onEvent: MealioEventListener? = nil) {
         if let theme = theme { MealioCart.theme = theme }
         if let darkTheme = darkTheme { MealioCart.darkTheme = darkTheme }
         if let colorScheme = colorScheme { MealioCart.colorScheme = colorScheme }
         if let strings = strings { MealioCart.strings = strings }
         if let formatMoney = formatMoney { MealioCart.formatMoney = formatMoney }
         if let sheet = sheet { MealioCart.sheet = sheet }
+        if let onEvent = onEvent { MealioCart.onEvent = onEvent }
+    }
+
+    /// Tell the partner's listener, if there is one.
+    static func emit(_ event: MealioEvent) {
+        onEvent?(event)
     }
 
     /// Start a cart for a recipe at a store. Shows the store's login if the

@@ -11,8 +11,8 @@ import React, { createContext, useCallback, useContext, useMemo, useRef, useStat
 import { Modal, Platform, Pressable, SafeAreaView, StyleSheet, Text, useColorScheme, View, type ImageSourcePropType } from 'react-native';
 import { WebView, type WebViewMessageEvent, type WebViewNavigation } from 'react-native-webview';
 import {
-  MealioClient, MealioError, matchesAny, parseMessage, textTools,
-  type MealioStrings, type TextTools,
+  MealioClient, MealioError, matchesAny, parseMessage, safeListener, textTools,
+  type MealioEventListener, type MealioStrings, type TextTools,
   type CartSession, type Host, type JsonMessage, type Matcher, type PrepareCartInput, type StepListener, type StoreInfo, type StoreLocation, type StorePreferences,
 } from '@mealio/sdk-core';
 import { money, resolveTheme, type MealioColorScheme, type MealioTheme } from './theme';
@@ -32,6 +32,7 @@ export interface MealioSheetOptions {
 /** The drop-in's words and prices, resolved once on the provider. */
 export interface MealioUi extends TextTools {
   money: (amount: number) => string;
+  emit: MealioEventListener;
   /** True when the partner set formatMoney, so prices are built from numbers, not the store's text. */
   customMoney: boolean;
   sheet: { showTotal: boolean; height: 'auto' | 'full' | number; logo: ImageSourcePropType | null };
@@ -61,6 +62,8 @@ export interface MealioProviderProps {
   formatMoney?: (amount: number) => string;
   /** How the sheet looks and behaves. */
   sheet?: MealioSheetOptions;
+  /** Every step of the sheet, for your analytics. Nothing is sent to Mealio. */
+  onEvent?: MealioEventListener;
   /** @deprecated use theme.accent */
   accentColor?: string;
   children: React.ReactNode;
@@ -214,9 +217,13 @@ export function MealioProvider(props: MealioProviderProps) {
     () => resolveTheme({ ...(props.accentColor ? { accent: props.accentColor } : {}), ...(props.theme || {}) }, props.darkTheme, props.colorScheme, phone),
     [props.theme, props.accentColor, props.darkTheme, props.colorScheme, phone],
   );
+  // A ref, so an inline onEvent does not rebuild everything on each render.
+  const onEventRef = useRef(props.onEvent);
+  onEventRef.current = props.onEvent;
   const ui = useMemo<MealioUi>(() => ({
     ...textTools(props.strings),
     money: props.formatMoney ?? money,
+    emit: safeListener((e) => onEventRef.current?.(e)),
     customMoney: !!props.formatMoney,
     sheet: { showTotal: props.sheet?.showTotal ?? true, height: props.sheet?.height ?? 'auto', logo: props.sheet?.logo ?? null },
   }), [props.strings, props.formatMoney, props.sheet?.showTotal, props.sheet?.height, props.sheet?.logo]);

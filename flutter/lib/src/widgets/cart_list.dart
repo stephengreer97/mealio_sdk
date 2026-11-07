@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 
 import '../cart_session.dart';
 import '../errors.dart';
+import '../events.dart';
 import '../protocol.dart';
 import '../theme.dart';
 import '../ui.dart';
@@ -323,9 +324,12 @@ class _ItemRowState extends State<_ItemRow> {
     if (widget.disabled) return;
     final on = _s.isSelected(_item.key);
     final id = _item.selectedId;
+    final ui = MealioUi.of(context);
     if (on) {
       _s.deselect(_item.key);
+      ui.emit(MealioItemUnchecked(key: _item.key));
     } else if (_item.status == ItemStatus.remembered && id != null) {
+      ui.emit(MealioItemChecked(key: _item.key));
       _s.select(_item.key, id, preferenceId: _item.rememberedPreferenceId);
     } else if (!widget.open) {
       widget.onToggleOpen();

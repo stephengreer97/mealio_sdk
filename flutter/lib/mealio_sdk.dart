@@ -20,6 +20,7 @@ export 'src/client.dart'
         sdkCoreVersion,
         stepOf;
 export 'src/errors.dart';
+export 'src/events.dart';
 export 'src/guard.dart';
 export 'src/host.dart';
 export 'src/keys.dart';

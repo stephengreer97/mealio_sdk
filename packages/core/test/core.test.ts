@@ -3,7 +3,7 @@ import vm from 'node:vm';
 import vectors from '../../../protocol/test-vectors.json';
 import sharedStrings from '../../../protocol/strings.json';
 import {
-  Allowlist, GUARD_SCRIPT, Runner, matches, bodyBlocked, parseUrl, openEnvelope, checkInstructions, EnvelopeError, MealioClient, CartSession, addedPrice, DEFAULT_STRINGS, fillText, textTools,
+  Allowlist, GUARD_SCRIPT, Runner, matches, bodyBlocked, parseUrl, openEnvelope, checkInstructions, EnvelopeError, MealioClient, CartSession, addedPrice, DEFAULT_STRINGS, fillText, safeListener, textTools,
   type AddResult, type Host, type Envelope, type Matcher,
 } from '../src';
 
@@ -648,5 +648,17 @@ describe('pantry and optional items', () => {
 
   it('is left out of the estimate until then', () => {
     expect(session().estimate().count).toBe(1);
+  });
+});
+
+describe('events', () => {
+  it('passes events on', () => {
+    const got: string[] = [];
+    safeListener((e) => got.push(e.type))({ type: 'sheet_opened', recipes: 1 });
+    expect(got).toEqual(['sheet_opened']);
+  });
+  it('survives a listener that throws, or none at all', () => {
+    expect(() => safeListener(() => { throw new Error('boom'); })({ type: 'sheet_opened', recipes: 1 })).not.toThrow();
+    expect(() => safeListener()({ type: 'sheet_opened', recipes: 1 })).not.toThrow();
   });
 });
