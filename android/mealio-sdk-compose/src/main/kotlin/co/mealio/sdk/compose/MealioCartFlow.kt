@@ -352,7 +352,10 @@ private fun FlowSheet(
                 throw e
             } catch (e: MealioException) {
                 when (e.code) {
-                    "store_required" -> openStores(Phase.ERROR)
+                    "store_required", "store_not_allowed" -> {
+                        store = null
+                        openStores(Phase.ERROR)
+                    }
                     // Which store the user shops at is theirs to say. With no store
                     // named there is nothing to look up, so they pick the chain first.
                     "location_required" -> if (storeId != null) {

@@ -104,7 +104,7 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
       ui.emit({ type: 'list_shown', store: c.store, items: c.items.length });
     } catch (e: any) {
       if (run.current !== id) return;
-      if (e?.code === 'store_required') { openStores('error'); return; }
+      if (e?.code === 'store_required' || e?.code === 'store_not_allowed') { setStore(null); openStores('error'); return; }
       if (e?.code === 'location_required') {
         // Which store the user shops at is theirs to say. With no store named
         // there is nothing to look up, so they pick the chain first.

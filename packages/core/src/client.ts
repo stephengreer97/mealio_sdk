@@ -78,10 +78,10 @@ export class MealioClient {
   }
 
   /** Start a cart: signs in to the store if needed, searches every ingredient. */
-  /** Stores the SDK supports right now. Public, no session needed. */
+  /** The stores this app offers right now. No session needed. */
   async stores(): Promise<StoreInfo[]> {
     try {
-      const res = await this.f(this.base + '/api/v1/stores');
+      const res = await this.f(this.base + '/api/v1/stores', { headers: { 'x-mealio-publishable-key': this.cfg.publishableKey } });
       const j = await res.json();
       return Array.isArray(j?.stores) ? j.stores : [];
     } catch {

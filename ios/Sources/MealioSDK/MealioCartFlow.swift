@@ -345,8 +345,9 @@ final class MealioFlowModel: ObservableObject {
             } catch {
                 guard let self = self, self.run == id else { return }
                 let code = (error as? MealioError)?.code
-                if code == MealioError.Code.storeRequired {
-                    // No store given and no default yet: let the user pick.
+                if code == MealioError.Code.storeRequired || code == MealioError.Code.storeNotAllowed {
+                    // No store given, or one this app does not offer: let the user pick.
+                    self.store = nil
                     self.openStores(from: .error)
                     return
                 }

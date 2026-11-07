@@ -369,7 +369,8 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
       _emit(MealioListShown(store: _store ?? c.store, items: c.items.length));
     } catch (e) {
       if (_run != id || !mounted) return;
-      if (e is MealioException && e.code == MealioErrorCode.storeRequired) {
+      if (e is MealioException && (e.code == MealioErrorCode.storeRequired || e.code == MealioErrorCode.storeNotAllowed)) {
+        _store = null;
         unawaited(_openStores(_Phase.error));
         return;
       }
