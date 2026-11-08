@@ -147,12 +147,11 @@ private struct StrictJSONParser {
         return k
     }
 
-    private mutating func word(_ w: StaticString) -> Bool {
-        let n = w.utf8CodeUnitsCount
-        guard i + n <= b.count else { return false }
-        let p = w.utf8Start
-        for k in 0..<n where b[i + k] != p[k] { return false }
-        i += n
+    private mutating func word(_ w: String) -> Bool {
+        let u = Array(w.utf8)
+        guard i + u.count <= b.count else { return false }
+        for k in 0..<u.count where b[i + k] != u[k] { return false }
+        i += u.count
         return true
     }
 
