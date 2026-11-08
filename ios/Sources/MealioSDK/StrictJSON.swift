@@ -102,7 +102,10 @@ private struct StrictJSONParser {
             while !next {
                 skipSpace()
                 guard let top = stack.popLast() else {
-                    return i == b.count ? value : nil
+                    // Spelled out: JSONValue takes a nil literal, so `cond ? value : nil`
+                    // would turn trailing garbage into .null instead of a failure.
+                    if i == b.count { return value }
+                    return Optional<JSONValue>.none
                 }
                 switch top {
                 case .array(var a, let keeps):
