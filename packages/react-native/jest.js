@@ -6,6 +6,10 @@
 // To test a guest, setMockUser(null): hasUser turns false and MealioCartButton
 // calls onSignInRequired (its own, else the provider's), or is disabled.
 // setMockUser('u1') signs someone in, setMockUser(undefined) stops tracking.
+// Everything resets after each test (resetMealioMock, run from afterEach when
+// Jest's afterEach exists): mocked answers, the user, and recorded calls.
+// To run your screens on the real client and a fake server instead, see
+// require('@mealio/react-native-cart/testing').
 // Plain JS on purpose: partners' Jest loads it untransformed.
 const React = require('react');
 
@@ -20,15 +24,16 @@ try {
 } catch (e) { /* words show as their keys */ }
 
 class MealioError extends Error {
-  constructor(code, message) { super(message); this.name = 'MealioError'; this.code = code; }
+  constructor(code, message, reason) { super(message); this.name = 'MealioError'; this.code = code; if (reason) this.reason = reason; }
 }
 
 /** Like the real one: listeners run on cancel, and one added after it runs at once. */
 class CancelToken {
-  constructor() { this.cancelled = false; this.listeners = []; }
-  cancel() {
+  constructor() { this.cancelled = false; this.reason = null; this.listeners = []; }
+  cancel(reason) {
     if (this.cancelled) return;
     this.cancelled = true;
+    this.reason = reason || 'cancelled';
     const list = this.listeners;
     this.listeners = [];
     list.forEach((f) => { try { f(); } catch (e) { /* one listener never stops the rest */ } });
@@ -64,7 +69,7 @@ function mockCart(over) {
     isWeight: fn(() => false), weight: fn(() => 0), setWeight: fn((_k, lb) => lb), stepWeight: fn(() => 0),
     weightRange: fn(() => ({ min: 0.25, max: 20 })),
     preferenceId: fn(() => null), needsPreference: fn(() => false), pendingPreferences: fn(() => []),
-    search: fn(async () => []), cancelSearches: fn(), restorePicks: fn(),
+    search: fn(async () => []), cancelSearches: fn(), restorePicks: fn(async () => {}),
     selections: fn(() => []), addToCart: fn(async () => result()),
     estimate: fn(() => ({ ...none })), addedTotal: fn(() => ({ ...none })), addedPrice: fn(() => null),
     choose: fn(), skip: fn(), pending: fn(() => []),
@@ -86,24 +91,38 @@ const ui = {
   sheet: { showTotal: true, height: 'auto', logo: null },
 };
 
-const api = {
-  userId: undefined,
-  hasUser: true,
-  theme: {},
-  ui,
-  prepareCart: fn(async () => mockCart()),
-  stores: fn(async () => []),
-  signOutOfAllStores: fn(async () => {}),
-  resetSession: fn(),
-  warm: fn(async () => {}),
-  storeLocations: fn(async () => []),
-  storePreferences: fn(async () => ({ defaultStore: null, location: null })),
-  setStore: fn(async (store) => ({ defaultStore: store, location: null })),
-  openStoreSettings: fn(() => { if (!api.hasUser && providerSignIn) providerSignIn(); }),
-};
+/** The one object useMealio() returns. resetMealioMock refills it in place. */
+const api = {};
+function fill() {
+  ui.emit = fn();
+  Object.assign(api, {
+    userId: undefined,
+    hasUser: true,
+    theme: {},
+    ui,
+    prepareCart: fn(async () => mockCart()),
+    stores: fn(async () => []),
+    signOutOfAllStores: fn(async () => {}),
+    resetSession: fn(),
+    warm: fn(async () => {}),
+    storeLocations: fn(async () => []),
+    storePreferences: fn(async () => ({ defaultStore: null, location: null })),
+    setStore: fn(async (store) => ({ defaultStore: store, location: null })),
+    openStoreSettings: fn(() => { if (!api.hasUser && providerSignIn) providerSignIn(); }),
+  });
+}
 
 /** The provider's onSignInRequired, from the last MealioProvider rendered. */
 let providerSignIn = null;
+
+/** Back to the start: default answers, no recorded calls, a signed-in user, no provider. */
+function resetMealioMock() {
+  providerSignIn = null;
+  fill();
+}
+fill();
+// Each test starts clean, without the partner having to remember to.
+if (typeof afterEach === 'function') afterEach(() => resetMealioMock());
 
 /** Sign a user in (an id), out (null), or stop tracking users (undefined). */
 function setMockUser(id) {
@@ -138,7 +157,7 @@ function MealioCartButton(props) {
 }
 
 module.exports = {
-  MealioProvider, useMealio, MealioCartButton, mockCart, setMockUser,
+  MealioProvider, useMealio, MealioCartButton, mockCart, setMockUser, resetMealioMock,
   MealioCartFlow: nothing, MealioCartList: nothing, MealioCartSheet: nothing, MealioStoreSettings: nothing,
   forRecipes: () => null,
   CancelToken, MealioError, CartSession,

@@ -369,6 +369,27 @@ lifecycleScope.launch {
 }
 ```
 
+### When a prepare is cancelled
+
+A cancelled prepare or search throws `MealioException` with code
+`"cancelled"` and a `reason`, so a custom screen knows what to do next:
+
+```kotlin
+catch (e: MealioException) {
+    if (e.code == "cancelled") when (e.reason) {
+        CancelReason.USER_CHANGED -> prepareAgain()   // setUser moved to another user: prepare for them
+        CancelReason.CLOSED -> Unit                   // your screen closed it (token.cancel(CancelReason.CLOSED))
+        else -> Unit                                  // cancelJobs, a store sign-out, resetSession
+    }
+}
+```
+
+After a failed add, prepare a new cart and call `fresh.restorePicks(old)`.
+It is a suspend call: a product the user found with `search` is known to
+Mealio only on the cart it was found in, so the item's last search runs again
+on the new cart (it counts toward the search cap) and the same product is
+picked if it comes back. If not, the item keeps the new cart's own pick.
+
 ### Sign out of stores
 
 ```kotlin
@@ -433,6 +454,7 @@ object MealioCart {
     val user: StateFlow<MealioUser>
     var onSignInRequired: (() -> Unit)?
     fun cancelJobs()                               // stop every cart still loading and every search; an add runs on
+                                                   // configure() again does this to the old setup, and queues behind its add
     suspend fun stores(): List<StoreInfo>
     suspend fun storeLocations(store: String, zip: String): List<StoreLocation>   // a Kroger family chain's stores near a zip
     suspend fun storePreferences(): StorePreferences                              // defaultStore, location
@@ -457,8 +479,9 @@ class CartSession {
     suspend fun search(key: String, query: String, onStep: StepListener? = null): List<Product>
     suspend fun search(key: String, query: String, cancel: CancelToken, onStep: StepListener? = null): List<Product>
     val searching: Boolean                          // keep Add off while true
-    fun cancelSearches()
-    fun restorePicks(from: CartSession)             // after a failed add: same store, by item key
+    fun cancelSearches(reason: String = CancelReason.CANCELLED)
+    suspend fun restorePicks(from: CartSession, cancel: CancelToken = CancelToken(), onStep: StepListener? = null)
+                                                    // after a failed add: same store, by item key; a searched pick is searched again here
     val warnings: List<CartWarning>                 // what the server changed or ignored; empty from older servers
     fun quantity(key: String): Int                  // never over the product's cap; what is sent
     fun selections(): List<Selection>               // one per item
@@ -533,6 +556,48 @@ Advanced: `MealioClient(config, host, transport)` lets you supply your own
 `Host` (WebViews) or `HttpTransport`. `MealioInlineLogin` is how
 `MealioCartFlow` receives the sign-in WebView; a custom sheet can attach to
 it the same way.
+
+## Testing your screens: `co.mealio.sdk.testing`
+
+The main artifact ships a scripted fake Mealio, so your JVM and Robolectric
+tests run the **real** `MealioClient`, `CartSession`, `MealioCart` and drop-in
+sheet with no network and no reflection. Scripts are the same plain data as
+`@mealio/sdk-core/testing` (`createFakeMealio`). It signs with the protocol
+test key, which only a client built with `fake.config()` / `fake.install()`
+trusts; `KEYS` in a production build never holds it.
+
+```kotlin
+val fake = FakeMealio(FakeScript(
+    items = listOf(
+        FakeItem("milk", options = listOf(Product("m1", "Milk", unitPrice = 3.0)), remembered = "m1"),
+        FakeItem("salt", options = listOf(Product("s1", "Salt")), remembered = "s1", startUnchecked = true),
+    ),
+    search = mapOf("oat milk" to listOf(Product("o1", "Oat milk", unitPrice = 4.0))),
+))
+
+// The core on its own:
+val cart = fake.client().prepareCart("heb", recipe)
+assertEquals("m1", cart.selectedId("milk")); assertNull(cart.selectedId("salt"))
+cart.select("salt", "s1")
+assertNull(cart.estimate().total)               // salt has no price: no partial total
+
+// Or MealioCart and MealioCartButton (no Context needed; Robolectric for Compose UI):
+fake.install()
+MealioCart.setUser("u1")
+// ... your screen ...
+FakeMealio.uninstall()                          // in @After
+```
+
+| | |
+|---|---|
+| `FakeScript` | `store`, `storeName`, `items`, `recipes`, `warnings`, `search` (query to products) or `searchWith`, `add` or `addFail`, `signIn` (a `LoginOutcome`, null = already signed in), `errors` (by `FakeKind`: `PREPARE`, `SEARCH`, `ADD`, `WARM`, `STORES`, `PREFERENCES`, `LOCATIONS`, `SESSION`), `stores`, `preferences`, `locations`, `warmSignedIn` |
+| `FakeItem` | `key`, `options`, `remembered`, `ingredient`, `quantity`, `rememberedPreferenceId`, `rememberedUnavailable`, `startUnchecked`, `weightLb`, `recipes`, `unavailable` |
+| `FakeError(code, message?, status?)` | with `status`: an HTTP error; without: a job that fails with `code` |
+| `fake.requests` / `fake.hostCalls` | what the client sent (`FakeRequest(kind, path, body, token)`) and what the store page was asked |
+| `fake.hold(kind)` | holds the next request of that kind until the returned function is called (test cancels and user switches) |
+| `fake.offered(cartId)` | products a cart offered; an add of anything else fails as `not_offered`, as on the server |
+| `fake.storeEpoch` | bumped by each store sign-out while installed |
+| `fake.config()`, `fake.client()`, `fake.host`, `fake.transport`, `TEST_KEYS`, `signTestEnvelope()` | build your own client |
 
 ## ProGuard / R8
 

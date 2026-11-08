@@ -18,15 +18,35 @@ const val FETCH_PER_MINUTE = 120
  */
 const val HOST_GRACE_MS = 5_000L
 
+/** Why a job ended with "cancelled". See [MealioException.reason]. */
+object CancelReason {
+    /** setUser moved to another user (or to nobody): prepare again for the new user. */
+    const val USER_CHANGED = "user_changed"
+    /** The sheet or screen that started it closed. */
+    const val CLOSED = "closed"
+    /** Anything else: cancelJobs, a store sign-out, resetSession, your own token. */
+    const val CANCELLED = "cancelled"
+}
+
 /** Stops a prepare or a search. See MealioClient.prepareCart. */
 class CancelToken {
     @Volatile var cancelled = false
         private set
+    /**
+     * Why it fired: [CancelReason.USER_CHANGED], [CancelReason.CLOSED] or
+     * [CancelReason.CANCELLED]. Null until it fires. The first reason given stays.
+     */
+    @Volatile var reason: String? = null
+        private set
     private val listeners = ArrayList<() -> Unit>()
 
-    fun cancel() {
+    fun cancel() = cancel(CancelReason.CANCELLED)
+
+    /** Fire with a reason the "cancelled" error carries (see [MealioException.reason]). */
+    fun cancel(reason: String) {
         val list = synchronized(this) {
             if (cancelled) return
+            this.reason = reason
             cancelled = true
             listeners.toList().also { listeners.clear() }
         }

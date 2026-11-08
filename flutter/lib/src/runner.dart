@@ -22,9 +22,16 @@ class CancelToken {
 
   bool get cancelled => _cancelled;
 
-  void cancel() {
+  /// Why it was cancelled (a `MealioCancelReason`), once it is.
+  String? get reason => _reason;
+  String? _reason;
+
+  /// Cancel. `reason` is what the `cancelled` error carries: `cancelled`
+  /// (the default), `closed` or `user_changed`. The first cancel's stands.
+  void cancel([String reason = 'cancelled']) {
     if (_cancelled) return;
     _cancelled = true;
+    _reason = reason;
     final list = _listeners;
     _listeners = <void Function()>[];
     for (final void Function() fn in list) {

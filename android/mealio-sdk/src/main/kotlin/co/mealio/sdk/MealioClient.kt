@@ -4,9 +4,11 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
@@ -75,7 +77,42 @@ fun stepOf(ins: Instruction): Step {
     }
 }
 
-class MealioException(val code: String, message: String, cause: Throwable? = null) : Exception(message, cause)
+class MealioException @JvmOverloads constructor(
+    val code: String,
+    message: String,
+    cause: Throwable? = null,
+    /**
+     * Set when `code` is "cancelled": [CancelReason.USER_CHANGED] (prepare
+     * again for the new user), [CancelReason.CLOSED] (the sheet closed) or
+     * [CancelReason.CANCELLED] (anything else). Null for other codes.
+     */
+    val reason: String? = null,
+) : Exception(message, cause)
+
+/** The "cancelled" error for a job stopped by `cancel` (its reason, else "cancelled"). */
+internal fun cancelledError(cancel: CancelToken?): MealioException =
+    MealioException("cancelled", "Cancelled", reason = cancel?.reason ?: CancelReason.CANCELLED)
+
+/** How long [MealioClient.runExclusive] may hold the job queue, whatever its work does. */
+const val EXCLUSIVE_CAP_MS = 60_000L
+
+/**
+ * The job queue: one job at a time on the hidden page. Clients that share a
+ * hidden page share one (MealioCart passes the same one to every client it
+ * configures). A new job waits for the one before it to end.
+ */
+class JobQueue {
+    internal val lock = Mutex()
+
+    /** Cart calls waiting or running. A warm-up does not start while any are. */
+    internal val pending = AtomicInteger(0)
+
+    /**
+     * Exclusive work outlived [EXCLUSIVE_CAP_MS] and the queue moved on without
+     * it: the page may be anywhere. The next job resets it first.
+     */
+    @Volatile internal var dirty = false
+}
 
 class MealioConfig(
     val publishableKey: String,
@@ -177,6 +214,8 @@ class MealioClient @JvmOverloads constructor(
     private val config: MealioConfig,
     private val host: Host,
     private val transport: HttpTransport = UrlConnectionTransport(),
+    /** Share one with every client that drives the same hidden page. */
+    private val queue: JobQueue = JobQueue(),
 ) {
     private val runner = Runner(host, Allowlist(), config.keys)
     private val base = config.baseUrl.trimEnd('/')
@@ -185,10 +224,10 @@ class MealioClient @JvmOverloads constructor(
      * One job at a time on the hidden page. Prepare, search, add and warm all
      * hold it, and a new job waits for the one before it to end (Mutex is fair).
      */
-    private val runLock = Mutex()
+    private val runLock get() = queue.lock
 
     /** Cart calls waiting or running. A warm-up does not start while any are. */
-    private val pending = AtomicInteger(0)
+    private val pending get() = queue.pending
 
     /** Tokens of the prepares and searches waiting or running. */
     private val active = LinkedHashSet<CancelToken>()
@@ -321,13 +360,12 @@ class MealioClient @JvmOverloads constructor(
             warmCancel = cancel
         }
         try {
-            runLock.withLock {
-                stopIf(cancel)
+            locked(cancel) {
                 val body = about(JSONObject().putIfNotNull("store", store))
                 stopIf(cancel)
                 val start = post("/api/v1/sdk/warm", body, cancel = cancel)
                 val job = start.opt("job") as? String
-                if (job == null) { if (!cancel.cancelled) warmed = null; return@withLock }
+                if (job == null) { if (!cancel.cancelled) warmed = null; return@locked }
                 val r = driveLoop(start, null, warm = true, cancel = cancel) as? JSONObject
                 val s = r?.opt("store") as? String
                 val w = if (r?.opt("signedIn") == true && s != null) {
@@ -378,41 +416,59 @@ class MealioClient @JvmOverloads constructor(
             tracksUser = true
             user = id
         }
-        cancelJobs()
+        cancelJobs(CancelReason.USER_CHANGED)
         resetSession()
         return wasTracked && old != null
     }
 
-    /** Cancel every prepare and search, waiting or running. An add is not touched. */
-    fun cancelJobs() {
+    /**
+     * Cancel every prepare and search, waiting or running. An add is not
+     * touched. A job waiting in the queue ends at once with "cancelled".
+     */
+    fun cancelJobs() = cancelJobs(CancelReason.CANCELLED)
+
+    /** As above, with the reason the "cancelled" errors carry. */
+    fun cancelJobs(reason: String) {
         val list = synchronized(active) { active.toList() }
-        for (c in list) c.cancel()
-        warmCancel?.cancel()
+        for (c in list) c.cancel(reason)
+        warmCancel?.cancel(reason)
     }
 
     /**
      * Run `block` with the hidden page to itself, in the queue with the jobs.
      * For work that must not land in the middle of one, like clearing store
-     * sessions. Fails with "network" after 30 seconds, but the queue stays
-     * held until `block` has really ended (it is cancelled then), so the next
-     * job never lands in the middle of it.
+     * sessions. Fails with "network" after 30 seconds (`block` is cancelled
+     * then). The queue stays held until `block` has really ended, but never
+     * longer than [EXCLUSIVE_CAP_MS]: after that the queue moves on without it,
+     * and the next job first resets the hidden page (about:blank).
      *
      * Its place in the queue is taken before the first suspension: called with
      * CoroutineStart.UNDISPATCHED, it is ahead of any job started afterwards.
      * A caller cancelled while it waits takes it out of the queue; one
-     * cancelled while it runs cancels it, and the queue waits for it to end.
+     * cancelled while it runs cancels it, and the queue waits for it to end
+     * (within the cap).
      */
     suspend fun <T> runExclusive(block: suspend () -> T): T {
         val started = CompletableDeferred<Unit>()
-        // Owned by no caller: the lock is let go only when block ends.
-        val work = CoroutineScope(currentCoroutineContext().minusKey(Job)).async(start = CoroutineStart.UNDISPATCHED) {
+        val scope = CoroutineScope(currentCoroutineContext().minusKey(Job))
+        val holder = CompletableDeferred<Deferred<T>>()
+        // Owned by no caller: the lock is let go when block ends, or at the cap.
+        val hold = scope.launch(start = CoroutineStart.UNDISPATCHED) {
             runLock.withLock {
                 started.complete(Unit)
-                block()
+                val work = scope.async(start = CoroutineStart.UNDISPATCHED) { block() }
+                holder.complete(work)
+                if (withTimeoutOrNull(EXCLUSIVE_CAP_MS) { work.join() } == null) {
+                    // Stuck past the cap: let the queue go, and have the next job
+                    // start from a clean page.
+                    work.cancel()
+                    queue.dirty = true
+                }
             }
         }
         try {
             started.await()
+            val work = holder.await()
             val box = withTimeoutOrNull(REQUEST_TIMEOUT_MS) { Box(work.await()) }
             if (box == null) {
                 work.cancel()
@@ -420,7 +476,7 @@ class MealioClient @JvmOverloads constructor(
             }
             return box.value
         } catch (e: CancellationException) {
-            work.cancel()
+            if (holder.isCompleted) holder.getCompleted().cancel() else hold.cancel()
             throw e
         }
     }
@@ -447,8 +503,11 @@ class MealioClient @JvmOverloads constructor(
             val fresh = try {
                 fetchToken()
             } catch (e: MealioException) {
+                // Cancelled (cancelJobs, a user change) while the token came:
+                // the job was over before the fetch failed.
+                if (cancel != null && cancel.cancelled) throw cancelledError(cancel)
                 if (synchronized(this) { gen != sessionGen }) {
-                    if (cancel != null) throw MealioException("cancelled", "Cancelled")
+                    if (cancel != null) throw cancelledError(cancel)
                     continue
                 }
                 throw e
@@ -460,7 +519,7 @@ class MealioClient @JvmOverloads constructor(
                     return Pin(fresh, gen)
                 }
             }
-            if (cancel != null) throw MealioException("cancelled", "Cancelled")
+            if (cancel != null) throw cancelledError(cancel)
         }
     }
 
@@ -542,13 +601,52 @@ class MealioClient @JvmOverloads constructor(
         pending.incrementAndGet()
         if (cancel != null) synchronized(active) { active.add(cancel) }
         try {
-            return runLock.withLock {
-                if (cancel != null) stopIf(cancel)
-                block()
-            }
+            return locked(cancel, block)
         } finally {
             pending.decrementAndGet()
             if (cancel != null) synchronized(active) { active.remove(cancel) }
+        }
+    }
+
+    /**
+     * `block` holding the queue. With `cancel`, a cancel while waiting for the
+     * queue ends the wait at once with "cancelled" and leaves the queue. A page
+     * left dirty by exclusive work past its cap is reset before `block` runs.
+     */
+    private suspend fun <T> locked(cancel: CancelToken?, block: suspend () -> T): T {
+        val owner = Any()
+        if (cancel == null) {
+            runLock.lock(owner)
+        } else {
+            stopIf(cancel)
+            val waiter = Job(currentCoroutineContext()[Job])
+            val off = cancel.onCancel { waiter.cancel() }
+            try {
+                withContext(waiter) { runLock.lock(owner) }
+            } catch (e: CancellationException) {
+                // The lock may have been taken just as the wait was cancelled.
+                if (runLock.holdsLock(owner)) runLock.unlock(owner)
+                if (cancel.cancelled && currentCoroutineContext().isActive) throw cancelledError(cancel)
+                throw e
+            } finally {
+                off()
+                waiter.complete()
+            }
+        }
+        try {
+            if (cancel != null) stopIf(cancel)
+            if (queue.dirty) {
+                queue.dirty = false
+                try {
+                    withTimeoutOrNull(REQUEST_TIMEOUT_MS) { host.resetPage() }
+                } catch (e: Throwable) {
+                    rethrowIfCancelled(e)
+                    if (e is Error) throw e
+                }
+            }
+            return block()
+        } finally {
+            runLock.unlock(owner)
         }
     }
 
@@ -701,7 +799,7 @@ private fun answer(res: HttpResponse): JSONObject {
 }
 
 private fun stopIf(cancel: CancelToken) {
-    if (cancel.cancelled) throw MealioException("cancelled", "Cancelled")
+    if (cancel.cancelled) throw cancelledError(cancel)
 }
 
 private fun debugLog(message: String) {

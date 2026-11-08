@@ -15,10 +15,14 @@ public let DEFAULT_BASE_URL = URL(string: "https://mealio.co")!
 public struct MealioError: Error, LocalizedError, Equatable, CustomStringConvertible {
     public let code: String
     public let message: String
+    /// On a `cancelled` error: why. `.userChanged` means prepare again for the
+    /// new user; `.closed` means the screen went away. Nil on other codes.
+    public let reason: CancelReason?
 
-    public init(code: String, message: String) {
+    public init(code: String, message: String, reason: CancelReason? = nil) {
         self.code = code
         self.message = message
+        self.reason = reason
     }
 
     public var errorDescription: String? { message }
@@ -111,6 +115,8 @@ public struct MealioClientConfig {
     public var queue: JobQueue?
     /// How long each request may take. Only tests shorten it.
     var requestTimeoutMs = REQUEST_TIMEOUT_MS
+    /// How long `runExclusive` may hold the queue. Only tests shorten it.
+    var exclusiveCapMs = MealioClient.exclusiveCapMs
 
     public init(publishableKey: String,
                 sessionTokenProvider: @escaping () async throws -> String,
@@ -164,8 +170,16 @@ public func stepOf(_ ins: Instruction) -> Step {
 /// Mirrors JobQueue in client.ts.
 @MainActor
 public final class JobQueue {
+    private struct Waiter {
+        let id: Int
+        /// Resumed with true when the page is handed over, false when the
+        /// job was cancelled while it waited.
+        let cont: CheckedContinuation<Bool, Never>
+    }
+
     private var busy = false
-    private var waiting: [CheckedContinuation<Void, Never>] = []
+    private var waiting: [Waiter] = []
+    private var nextWaiter = 0
     /// Cart calls waiting or running. A warm-up does not start while any are.
     public internal(set) var pending = 0
 
@@ -173,13 +187,13 @@ public final class JobQueue {
 
     /// Run `job` once every job queued before it has ended.
     public func run<T>(_ job: () async throws -> T) async throws -> T {
-        if busy {
-            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
-                waiting.append(c)
-            }
-        } else {
-            busy = true
-        }
+        try await run(cancel: nil, job)
+    }
+
+    /// As `run`, but a job cancelled while it waits leaves the line at once
+    /// and fails with `cancelled`, without waiting for its turn.
+    func run<T>(cancel: CancelToken?, _ job: () async throws -> T) async throws -> T {
+        try await take(cancel)
         defer { next() }
         return try await job()
     }
@@ -187,13 +201,8 @@ public final class JobQueue {
     /// Wait for the page, then hold it until the returned `release` is
     /// called. Calling `release` again does nothing.
     func acquire() async -> @MainActor () -> Void {
-        if busy {
-            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
-                waiting.append(c)
-            }
-        } else {
-            busy = true
-        }
+        // Without a token, take never throws.
+        try? await take(nil)
         var released = false
         return { [weak self] in
             if released { return }
@@ -202,14 +211,48 @@ public final class JobQueue {
         }
     }
 
+    /// Wait for the page and hold it. Throws `cancelled` (having left the
+    /// line) when `cancel` fires first.
+    private func take(_ cancel: CancelToken?) async throws {
+        if let c = cancel, c.cancelled { throw MealioClient.cancelled(c) }
+        if !busy {
+            busy = true
+            return
+        }
+        nextWaiter += 1
+        let id = nextWaiter
+        var stopListening: (() -> Void)?
+        let handedOver: Bool = await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
+            waiting.append(Waiter(id: id, cont: c))
+            if let token = cancel {
+                stopListening = token.onCancel { [weak self] in self?.leave(id) }
+            }
+        }
+        stopListening?()
+        if !handedOver { throw MealioClient.cancelled(cancel) }
+    }
+
+    /// A waiting job was cancelled: out of the line, and told so.
+    private func leave(_ id: Int) {
+        guard let i = waiting.firstIndex(where: { $0.id == id }) else { return }
+        let w = waiting.remove(at: i)
+        w.cont.resume(returning: false)
+    }
+
     /// Hand the page to the next job in line, or free it.
     private func next() {
         if waiting.isEmpty {
             busy = false
         } else {
-            waiting.removeFirst().resume()
+            waiting.removeFirst().cont.resume(returning: true)
         }
     }
+}
+
+/// Whether a `runExclusive` work has ended, shared by its two tasks.
+@MainActor
+final class ExclusiveRun {
+    var ended = false
 }
 
 /// An add's token, fixed when the add was asked for. Renewed on a 401 only
@@ -414,7 +457,9 @@ public final class MealioClient {
     private func runWarm(store: String?, cancel: CancelToken) async {
         struct Body: Encodable { let store: String?; let sdk: SDKInfo; let epoch: Int }
         do {
-            try await queue.run { () async throws -> Void in
+            try await queue.run(cancel: cancel) { () async throws -> Void in
+                try MealioClient.stopIf(cancel)
+                await self.cleanPageIfDirty()
                 try MealioClient.stopIf(cancel)
                 let a = self.about()
                 let start = try await self.post("/api/v1/sdk/warm", body: Body(store: store, sdk: a.sdk, epoch: a.epoch), cancel: cancel)
@@ -440,7 +485,7 @@ public final class MealioClient {
     public func resetSession() {
         sessionGen += 1
         token = nil
-        warmCancel?.cancel()
+        warmCancel?.cancel(reason: .userChanged)
         clearWarm()
     }
 
@@ -455,36 +500,76 @@ public final class MealioClient {
         let old = user
         if next == old { return false }
         user = next
-        cancelJobs()
+        cancelJobs(reason: .userChanged)
         resetSession()
         if case .signedIn = old { return true }
         return false
     }
 
-    /// Cancel every prepare and search, waiting or running. An add is not touched.
-    public func cancelJobs() {
-        for c in Array(active.values) { c.cancel() }
-        warmCancel?.cancel()
+    /// Cancel every prepare and search, waiting or running. An add is not
+    /// touched. Their `cancelled` error carries `reason`.
+    public func cancelJobs(reason: CancelReason = .cancelled) {
+        for c in Array(active.values) { c.cancel(reason: reason) }
+        warmCancel?.cancel(reason: reason)
     }
+
+    /// The most `runExclusive` holds the queue: past this the queue moves on
+    /// even if its work has not ended, and the next job starts from a clean page.
+    public static let exclusiveCapMs = 60_000
 
     /// Run `fn` with the hidden page to itself, in the queue with the jobs. For
     /// work that must not land in the middle of one, like clearing store
-    /// sessions. It gets 30 seconds, then fails with `network`. The page stays
-    /// held until `fn` has really ended, even after that (it is cancelled then).
+    /// sessions. It gets 30 seconds, then fails with `network`. The queue is
+    /// held until `fn` has really ended or for 60 seconds, whichever is first;
+    /// after the 60 the page is reset before the next job starts.
     public func runExclusive<T>(_ fn: @escaping @MainActor () async throws -> T) async throws -> T {
+        try await runExclusive(stoppable: { _ in try await fn() })
+    }
+
+    /// As `runExclusive`, and `fn` gets a token that fires at the deadline,
+    /// so each of its steps can stop.
+    func runExclusive<T>(stoppable fn: @escaping @MainActor (CancelToken) async throws -> T) async throws -> T {
         let ms = config.requestTimeoutMs
+        let cap = config.exclusiveCapMs
+        let stop = CancelToken()
         // Its place in the queue is taken now, before the first suspension.
         let release = await queue.acquire()
-        // The page is let go when `fn` really ends, never at the deadline:
-        // only the caller hears about the deadline.
-        let work = Task { @MainActor () async throws -> T in
-            defer { release() }
-            return try await fn()
+        // The queue is let go when `fn` really ends, or at the cap, whichever
+        // is first. Only the caller hears about the shorter deadline.
+        let state = ExclusiveRun()
+        let capTimer = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: nanoseconds(cap)) } catch { return }
+            if state.ended { return }
+            // Whatever it left on the hidden page is not trusted.
+            self?.pageDirty = true
+            stop.cancel()
+            release()
+        }
+        let work = Task { @MainActor [weak self] () async throws -> T in
+            defer {
+                state.ended = true
+                capTimer.cancel()
+                release()
+            }
+            await self?.cleanPageIfDirty()
+            return try await fn(stop)
         }
         return try await withDeadline(ms, late: {
+            stop.cancel()
             work.cancel()
             return .failure(MealioError(code: MealioError.Code.network, message: "That took too long"))
         }, { try await work.value })
+    }
+
+    /// Set when exclusive work outlived its cap: the next job loads a blank
+    /// page before it starts.
+    private(set) var pageDirty = false
+
+    /// Called at the start of every queued job.
+    private func cleanPageIfDirty() async {
+        guard pageDirty else { return }
+        pageDirty = false
+        runner.resetPage()
     }
 
     /// The current token. One that arrives after a reset belongs to the last
@@ -513,8 +598,14 @@ public final class MealioClient {
             } catch {
                 failed = error
             }
+            // Cancelled while the token was on its way (cancelJobs): that is
+            // the answer, even if the fetch failed too.
+            if let c = cancel { try MealioClient.stopIf(c) }
             if gen != sessionGen {
-                if cancel != nil { throw MealioClient.cancelledError }
+                // A reset during the fetch: the session belongs to someone else now.
+                if cancel != nil {
+                    throw MealioError(code: MealioError.Code.cancelled, message: "Cancelled", reason: .userChanged)
+                }
                 if pinned != nil { throw MealioClient.sessionChanged }
                 continue
             }
@@ -619,17 +710,24 @@ public final class MealioClient {
             queue.pending -= 1
             if let c = cancel { active[ObjectIdentifier(c)] = nil }
         }
-        return try await queue.run { () async throws -> T in
+        return try await queue.run(cancel: cancel) { () async throws -> T in
+            if let c = cancel { try MealioClient.stopIf(c) }
+            await self.cleanPageIfDirty()
             if let c = cancel { try MealioClient.stopIf(c) }
             return try await fn()
         }
     }
 
     static func stopIf(_ cancel: CancelToken) throws {
-        if cancel.cancelled { throw cancelledError }
+        if cancel.cancelled { throw cancelled(cancel) }
     }
 
-    static let cancelledError = MealioError(code: MealioError.Code.cancelled, message: "Cancelled")
+    /// The `cancelled` error, with the token's reason.
+    static func cancelled(_ token: CancelToken?) -> MealioError {
+        MealioError(code: MealioError.Code.cancelled, message: "Cancelled", reason: token?.reason ?? .cancelled)
+    }
+
+    static let cancelledError = MealioError(code: MealioError.Code.cancelled, message: "Cancelled", reason: .cancelled)
     static let sessionChanged = MealioError(code: MealioError.Code.sessionExpired, message: "The signed-in user changed")
 
     /// Drive a job to its end. A warm-up job may never show sign-in. `pin`

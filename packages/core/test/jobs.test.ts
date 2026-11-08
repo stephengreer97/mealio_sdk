@@ -445,13 +445,16 @@ describe('round 2: restorePicks', () => {
   it('keeps a product the user found with search, with its quantity', async () => {
     const mk = () => ({ cartId: 'c', store: 'heb', ready: [], needsChoice: [], unavailable: [], items: [
       { key: 'g', ingredient: 'garlic', quantity: 1, status: 'remembered', selectedId: 'p1', options: [{ id: 'p1', name: 'Garlic bulb', unitPrice: 1 }] }] } as any);
-    const client = { search: async () => ({ options: [{ id: 'p9', name: 'Minced garlic jar', unitPrice: 4 }] }) } as any;
+    // 0.6 round 3: by searching again on the new cart, never by carrying the product over.
+    const searched: string[] = [];
+    const client = { search: async (cartId: string) => { searched.push(cartId); return { options: [{ id: 'p9', name: 'Minced garlic jar', unitPrice: 4 }] }; } } as any;
     const a = new CartSession(client, mk());
     await a.search('g', 'minced garlic jar');
     a.select('g', 'p9');
     a.setQuantity('g', 2);
-    const b = new CartSession(client, mk());
-    b.restorePicks(a);
+    const b = new CartSession(client, { ...mk(), cartId: 'c2' });
+    await b.restorePicks(a);
+    expect(searched).toEqual(['c', 'c2']);
     expect(b.selections()).toEqual([{ key: 'g', productId: 'p9', quantity: 2, remember: true, preferenceId: null }]);
     expect(b.options('g').map((p) => p.id)).toEqual(['p1', 'p9']);
   });

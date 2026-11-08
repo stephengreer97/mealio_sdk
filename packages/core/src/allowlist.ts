@@ -267,18 +267,31 @@ export function mutationNames(doc: string): string[] {
 }
 
 /**
+ * A field of a multipart/form-data body sent as raw text (a string with the
+ * boundaries in it, not a FormData). Group 1 is the field's name, group 2 its
+ * value: everything after the part's blank line up to the next boundary line
+ * or the end. Parts named operationName, query and operations are judged as
+ * the form fields of the same names. Copy it exactly (flags: g).
+ */
+export const MULTIPART_FIELD = String.raw`name="(operationName|query|operations)"[^\r\n]*\r?\n(?:[^\r\n]+\r?\n)*\r?\n([\s\S]*?)(?=\r?\n--|$)`;
+
+/**
  * Does a request body name a blocked operation? Reads `operationName` the way
  * the server will (after JSON parsing, so `\\u004f` escapes do not hide it),
  * for a single request or a batch, or form-encoded, and the names of every
  * mutation it carries (see mutationNames). A GraphQL multipart upload's
- * `operations` field is JSON and is judged like a JSON body. A persisted query
- * that sends only an innocent name and a hash cannot be read here; the
+ * `operations` field is JSON and is judged like a JSON body, whether it comes
+ * form-encoded or as raw multipart text (MULTIPART_FIELD). A leading byte
+ * order mark is dropped first, as a server's JSON reader would. A persisted
+ * query that sends only an innocent name and a hash cannot be read here; the
  * signature on the envelope covers it. The guard script applies the same rule
  * to requests a page script makes; this applies it to the runner's own `fetch`
  * op, which never passes through the page.
  */
 export function bodyBlocked(body: string | null | undefined): boolean {
-  if (typeof body !== 'string' || !body) return false;
+  if (typeof body !== 'string') return false;
+  if (body.charCodeAt(0) === 0xfeff) body = body.slice(1);
+  if (!body) return false;
   const names: string[] = [];
   const docs: string[] = [];
   const raw = /"operationName"\s*:\s*"([^"]*)"/g;
@@ -291,7 +304,7 @@ export function bodyBlocked(body: string | null | undefined): boolean {
       if (typeof o.query === 'string') docs.push(o.query);
     }
   } catch {
-    // Not JSON: form-encoded, or a bare GraphQL document.
+    // Not JSON: form-encoded, raw multipart, or a bare GraphQL document.
     docs.push(body);
     const form = /(?:^|&)(operationName|query|operations)=([^&]*)/g;
     for (let m = form.exec(body); m; m = form.exec(body)) {
@@ -299,6 +312,12 @@ export function bodyBlocked(body: string | null | undefined): boolean {
       if (m[1] === 'query') docs.push(v);
       else if (m[1] === 'operations') { if (bodyBlocked(v)) return true; }
       else names.push(v);
+    }
+    const part = new RegExp(MULTIPART_FIELD, 'g');
+    for (let m = part.exec(body); m; m = part.exec(body)) {
+      if (m[1] === 'query') docs.push(m[2]);
+      else if (m[1] === 'operations') { if (bodyBlocked(m[2])) return true; }
+      else names.push(m[2]);
     }
   }
   for (const d of docs) names.push(...mutationNames(d));

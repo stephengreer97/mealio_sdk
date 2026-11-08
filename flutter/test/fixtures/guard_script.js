@@ -1,19 +1,12 @@
 (function(){
   if (window.__mealioGuard) return;
-  window.__mealioGuard = true;
   var BLOCK = new RegExp("checkout|payment|billing|wallet|place[-_]?order|submit[-_]?order|order[-_]?confirm|gift-?card|/account/(delete|close|security|password)|/addresses?/(add|edit|delete|new)|/orders?/(submit|place)(/|\\?|$)|/cart/confirm|/purchase(/|\\?|$)", 'i');
   var OPS = new RegExp("check_?out|place_?order|submit_?order|confirm_?order|create_?order|purchase|payment", 'i');
-  var stamps = [];
-  function pathOf(u) {
-    try { var a = new URL(String(u), location.href); return a.pathname + a.search; } catch (e) { return String(u || ''); }
-  }
+  var PART = "name=\"(operationName|query|operations)\"[^\\r\\n]*\\r?\\n(?:[^\\r\\n]+\\r?\\n)*\\r?\\n([\\s\\S]*?)(?=\\r?\\n--|$)";
+  var root = window, stamps = [];
   function decoded(s) {
     for (var i = 0; i < 2; i++) s = s.replace(/%([0-9a-f]{2})/gi, function (x, h) { return String.fromCharCode(parseInt(h, 16)); });
     return s;
-  }
-  function pathBlocked(u) {
-    var p = pathOf(u);
-    return BLOCK.test(p) || BLOCK.test(decoded(p));
   }
   function mutationNames(doc) {
     var text = doc.replace(/"""(?:\\"""|[\s\S])*?"""|"(?:[^"\\]|\\.)*"|#[^\n\r]*/g, ' ');
@@ -75,7 +68,9 @@
     return names;
   }
   function bodyBlocked(b) {
-    if (typeof b !== 'string' || !b) return false;
+    if (typeof b !== 'string') return false;
+    if (b.charCodeAt(0) === 0xFEFF) b = b.slice(1);
+    if (!b) return false;
     var names = [], docs = [], re = /"operationName"\s*:\s*"([^"]*)"/g, m, i;
     while ((m = re.exec(b))) names.push(m[1]);
     try {
@@ -96,41 +91,16 @@
         else if (m[1] === 'operations') { if (bodyBlocked(v)) return true; }
         else names.push(v);
       }
+      var part = new RegExp(PART, 'g');
+      while ((m = part.exec(b))) {
+        if (m[1] === 'query') docs.push(m[2]);
+        else if (m[1] === 'operations') { if (bodyBlocked(m[2])) return true; }
+        else names.push(m[2]);
+      }
     }
     for (i = 0; i < docs.length; i++) names = names.concat(mutationNames(docs[i]));
     for (i = 0; i < names.length; i++) if (OPS.test(names[i])) return true;
     return false;
-  }
-  function isA(v, name) {
-    return typeof window[name] === 'function' && v instanceof window[name];
-  }
-  function fromForm(f) {
-    var q = [], keys = ['operationName', 'query', 'operations'], i, k;
-    for (i = 0; i < keys.length; i++) { k = f.get(keys[i]); if (typeof k === 'string') q.push(keys[i] + '=' + encodeURIComponent(k)); }
-    return q.join('&');
-  }
-  // A body as text: a string now, or a promise for one when it has to be read.
-  function bodyText(b) {
-    if (b === null || b === undefined || typeof b === 'string') return b;
-    if (isA(b, 'URLSearchParams')) return String(b);
-    if (isA(b, 'FormData')) return fromForm(b);
-    if (isA(b, 'Blob')) return b.text();
-    if (isA(b, 'ArrayBuffer') || (window.ArrayBuffer && window.ArrayBuffer.isView && window.ArrayBuffer.isView(b))) return new window.Blob([b]).text();
-    return null;
-  }
-  // What a fetch call sends. init.body wins over a Request's own, as in fetch.
-  function fetchBody(input, init) {
-    if (init && init.body !== undefined && init.body !== null) return bodyText(init.body);
-    if (!input || typeof input !== 'object') return null;
-    if (typeof input.body === 'string') return input.body;
-    if (typeof input.clone !== 'function' || /^(GET|HEAD)$/i.test(input.method || 'GET')) return null;
-    // A body already read, or a stream that cannot be cloned, cannot be judged: it goes through.
-    try { return input.clone().text(); } catch (e) { return null; }
-  }
-  // Text that cannot be read goes through: fetch itself will fail on it.
-  function settled(text, go) {
-    if (!text || typeof text.then !== 'function') return go(text);
-    return text.then(go, function () { return go(null); });
   }
   function overRate() {
     var now = Date.now();
@@ -140,48 +110,167 @@
     return false;
   }
   function refuse(why) {
-    try { window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'MEALIO_GUARD_BLOCKED', why: why })); } catch (e) {}
+    try { root.ReactNativeWebView && root.ReactNativeWebView.postMessage(JSON.stringify({ type: 'MEALIO_GUARD_BLOCKED', why: why })); } catch (e) {}
     return new Error('mealio guard: ' + why);
   }
-  var f = window.fetch;
-  if (f) {
-    window.fetch = function (input, init) {
-      var url = (input && typeof input === 'object' && input.url) ? input.url : input;
-      var self = this, args = arguments;
-      if (pathBlocked(url)) return Promise.reject(refuse('blocked_path'));
-      return settled(fetchBody(input, init), function (body) {
-        if (bodyBlocked(body)) return Promise.reject(refuse('blocked_operation'));
-        if (overRate()) return Promise.reject(refuse('rate'));
-        return f.apply(self, args);
-      });
-    };
+  // A same-origin frame gets the guard too, the first time it is reached. A
+  // cross-origin one throws on the first read and is left alone: its requests
+  // carry its own origin, not the store's cookies.
+  function intoFrame(w) {
+    try { if (w && !w.__mealioGuard) install(w); } catch (e) {}
   }
-  var nav = window.navigator, beacon = nav && nav.sendBeacon;
-  if (beacon) {
-    // A beacon cannot wait for a Blob to be read, so only text bodies are allowed.
-    nav.sendBeacon = function (url, data) {
-      if (pathBlocked(url)) { refuse('blocked_path'); return false; }
-      var text = data == null ? '' : bodyText(data);
-      if (text && typeof text.then === 'function') { refuse('blocked_operation'); return false; }
-      if (bodyBlocked(text)) { refuse('blocked_operation'); return false; }
-      return beacon.apply(nav, arguments);
-    };
-  }
-  var X = window.XMLHttpRequest;
-  if (X && X.prototype) {
-    var open = X.prototype.open, send = X.prototype.send;
-    X.prototype.open = function (m, u) { this.__mealioUrl = u; return open.apply(this, arguments); };
-    X.prototype.send = function (b) {
-      var self = this, args = arguments, text = bodyText(b);
-      if (pathBlocked(this.__mealioUrl)) throw refuse('blocked_path');
-      function go(body) {
-        if (bodyBlocked(body)) throw refuse('blocked_operation');
-        if (overRate()) throw refuse('rate');
-        return send.apply(self, args);
-      }
+  // Every window the guard is in: the page and its same-origin frames.
+  function install(w) {
+    w.__mealioGuard = true;
+    var loc = w.location;
+    function pathOf(u) {
+      try { var a = new URL(String(u), loc.href); return a.pathname + a.search; } catch (e) { return String(u || ''); }
+    }
+    function pathBlocked(u) {
+      var p = pathOf(u);
+      return BLOCK.test(p) || BLOCK.test(decoded(p));
+    }
+    // A body may come from another frame of the page, so either one's classes count.
+    function isA(v, name) {
+      return (typeof w[name] === 'function' && v instanceof w[name]) || (typeof root[name] === 'function' && v instanceof root[name]);
+    }
+    function fromForm(f) {
+      var q = [], keys = ['operationName', 'query', 'operations'], i, k;
+      for (i = 0; i < keys.length; i++) { k = f.get(keys[i]); if (typeof k === 'string') q.push(keys[i] + '=' + encodeURIComponent(k)); }
+      return q.join('&');
+    }
+    // A body as text: a string now, or a promise for one when it has to be read.
+    function bodyText(b) {
+      if (b === null || b === undefined || typeof b === 'string') return b;
+      if (isA(b, 'URLSearchParams')) return String(b);
+      if (isA(b, 'FormData')) return fromForm(b);
+      if (isA(b, 'Blob')) return b.text();
+      var AB = w.ArrayBuffer;
+      if (isA(b, 'ArrayBuffer') || (AB && AB.isView && AB.isView(b))) return new w.Blob([b]).text();
+      return null;
+    }
+    // What a fetch call sends. init.body wins over a Request's own, as in fetch.
+    function fetchBody(input, init) {
+      if (init && init.body !== undefined && init.body !== null) return bodyText(init.body);
+      if (!input || typeof input !== 'object') return null;
+      if (typeof input.body === 'string') return input.body;
+      if (typeof input.clone !== 'function' || /^(GET|HEAD)$/i.test(input.method || 'GET')) return null;
+      // A body already read, or a stream that cannot be cloned, cannot be judged: it goes through.
+      try { return input.clone().text(); } catch (e) { return null; }
+    }
+    // Text that cannot be read goes through: fetch itself will fail on it.
+    function settled(text, go) {
       if (!text || typeof text.then !== 'function') return go(text);
-      // send() cannot wait, so a Blob is read first and sent after. A refused one never goes.
-      text.then(go, function () { return send.apply(self, args); }).then(null, function () { try { self.abort(); } catch (e) {} });
-    };
+      return text.then(go, function () { return go(null); });
+    }
+    var f = w.fetch;
+    if (f) {
+      w.fetch = function (input, init) {
+        var url = (input && typeof input === 'object' && input.url) ? input.url : input;
+        var self = this, args = arguments;
+        if (pathBlocked(url)) return Promise.reject(refuse('blocked_path'));
+        return settled(fetchBody(input, init), function (body) {
+          if (bodyBlocked(body)) return Promise.reject(refuse('blocked_operation'));
+          if (overRate()) return Promise.reject(refuse('rate'));
+          return f.apply(self, args);
+        });
+      };
+    }
+    var nav = w.navigator, beacon = nav && nav.sendBeacon;
+    if (beacon) {
+      // A beacon cannot wait for a Blob to be read, so only text bodies are allowed.
+      nav.sendBeacon = function (url, data) {
+        if (pathBlocked(url)) { refuse('blocked_path'); return false; }
+        var text = data == null ? '' : bodyText(data);
+        if (text && typeof text.then === 'function') { refuse('blocked_operation'); return false; }
+        if (bodyBlocked(text)) { refuse('blocked_operation'); return false; }
+        return beacon.apply(nav, arguments);
+      };
+    }
+    var X = w.XMLHttpRequest;
+    if (X && X.prototype) {
+      var open = X.prototype.open, send = X.prototype.send;
+      X.prototype.open = function (m, u) { this.__mealioUrl = u; return open.apply(this, arguments); };
+      X.prototype.send = function (b) {
+        var self = this, args = arguments, text = bodyText(b);
+        if (pathBlocked(this.__mealioUrl)) throw refuse('blocked_path');
+        function go(body) {
+          if (bodyBlocked(body)) throw refuse('blocked_operation');
+          if (overRate()) throw refuse('rate');
+          return send.apply(self, args);
+        }
+        if (!text || typeof text.then !== 'function') return go(text);
+        // send() cannot wait, so a Blob is read first and sent after. A refused one never goes.
+        text.then(go, function () { return send.apply(self, args); }).then(null, function () { try { self.abort(); } catch (e) {} });
+      };
+    }
+    // A worker runs outside every window, so its requests would pass unread.
+    // One made from the page's own text (blob: or data:) is refused; a worker
+    // script the store serves from its own https address is the store's code.
+    function guardWorker(name) {
+      var W = w[name];
+      if (typeof W !== 'function') return;
+      var G = function (url, opts) {
+        var scheme = '';
+        try { scheme = new URL(String(url), loc.href).protocol; } catch (e) {}
+        if (scheme === 'blob:' || scheme === 'data:') throw refuse('blocked_worker');
+        return arguments.length > 1 ? new W(url, opts) : new W(url);
+      };
+      G.prototype = W.prototype;
+      w[name] = G;
+    }
+    guardWorker('Worker');
+    guardWorker('SharedWorker');
+    // Frames: through the element's contentWindow and contentDocument, when
+    // one is added to the page, and again after each load.
+    var tags = ['HTMLIFrameElement', 'HTMLFrameElement', 'HTMLObjectElement'], t;
+    function hook(E, prop) {
+      var d = Object.getOwnPropertyDescriptor(E.prototype, prop);
+      if (!d || !d.get || !d.configurable) return;
+      Object.defineProperty(E.prototype, prop, {
+        configurable: true, enumerable: d.enumerable,
+        get: function () {
+          var v = d.get.call(this);
+          intoFrame(prop === 'contentWindow' ? v : v && v.defaultView);
+          return v;
+        },
+      });
+    }
+    for (t = 0; t < tags.length; t++) {
+      var E = w[tags[t]];
+      if (typeof E === 'function' && E.prototype && Object.getOwnPropertyDescriptor) { hook(E, 'contentWindow'); hook(E, 'contentDocument'); }
+    }
+    function watch(el) {
+      intoFrame(el.contentWindow);
+      if (el.__mealioWatched || !el.addEventListener) return;
+      el.__mealioWatched = true;
+      el.addEventListener('load', function () { intoFrame(el.contentWindow); });
+    }
+    function scan(n) {
+      if (!n || n.nodeType !== 1) return;
+      if (/^(IFRAME|FRAME|OBJECT)$/i.test(n.nodeName)) watch(n);
+      if (!n.getElementsByTagName) return;
+      var names = ['iframe', 'frame', 'object'], i, j, l;
+      for (i = 0; i < names.length; i++) {
+        l = n.getElementsByTagName(names[i]);
+        for (j = 0; j < l.length; j++) watch(l[j]);
+      }
+    }
+    var N = w.Node, ins = ['appendChild', 'insertBefore', 'replaceChild'];
+    if (N && N.prototype) {
+      for (t = 0; t < ins.length; t++) (function (name) {
+        var o = N.prototype[name];
+        if (typeof o !== 'function') return;
+        N.prototype[name] = function (n) { var r = o.apply(this, arguments); scan(n); return r; };
+      })(ins[t]);
+    }
+    var MO = w.MutationObserver, doc = w.document;
+    if (MO && doc) {
+      new MO(function (records) {
+        for (var i = 0; i < records.length; i++) for (var j = 0; j < records[i].addedNodes.length; j++) scan(records[i].addedNodes[j]);
+      }).observe(doc, { childList: true, subtree: true });
+      scan(doc.documentElement);
+    }
   }
+  install(window);
 })(); true;

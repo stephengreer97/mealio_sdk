@@ -11,18 +11,33 @@ public let FETCH_PER_MINUTE = 120
 /// Host that never answers ends the step here, so no job can hang.
 public let HOST_GRACE_MS = 5_000
 
+/// Why a prepare or search was cancelled. Carried as `MealioError.reason`
+/// on the `cancelled` error, so a custom screen can tell a user change (prepare
+/// again for the new user) from its own close.
+public enum CancelReason: String, Equatable {
+    /// `setUser` changed the signed-in user.
+    case userChanged = "user_changed"
+    /// The sheet or screen that asked for it closed.
+    case closed
+    /// Anything else: `cancelJobs`, a store sign-out, a session reset, your own token.
+    case cancelled
+}
+
 /// Stops a prepare or a search. See `MealioClient.prepareCart`.
 @MainActor
 public final class CancelToken {
     public private(set) var cancelled = false
+    /// Why, once cancelled. The first cancel's reason stands.
+    public private(set) var reason: CancelReason?
     private var listeners: [Int: () -> Void] = [:]
     private var nextId = 0
 
     public init() {}
 
-    public func cancel() {
+    public func cancel(reason: CancelReason = .cancelled) {
         if cancelled { return }
         cancelled = true
+        self.reason = reason
         let list = listeners.sorted { $0.key < $1.key }.map(\.value)
         listeners = [:]
         for fn in list { fn() }
@@ -73,6 +88,37 @@ func withDeadline<T>(_ ms: Int, late: @escaping @MainActor () -> Result<T, Error
     return try result.get()
 }
 
+/// Run `op` until it ends, `ms` passes, or `cancel` fires, whichever is
+/// first. Returns true when `op` ended. A late `op` is cancelled and left to
+/// finish on its own. Used for every step of a store sign-out.
+@MainActor
+@discardableResult
+func boundedStep(_ ms: Int, cancel: CancelToken?, _ op: @escaping @MainActor () async -> Void) async -> Bool {
+    if cancel?.cancelled == true { return false }
+    let box = TaskBox()
+    var stopListening: (() -> Void)?
+    let finished: Bool = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+        let once = ResumeOnce(cont)
+        let timer = Task { @MainActor in
+            do { try await Task.sleep(nanoseconds: nanoseconds(ms)) } catch { return }
+            if once.resume(false) { box.task?.cancel() }
+        }
+        if let token = cancel {
+            stopListening = token.onCancel {
+                timer.cancel()
+                if once.resume(false) { box.task?.cancel() }
+            }
+        }
+        box.task = Task { @MainActor in
+            await op()
+            once.resume(true)
+            timer.cancel()
+        }
+    }
+    stopListening?()
+    return finished
+}
+
 /// The task running a deadline's work, so the timer can cancel it.
 final class TaskBox: @unchecked Sendable {
     var task: Task<Void, Never>?
@@ -105,6 +151,13 @@ public final class Runner {
     /// worth anything while the page it left behind is still the one showing,
     /// and this is how the client knows nothing has loaded over it since.
     public private(set) var pageOpens = 0
+
+    /// Load a blank hidden page (work that outlived its cap may have left
+    /// anything on it). A warm-up's page is gone after this.
+    func resetPage() {
+        pageOpens += 1
+        host.resetPage()
+    }
 
     public init(host: MealioHost, allowlist: Allowlist = Allowlist(), keys: [String: String] = MealioKeys.all) {
         self.host = host

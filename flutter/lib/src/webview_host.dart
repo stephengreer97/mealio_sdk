@@ -25,6 +25,7 @@ import 'guard.dart';
 import 'host.dart';
 import 'matcher.dart';
 import 'protocol.dart';
+import 'runner.dart' show CancelToken;
 import 'theme.dart';
 import 'ui.dart';
 
@@ -219,7 +220,7 @@ class MealioLoginView {
 }
 
 /// The Flutter [MealioHost]. One per app, created and drawn by `MealioScope`.
-class WebViewHost implements MealioHost {
+class WebViewHost implements MealioHost, MealioPageReset {
   WebViewHost() {
     hidden = _newController(
       // Read per message: it changes with every script.
@@ -790,25 +791,42 @@ class WebViewHost implements MealioHost {
 
   /// Clears every cookie in the shared store and the hidden page's local
   /// storage. webview_flutter cannot clear one site's cookies, only all.
-  Future<void> clearStoreSessions() async {
-    try {
-      await WebViewCookieManager().clearCookies();
-    } catch (_) {
-      // No WebView platform (tests); nothing to clear.
-    }
-    try {
-      await hidden.clearLocalStorage();
-    } catch (_) {
-      // Best effort; cookies are what hold the store login.
-    }
-    try {
-      await hidden.clearCache();
-    } catch (_) {
-      // Best effort.
-    }
+  /// Each platform call gets [storeStepTimeout], and none starts after
+  /// `cancel` fires.
+  Future<void> clearStoreSessions({CancelToken? cancel}) async {
+    await boundedStoreStep(() => WebViewCookieManager().clearCookies(), cancel);
+    await boundedStoreStep(hidden.clearLocalStorage, cancel);
+    await boundedStoreStep(hidden.clearCache, cancel);
+    if (cancel?.cancelled ?? false) return;
     // The signed-out store page must not stay up in the hidden WebView.
     _pageStore = null;
-    await _loadBlank(hidden);
+    await boundedStoreStep(() => _loadBlank(hidden), cancel);
+  }
+
+  /// Load a blank page in the hidden WebView and forget the store page. A
+  /// warm-up made on the old page is not offered.
+  @override
+  Future<void> resetPage() async {
+    _load?.end(const _LoadEnd(error: 'superseded'));
+    _pageStore = null;
+    _page = Object();
+    await boundedStoreStep(() => _loadBlank(hidden), null);
+  }
+}
+
+/// How long each step of a store sign-out may take: clearing cookies,
+/// reading and writing the stored epoch, resetting the page.
+const Duration storeStepTimeout = Duration(seconds: 10);
+
+/// Runs `step`, given [storeStepTimeout]. Null when it failed or ran out of
+/// time, and when `cancel` had fired (then `step` is not started). A step
+/// that never answers is left behind. Never throws.
+Future<T?> boundedStoreStep<T>(Future<T> Function() step, CancelToken? cancel) async {
+  if (cancel?.cancelled ?? false) return null;
+  try {
+    return await Future<T>.sync(step).timeout(storeStepTimeout);
+  } catch (_) {
+    return null;
   }
 }
 

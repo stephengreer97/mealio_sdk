@@ -140,7 +140,9 @@ public enum MealioCart {
         guard let client = client else { return }
         if client.setUser(id) {
             Task { @MainActor in
-                _ = try? await client.runExclusive { await MealioCart.clearStores(using: client) }
+                _ = try? await client.runExclusive(stoppable: { stop in
+                    await MealioCart.clearStores(nil, using: client, stop: stop)
+                })
             }
         }
     }
@@ -235,16 +237,16 @@ public enum MealioCart {
     /// under way finishes first.
     public static func signOutOfStore(_ store: String) async {
         guard let client = client else {
-            await WebViewHost.clearWebsiteData(forDomains: domains(of: [store], in: Allowlist()))
-            StoreEpoch.bump()
+            let d = domains(of: [store], in: Allowlist())
+            await boundedStep(signOutStepMs, cancel: nil) { await WebViewHost.clearWebsiteData(forDomains: d) }
+            await boundedStep(signOutStepMs, cancel: nil) { _ = StoreEpoch.bump() }
             return
         }
         client.cancelJobs()
         client.resetSession()
-        _ = try? await client.runExclusive {
-            await WebViewHost.clearWebsiteData(forDomains: MealioCart.domains(of: [store], in: client.allowlist))
-            MealioCart.afterSignOut()
-        }
+        _ = try? await client.runExclusive(stoppable: { stop in
+            await MealioCart.clearStores([store], using: client, stop: stop)
+        })
     }
 
     /// Forget the user's login at every Mealio store. Website data of other
@@ -253,21 +255,29 @@ public enum MealioCart {
     public static func signOutOfAllStores() async {
         guard let client = client else {
             let allowlist = Allowlist()
-            await WebViewHost.clearWebsiteData(forDomains: domains(of: allowlist.storeIds, in: allowlist))
-            StoreEpoch.bump()
+            let d = domains(of: allowlist.storeIds, in: allowlist)
+            await boundedStep(signOutStepMs, cancel: nil) { await WebViewHost.clearWebsiteData(forDomains: d) }
+            await boundedStep(signOutStepMs, cancel: nil) { _ = StoreEpoch.bump() }
             return
         }
         client.cancelJobs()
         client.resetSession()
-        _ = try? await client.runExclusive { await MealioCart.clearStores(using: client) }
+        _ = try? await client.runExclusive(stoppable: { stop in
+            await MealioCart.clearStores(nil, using: client, stop: stop)
+        })
     }
 
-    /// Every store's website data, the hidden page and the session. Runs in
-    /// the job queue, so nothing is driving the page meanwhile.
-    private static func clearStores(using client: MealioClient) async {
+    /// Each step of a store sign-out gets this long (and stops when its token fires).
+    static let signOutStepMs = 10_000
+
+    /// The website data of `stores` (nil: every store), the hidden page and
+    /// the session. Runs in the job queue, so nothing is driving the page
+    /// meanwhile. Every step is bounded and stops when `stop` fires.
+    private static func clearStores(_ stores: [String]?, using client: MealioClient, stop: CancelToken) async {
         let allowlist = client.allowlist
-        await WebViewHost.clearWebsiteData(forDomains: domains(of: allowlist.storeIds, in: allowlist))
-        afterSignOut()
+        let d = domains(of: stores ?? allowlist.storeIds, in: allowlist)
+        await boundedStep(signOutStepMs, cancel: stop) { await WebViewHost.clearWebsiteData(forDomains: d) }
+        await afterSignOut(stop: stop)
     }
 
     /// The signed-in user changed. Forget the session, so the next call asks
@@ -286,10 +296,10 @@ public enum MealioCart {
         await client?.warm(store: store)
     }
 
-    private static func afterSignOut() {
-        client?.resetSession()
-        host?.resetHiddenPage()
-        StoreEpoch.bump()
+    private static func afterSignOut(stop: CancelToken) async {
+        MealioCart.client?.resetSession()
+        await boundedStep(signOutStepMs, cancel: stop) { MealioCart.host?.resetHiddenPage() }
+        await boundedStep(signOutStepMs, cancel: stop) { _ = StoreEpoch.bump() }
     }
 
     private static func domains(of stores: [String], in allowlist: Allowlist) -> Set<String> {

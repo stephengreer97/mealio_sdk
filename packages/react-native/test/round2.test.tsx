@@ -135,7 +135,7 @@ describe('the Jest kit stays in step with the package', () => {
   const kit = require('../jest.js');
 
   it('exports every name the package does, and only its own helpers besides', () => {
-    const mine = ['mockCart', 'setMockUser'];
+    const mine = ['mockCart', 'setMockUser', 'resetMealioMock'];
     expect(Object.keys(kit).filter((k) => !mine.includes(k)).sort()).toEqual(Object.keys(real).sort());
   });
 

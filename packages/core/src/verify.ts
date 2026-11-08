@@ -1,11 +1,7 @@
-import * as ed from '@noble/ed25519';
-import { sha512 } from '@noble/hashes/sha512';
+import { ed } from './noble';
 import { EXP_SKEW_SECONDS, MAX_INSTRUCTIONS, PROTOCOL_VERSION, SUPPORTED_OPS } from './protocol';
 import type { Envelope, InstructionsPayload, Payload } from './protocol';
 import { KEYS } from './keys';
-
-// React Native has no WebCrypto, so give noble a synchronous sha512.
-ed.etc.sha512Sync = (...m: Uint8Array[]) => sha512(ed.etc.concatBytes(...m));
 
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 

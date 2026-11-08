@@ -46,6 +46,9 @@ export interface MealioCartFlowProps {
   doneAction?: { label: string; onPress: (result: AddResult) => void };
 }
 
+/** Restarts in a row after outside cancels, per sheet opening. The next one shows the error screen. */
+export const MAX_RESTARTS = 3;
+
 type Phase = 'loading' | 'list' | 'adding' | 'done' | 'error' | 'stores' | 'location';
 
 export function MealioCartFlow(props: MealioCartFlowProps) {
@@ -65,6 +68,11 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
   const preparing = useRef<CancelToken | null>(null);
   /** The add under way. It runs to its end: nothing closes the sheet meanwhile. */
   const adding = useRef(false);
+  /**
+   * Restarts in a row after a cancel from outside the sheet. Reset by a
+   * prepare that succeeds and by the user (Try again, picking a store).
+   */
+  const restarts = useRef(0);
   /** The cart of a failed add, so Try again keeps the user's picks. */
   const failedAdd = useRef<CartSession | null>(null);
   /** The latest props, cart and user, for callbacks that outlive a render. */
@@ -109,9 +117,10 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
     openLocation(from);
   }, [ui, openLocation]);
 
-  const start = useCallback(async (storeId: string | null) => {
+  const start = useCallback(async (storeId: string | null, byUser = false) => {
     const id = ++run.current;
-    preparing.current?.cancel();
+    if (byUser) restarts.current = 0;
+    preparing.current?.cancel('closed');
     const cancel = new CancelToken();
     preparing.current = cancel;
     setStore(storeId);
@@ -119,17 +128,23 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
     try {
       const c = await mealio.prepareCart({ store: storeId, recipes }, { cancel, onStep: (s) => run.current === id && setStep(s) });
       if (run.current !== id) return;
-      if (failedAdd.current) { c.restorePicks(failedAdd.current); failedAdd.current = null; }
+      // A product found with search is searched for again on this cart.
+      if (failedAdd.current) { const from = failedAdd.current; setStep('searching'); await c.restorePicks(from, { cancel }); }
+      if (run.current !== id) return;
+      failedAdd.current = null;
+      restarts.current = 0;
       setStore(c.store); setCart(c); setPhase('list');
       ui.emit({ type: 'list_shown', store: c.store, items: c.items.length });
     } catch (e: any) {
       if (run.current !== id) return;
       if (e?.code === 'cancelled') {
-        // Stopped by something other than this sheet, like a store sign-out or
-        // cancelJobs. Still open for the same user: load again. Never an error.
+        // Stopped by something other than this sheet, like a store sign-out,
+        // cancelJobs, or resetSession during the token fetch. Still open for
+        // the same user: load again, at most MAX_RESTARTS times in a row; after
+        // that the error screen, with Try again.
         const now = latest.current;
-        if (now.props.visible && now.userId === openedFor.current) start(storeId);
-        return;
+        if (!now.props.visible || now.userId !== openedFor.current) return;
+        if (restarts.current < MAX_RESTARTS) { restarts.current += 1; start(storeId); return; }
       }
       if (e?.code === 'store_required' || e?.code === 'store_not_allowed') { setStore(null); openStores('error'); return; }
       if (e?.code === 'location_required') {
@@ -138,7 +153,7 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
         if (storeId) { setStore(storeId); askLocation(storeId, 'error'); } else openStores('error');
         return;
       }
-      setError({ code: e?.code || 'error', message: e?.message || ui.tr('somethingWrongSentence') });
+      setError({ code: e?.code || 'error', message: (e?.code !== 'cancelled' && e?.message) || ui.tr('somethingWrongSentence') });
       setPhase('error');
       ui.emit({ type: 'error', code: e?.code || 'error', step: 'loading' });
       latest.current.props.onError?.(e);
@@ -149,7 +164,7 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
   /** Stop what can be stopped. Nothing it was doing reports afterwards. */
   const stop = useCallback(() => {
     run.current += 1;
-    preparing.current?.cancel();
+    preparing.current?.cancel('closed');
     latest.current.cart?.cancelSearches();
   }, []);
 
@@ -160,6 +175,7 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
     if (!visible) { stop(); return; }
     openedFor.current = mealio.userId;
     failedAdd.current = null;
+    restarts.current = 0;
     ui.emit({ type: 'sheet_opened', recipes: recipes.length });
     start(props.store ?? null);
   }, [visible]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -252,11 +268,11 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
           ) : phase === 'loading' ? (
             <Loading t={t} step={step} storeName={storeName} count={lineCount} />
           ) : phase === 'stores' ? (
-            <StorePicker t={t} stores={stores} current={store} onPick={(id) => { ui.emit({ type: 'store_picked', store: id }); setStore(id); start(id); }}
+            <StorePicker t={t} stores={stores} current={store} onPick={(id) => { ui.emit({ type: 'store_picked', store: id }); setStore(id); start(id, true); }}
               onBack={cart && backTo.current === 'list' ? () => setPhase('list') : null} />
           ) : phase === 'location' && store ? (
             <LocationPicker t={t} store={store} storeName={storeName} zip={cart?.cart.location?.zip ?? props.zip ?? null} current={cart?.cart.location?.id ?? null}
-              onPicked={() => start(store)}
+              onPicked={() => start(store, true)}
               back={cart && backTo.current === 'list'
                 ? { label: ui.tr('backToList'), onPress: () => setPhase('list') }
                 : { label: ui.tr('differentStore'), onPress: () => openStores('error') }} />
@@ -267,7 +283,7 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
             <Done t={t} cart={cart} result={result} storeName={storeName} onDone={close} message={props.doneMessage}
               action={props.doneAction ? { label: props.doneAction.label, onPress: () => { close(); props.doneAction!.onPress(result); } } : null} />
           ) : (
-            <ErrorView t={t} error={error} note={failedAdd.current ? ui.tr('addFailedNote') : null} onRetry={() => start(store)} onClose={close} />
+            <ErrorView t={t} error={error} note={failedAdd.current ? ui.tr('addFailedNote') : null} onRetry={() => start(store, true)} onClose={close} />
           )}
         </KeyboardAvoidingView>
       </View>

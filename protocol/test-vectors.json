@@ -531,6 +531,54 @@
     {
       "body": "{\"operationName\":\"updateItems\",\"variables\":{}}",
       "blocked": false
+    },
+    {
+      "body": "\ufeff{\"query\":\"mutation { placeOrder { id } }\"}",
+      "blocked": true
+    },
+    {
+      "body": "\ufeff[{\"operationName\":\"Search\"},{\"operationName\":\"submitOrder\"}]",
+      "blocked": true
+    },
+    {
+      "body": "\ufeff{\"operationName\":\"cartItemsV2\",\"variables\":{}}",
+      "blocked": false
+    },
+    {
+      "body": "\ufeff",
+      "blocked": false
+    },
+    {
+      "body": "--b\r\nContent-Disposition: form-data; name=\"operations\"\r\n\r\n{\"query\":\"mutation { placeOrder { id } }\",\"variables\":{}}\r\n--b\r\nContent-Disposition: form-data; name=\"map\"\r\n\r\n{}\r\n--b--\r\n",
+      "blocked": true
+    },
+    {
+      "body": "--b\r\nContent-Disposition: form-data; name=\"operations\"\r\nContent-Type: application/json\r\n\r\n[{\"operationName\":\"Search\"},{\"operationName\":\"submit_order\"}]\r\n--b--",
+      "blocked": true
+    },
+    {
+      "body": "--b\nContent-Disposition: form-data; name=\"operations\"\n\n{\"query\":\"mutation Go { checkoutComplete { id } }\"}\n--b--\n",
+      "blocked": true
+    },
+    {
+      "body": "--b\r\nContent-Disposition: form-data; name=\"operations\"\r\n\r\n\ufeff{\"query\":\"mutation { placeOrder { id } }\"}",
+      "blocked": true
+    },
+    {
+      "body": "--b\r\nContent-Disposition: form-data; name=\"query\"\r\n\r\nmutation { placeOrder { id } }\r\n--b--",
+      "blocked": true
+    },
+    {
+      "body": "--b\r\nContent-Disposition: form-data; name=\"operationName\"\r\n\r\nPlaceOrder\r\n--b--",
+      "blocked": true
+    },
+    {
+      "body": "--b\r\nContent-Disposition: form-data; name=\"operations\"\r\n\r\n{\"query\":\"mutation Upload($f: Upload!) { uploadPhoto(file: $f) { id } }\",\"variables\":{\"f\":null}}\r\n--b\r\nContent-Disposition: form-data; name=\"map\"\r\n\r\n{\"0\":[\"variables.f\"]}\r\n--b\r\nContent-Disposition: form-data; name=\"0\"; filename=\"a.jpg\"\r\nContent-Type: image/jpeg\r\n\r\nplaceOrder checkout\r\n--b--\r\n",
+      "blocked": false
+    },
+    {
+      "body": "--b\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\n{\"query\":\"mutation { placeOrder { id } }\"}\r\n--b--",
+      "blocked": false
     }
   ],
   "matchers": [

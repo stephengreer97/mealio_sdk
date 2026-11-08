@@ -96,3 +96,11 @@ abstract interface class MealioPageIdentity {
   /// The hidden page now in use, compared by identity.
   Object? get currentPage;
 }
+
+/// A Host that can put its hidden page back to a blank one. After exclusive
+/// work outlives its cap (`MealioClient.runExclusive`) the page may be left
+/// half way, so the next job calls this before it starts.
+abstract interface class MealioPageReset {
+  /// Load a blank page and forget the store page. Bounded by the client.
+  Future<void> resetPage();
+}

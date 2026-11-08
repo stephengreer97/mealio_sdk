@@ -30,6 +30,22 @@ jest.mock('@mealio/react-native-cart', () => require('@mealio/react-native-cart/
 ```
 
 `mockCart()` gives a cart with every CartSession member. To test a guest, call `setMockUser(null)` from `@mealio/react-native-cart/jest`: `hasUser` is false and the button calls `onSignInRequired`.
+The mock resets itself after every test (`resetMealioMock()`), so `setMockUser` and scripted answers never leak into the next one.
+
+To test your own screens built on `useMealio()` against the real client, use the testing kit. No network, no WebView, no `transformIgnorePatterns`:
+
+```tsx
+import { createFakeMealio } from '@mealio/react-native-cart/testing';
+
+const fake = createFakeMealio({
+  items: [{ key: 'garlic', options: [{ id: 'g1', name: 'Garlic', unitPrice: 0.5 }], remembered: 'g1' }],
+  search: { 'minced garlic': [{ id: 'jar', name: 'Minced garlic jar', unitPrice: 3 }] },
+});
+render(<MealioProvider publishableKey="pk" getSessionToken={async () => 't'} testing={fake}><MyScreen /></MealioProvider>);
+// fake.requests, fake.hostCalls, fake.hold('prepare'), fake.script.add = { fail: 'store_unavailable' } ...
+```
+
+A prepare that is cancelled fails with `code: 'cancelled'` and a `reason`: `user_changed` (prepare again for the new user), `closed`, or `cancelled`.
 
 Get keys and read the full guide at https://developers.mealio.co.
 

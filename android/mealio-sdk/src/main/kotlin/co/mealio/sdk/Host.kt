@@ -47,6 +47,12 @@ interface Host {
      */
     val pagesLost: Int get() = 0
 
+    /**
+     * Leave the hidden page blank (about:blank). Called before a job when
+     * exclusive work outlived its cap and the page may be anywhere.
+     */
+    suspend fun resetPage() = Unit
+
     /** Load `url` in the hidden WebView. */
     suspend fun openPage(store: String, url: String, timeoutMs: Long): PageLoad
 

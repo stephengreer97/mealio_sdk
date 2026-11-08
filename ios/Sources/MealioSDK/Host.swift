@@ -108,6 +108,15 @@ public protocol MealioHost: AnyObject {
 
     /// One HTTP request with the store's cookies.
     func fetch(store: String, request: FetchRequest, timeoutMs: Int, maxBytes: Int) async throws -> FetchOutcome
+
+    /// Drop whatever the hidden page shows (load about:blank, or a fresh
+    /// page). Called before a job when earlier exclusive work outlived its
+    /// cap. Optional: the default does nothing.
+    func resetPage()
+}
+
+public extension MealioHost {
+    func resetPage() {}
 }
 
 /// Resumes a continuation exactly once, from any thread. Used by every wait

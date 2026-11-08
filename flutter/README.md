@@ -271,6 +271,14 @@ final stores = await MealioCart.instance.stores(); // id, name, via
 for hosting in your own sheet. `MealioCartSheet.show(context, session)` (the
 0.1 sheet) still works and now shows the same list.
 
+After a failed add, `await next.restorePicks(failed)` carries the user's
+picks to a new cart. A product they found with `search` is searched again on
+the new cart (Mealio only knows it on the cart it was found in) and kept if it
+comes back; otherwise that item keeps the new cart's pick.
+
+A `cancelled` error carries `reason`: `user_changed` (prepare again for the
+new user), `closed` (the sheet closed) or `cancelled`.
+
 If your app already has classes named `Recipe` or `Product`, import with a
 prefix: `import 'package:mealio_sdk/mealio_sdk.dart' as mealio;`.
 
@@ -323,7 +331,7 @@ Every failure is a `MealioException(code, message)`.
 | `session_expired` | The SDK session token expired; get a new one from your server |
 | `session_failed` | Your `sessionTokenProvider` threw or took over 30 seconds. `message` is your error's |
 | `not_signed_in` | `setUser(null)`: nobody is signed in, so nothing was asked of your server |
-| `cancelled` | A prepare or search was stopped: the sheet closed, or the user changed |
+| `cancelled` | A prepare or search was stopped. `reason` says why: `user_changed`, `closed` or `cancelled` |
 | `network` | Could not reach Mealio, or it did not answer within 30 seconds |
 | `unsupported` | An instruction `op` this SDK does not know |
 | `server` | Mealio answered with an error the protocol does not name |
@@ -389,6 +397,19 @@ testWidgets('recipe screen', (tester) async {
   error screen and the warm-up does nothing.
 - `MealioFakeWebViewController.all` holds every WebView the SDK made, with the
   loads and scripts it asked for.
+- `configureMealioForTesting(fake: MealioFake(script))` runs the real client
+  and the real sheet against a scripted Mealio. The script is plain data, the
+  same format as `@mealio/sdk-core/testing`: `items` (`MealioFakeItem` with
+  `options`, prices on each `Product`, `remembered`, `startUnchecked`,
+  `weightLb`, `unavailable`), `search` results per query, `addFailure` or
+  `onAdd`, `signIn` (`signed_in`, `cancelled`, `timeout`), `errors` by call
+  (`MealioFakeError(code, status: ...)`), `warnings`, `stores`,
+  `preferences`, `locations`, `warm`. Its store page is a fake too, so no
+  WebView is driven. `fake.requests` and `fake.hostCalls` record what was
+  sent; `fake.hold('prepare')` holds a request until you release it. The
+  test key it signs with (`mealioTestKeys`) is trusted only by a test
+  configuration and refused in a release build. Without widgets:
+  `await fake.client().prepareCart(recipe: r)`.
 - To test the sheet with a list of your own, open it with
   `MealioCartFlow.show(context, recipe: r, prepareCart: ...)` and return a
   `CartSession` from `prepareCart`.

@@ -53,14 +53,31 @@ abstract final class MealioErrorCode {
   static const String notConfigured = 'not_configured';
 }
 
+/// Why a call failed with `cancelled` ([MealioException.reason]).
+abstract final class MealioCancelReason {
+  /// The signed-in user changed (`setUser`, or `resetSession` while the call
+  /// waited for its session). Prepare again for the new user.
+  static const String userChanged = 'user_changed';
+
+  /// The sheet that started it closed.
+  static const String closed = 'closed';
+
+  /// Anything else: `cancelJobs`, a store sign-out, a new `configure`, your
+  /// own `CancelToken`.
+  static const String cancelled = 'cancelled';
+}
+
 /// Any failure the SDK reports to the app. `code` is one of
 /// [MealioErrorCode], or a `fail` code the server sent.
 class MealioException implements Exception {
-  const MealioException(this.code, this.message);
+  const MealioException(this.code, this.message, {this.reason});
 
   final String code;
   final String message;
 
+  /// For `cancelled` only: why, one of [MealioCancelReason]. Null otherwise.
+  final String? reason;
+
   @override
-  String toString() => 'MealioException($code): $message';
+  String toString() => 'MealioException($code${reason == null ? '' : ', $reason'}): $message';
 }

@@ -3,6 +3,9 @@ package co.mealio.sdk
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
@@ -46,6 +49,7 @@ class JobsTest {
         override suspend fun runScript(store: String, guard: String, script: String, until: List<Matcher>, timeoutMs: Long): ScriptRun { calls += "script"; return script() }
         override suspend fun showLogin(request: LoginRequest): LoginResult { calls += "login"; return signIn(request) }
         override suspend fun fetch(store: String, request: FetchRequest, timeoutMs: Long, maxBytes: Int) = FetchResponse(ok = true, status = 200, body = "")
+        override suspend fun resetPage() { calls += "reset" }
     }
 
     private class Sent(val path: String, val body: JSONObject, val auth: String?)
@@ -53,6 +57,7 @@ class JobsTest {
     private inner class Setup(
         val host: Host0 = Host0(),
         token: suspend () -> String = { "tok" },
+        queue: JobQueue = JobQueue(),
         val answer: suspend Setup.(path: String, body: JSONObject) -> HttpResponse,
     ) {
         val sent = mutableListOf<Sent>()
@@ -70,7 +75,7 @@ class JobsTest {
                 return answer(path, JSONObject())
             }
         }
-        val client = MealioClient(MealioConfig("pk", token, baseUrl = "https://mealio.test", keys = Vectors.keys), host, transport)
+        val client = MealioClient(MealioConfig("pk", token, baseUrl = "https://mealio.test", keys = Vectors.keys), host, transport, queue)
 
         fun start(vararg ins: JSONObject): HttpResponse {
             jobs += 1
@@ -404,8 +409,8 @@ class JobsTest {
     private fun item(key: String = "k", selectedId: String = "p", options: List<JSONObject>, quantity: Int = 1, extra: (JSONObject) -> Unit = {}) =
         JSONObject().put("key", key).put("ingredient", "x").put("quantity", quantity).put("status", "remembered")
             .put("selectedId", selectedId).put("remembered", JSONObject.NULL).put("options", JSONArray(options)).also(extra)
-    private fun session(items: List<JSONObject>, store: String = "heb", client: MealioClient = Setup { _, _ -> error("no calls") }.client) =
-        CartSession(client, PreparedCart.fromJson(JSONObject().put("cartId", "c").put("store", store).put("items", JSONArray(items))
+    private fun session(items: List<JSONObject>, store: String = "heb", client: MealioClient = Setup { _, _ -> error("no calls") }.client, cartId: String = "c") =
+        CartSession(client, PreparedCart.fromJson(JSONObject().put("cartId", cartId).put("store", store).put("items", JSONArray(items))
             .put("ready", JSONArray()).put("needsChoice", JSONArray()).put("unavailable", JSONArray())))
 
     @Test
@@ -462,7 +467,7 @@ class JobsTest {
     }
 
     @Test
-    fun restoresPicksFromAFailedAddWhereTheProductIsStillOffered() {
+    fun restoresPicksFromAFailedAddWhereTheProductIsStillOffered() = runTest {
         val opts = listOf(prod("p1") { it.put("maxQuantity", 9).put("preferences", JSONArray().put(JSONObject().put("id", "sl").put("label", "Sliced"))) }, prod("p2"))
         val old = session(listOf(item("a", "p1", opts), item("b", "p1", opts), item("c", "gone", listOf(prod("gone")))))
         old.select("a", "p2")
@@ -660,11 +665,170 @@ class JobsTest {
         old.search("a", "oat milk")
         old.select("a", "found")
         old.setQuantity("a", 3)
-        val fresh = session(listOf(item("a", "p1", opts)), client = t.client)
+        val fresh = session(listOf(item("a", "p1", opts)), client = t.client, cartId = "c2")
         fresh.restorePicks(old)
         assertEquals("found", fresh.selectedId("a"))
         assertEquals(3, fresh.quantity("a"))
         assertEquals(listOf("p1", "found"), fresh.options("a").map { it.id })
+    }
+
+    // ── 0.6 round 3 ────────────────────────────────────────────────────
+
+    @Test
+    fun restorePicksSearchesAgainOnTheNewCartInsteadOfSendingTheOldCartsProduct() = runTest {
+        val found = prod("found") { it.put("unitPrice", 5) }
+        val t = Setup { p, _ -> if (p.endsWith("/search")) start(doneOp("d", JSONObject().put("key", "a").put("options", JSONArray().put(found)))) else error("no") }
+        val old = session(listOf(item("a", "p1", listOf(prod("p1"))), item("b", "p1", listOf(prod("p1")))), client = t.client, cartId = "c1")
+        old.search("a", "oat milk")
+        old.select("a", "found")
+        old.setQuantity("a", 3)
+        val fresh = session(listOf(item("a", "p1", listOf(prod("p1"))), item("b", "p1", listOf(prod("p1")))), client = t.client, cartId = "c2")
+        fresh.restorePicks(old)
+        // The search ran again on the new cart, with the same words, and only for the searched pick.
+        assertEquals(listOf("/carts/c1/search", "/carts/c2/search"), t.paths())
+        assertEquals("oat milk", t.sent.last().body.getString("query"))
+        assertEquals(Selection("a", "found", quantity = 3, remember = true), fresh.selections().first())
+    }
+
+    @Test
+    fun restorePicksKeepsTheNewCartsOwnPickWhenTheSearchedProductDoesNotComeBack() = runTest {
+        var n = 0
+        val t = Setup { p, _ ->
+            n += 1
+            val id = if (n == 1) "found" else "other"
+            start(doneOp("d", JSONObject().put("key", "a").put("options", JSONArray().put(prod(id)))))
+        }
+        val old = session(listOf(item("a", "p1", listOf(prod("p1")))), client = t.client, cartId = "c1")
+        old.search("a", "oat milk")
+        old.select("a", "found")
+        old.setQuantity("a", 3)
+        val fresh = session(listOf(item("a", "p1", listOf(prod("p1")))), client = t.client, cartId = "c2")
+        fresh.restorePicks(old)
+        assertEquals("p1", fresh.selectedId("a"))
+        assertEquals(1, fresh.quantity("a"))
+        // Never a product the new cart was not offered.
+        assertTrue(fresh.selections().none { it.productId == "found" })
+        assertTrue(fresh.options("a").none { it.id == "found" })
+    }
+
+    @Test
+    fun aJobCancelledWhileWaitingInTheQueueSettlesAtOnceAndLeavesIt() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val host = object : Host0() { override suspend fun open(url: String): PageLoad { gate.await(); return PageLoad(true, url) } }
+        val t = Setup(host) { p, _ -> if (p.endsWith("/add")) start(open("o"), doneOp("d", JSONObject().put("added", JSONArray()))) else start(doneOp("d", cartJson)) }
+        val adding = async { t.client.addToCart("c", emptyList()) }
+        runCurrent()
+        val cancel = CancelToken()
+        val waiting = async { try { t.client.prepareCart(null, listOf(recipe), null, cancel); null } catch (e: MealioException) { e } }
+        val after = async { t.client.prepareCart(null, recipe) }
+        runCurrent()
+        cancel.cancel()
+        runCurrent()
+        // Settled while the add still holds the queue.
+        assertTrue(waiting.isCompleted)
+        assertEquals("cancelled", waiting.await()!!.code)
+        assertFalse(gate.isCompleted)
+        gate.complete(Unit)
+        adding.await()
+        after.await()
+        assertEquals(listOf("/carts/c/add", "/carts"), t.paths())
+    }
+
+    @Test
+    fun runExclusiveLetsTheQueueGoAfterItsCapAndTheNextJobStartsFromABlankPage() = runTest {
+        val t = Setup { _, _ -> start(doneOp("d", cartJson)) }
+        val stuck = async {
+            try {
+                // Work that ignores its cancel and never ends.
+                t.client.runExclusive { withContext(NonCancellable) { CompletableDeferred<Unit>().await() } }
+                "ended"
+            } catch (e: MealioException) {
+                e.code
+            }
+        }
+        runCurrent()
+        val next = async { t.client.prepareCart(null, recipe) }
+        advanceTimeBy(REQUEST_TIMEOUT_MS + 1)
+        assertEquals("network", stuck.await())
+        assertTrue("still held until the cap", t.paths().isEmpty())
+        advanceTimeBy(EXCLUSIVE_CAP_MS - REQUEST_TIMEOUT_MS)
+        next.await()
+        assertEquals(listOf("/carts"), t.paths())
+        assertEquals("the page is reset before the job", listOf("reset"), t.host.calls)
+        // Only once.
+        t.client.prepareCart(null, recipe)
+        assertEquals(listOf("reset"), t.host.calls)
+    }
+
+    @Test
+    fun eachStepOfAStoreSignOutIsBoundedAndTheRestStillRun() = runTest {
+        val done = mutableListOf<String>()
+        signOutSteps(
+            { awaitCancellation() },
+            { throw IllegalStateException("cookie store broke") },
+            { done += "epoch at $currentTime" },
+        )
+        assertEquals(listOf("epoch at ${SIGN_OUT_STEP_MS}"), done)
+        // A cancel stops them all.
+        val j = launch { signOutSteps({ delay(1_000) }, { done += "after cancel" }) }
+        runCurrent()
+        j.cancel()
+        advanceUntilIdle()
+        assertEquals(listOf("epoch at ${SIGN_OUT_STEP_MS}"), done)
+    }
+
+    @Test
+    fun aJobCancelledWhoseSessionFetchThenFailsReportsCancelled() = runTest {
+        val gate = CompletableDeferred<String>()
+        val t = Setup(token = { gate.await() }) { _, _ -> start(doneOp("d", cartJson)) }
+        val p = async { try { t.client.prepareCart(null, listOf(recipe), null, CancelToken()); null } catch (e: MealioException) { e } }
+        runCurrent()
+        t.client.cancelJobs()
+        gate.completeExceptionally(IllegalStateException("partner server down"))
+        val e = p.await()!!
+        assertEquals("cancelled", e.code)
+        assertEquals(CancelReason.CANCELLED, e.reason)
+        assertTrue(t.sent.isEmpty())
+    }
+
+    @Test
+    fun aCancelledErrorSaysWhy() = runTest {
+        var gate = CompletableDeferred<Unit>()
+        val host = object : Host0() { override suspend fun open(url: String): PageLoad { gate.await(); return PageLoad(true, url) } }
+        val t = Setup(host) { p, _ -> if (p.endsWith("/carts")) start(open("o"), doneOp("d", cartJson)) else start(doneOp("d", cartJson)) }
+        suspend fun reasonOf(stop: (CancelToken) -> Unit): String? {
+            val c = CancelToken()
+            gate = CompletableDeferred()
+            val p = async { try { t.client.prepareCart(null, listOf(recipe), null, c); null } catch (e: MealioException) { e } }
+            runCurrent()
+            stop(c)
+            gate.complete(Unit)
+            runCurrent()
+            val e = p.await()
+            assertEquals("cancelled", e?.code)
+            return e?.reason
+        }
+        t.client.setUser("a")
+        assertEquals(CancelReason.USER_CHANGED, reasonOf { t.client.setUser("b") })
+        assertEquals(CancelReason.CANCELLED, reasonOf { t.client.cancelJobs() })
+        assertEquals(CancelReason.CLOSED, reasonOf { it.cancel(CancelReason.CLOSED) })
+        assertEquals(CancelReason.CANCELLED, reasonOf { it.cancel() })
+        assertNull(MealioException("server", "x").reason)
+    }
+
+    @Test
+    fun aResetSessionWhileTheTokenComesIsAnOutsideCancel() = runTest {
+        val gate = CompletableDeferred<String>()
+        var asks = 0
+        val t = Setup(token = { asks += 1; if (asks == 1) gate.await() else "tok2" }) { _, _ -> start(doneOp("d", cartJson)) }
+        val p = async { try { t.client.prepareCart(null, listOf(recipe), null, CancelToken()); null } catch (e: MealioException) { e } }
+        runCurrent()
+        t.client.resetSession()
+        gate.complete("tok1")
+        val e = p.await()!!
+        assertEquals("cancelled", e.code)
+        assertEquals(CancelReason.CANCELLED, e.reason)
+        assertTrue(t.sent.isEmpty())
     }
 
     @Test

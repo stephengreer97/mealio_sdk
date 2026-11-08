@@ -7,6 +7,6 @@ export * from './strings';
 export * from './events';
 export { openEnvelope, checkInstructions, EnvelopeError, base64ToBytes } from './verify';
 export { Runner, CancelToken, FETCH_PER_MINUTE, HOST_GRACE_MS } from './runner';
-export type { Host, Terminal, StepOutcome } from './runner';
-export { MealioClient, CartSession, JobQueue, MealioError, SDK_CORE_VERSION, DEFAULT_BASE_URL, REQUEST_TIMEOUT_MS, stepOf, WEIGHT_STEP, MAX_WEIGHT_LB, addedPrice } from './client';
+export type { Host, Terminal, StepOutcome, CancelReason } from './runner';
+export { MealioClient, CartSession, JobQueue, MealioError, SDK_CORE_VERSION, DEFAULT_BASE_URL, REQUEST_TIMEOUT_MS, EXCLUSIVE_CAP_MS, PAGE_RESET_MS, stepOf, WEIGHT_STEP, MAX_WEIGHT_LB, addedPrice } from './client';
 export type { ClientConfig, Estimate, MealioErrorCode, Step, StepListener } from './client';

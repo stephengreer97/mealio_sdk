@@ -306,6 +306,8 @@ implementation("co.mealio:mealio-sdk:<latest version>")
 implementation("co.mealio:mealio-sdk-compose:<latest version>") // the drop-in
 ```
 
+Both come from Maven Central, so `mavenCentral()` must be in the project's repositories. The SDK has its own `Recipe` class; if the app has one too, import the SDK's with an alias. Its constructor takes `id`, then `ingredients`, then the optional fields, so use named arguments.
+
 Use the project's version catalog if it has one. The SDK's manifest adds what it needs.
 
 **Flutter**
@@ -377,7 +379,7 @@ MealioCart.configure(
 )
 ```
 
-Call `MealioCart.setUser(user?.id)` wherever the app's signed-in user changes, including on launch, sign-out and account deletion. Pass `nil` when nobody is signed in. Set `MealioCart.onSignInRequired` to open the app's sign-in.
+Call `MealioCart.setUser(user?.id)` wherever the app's signed-in user changes, including on launch, sign-out and account deletion. Pass `nil` when nobody is signed in. Make the first call at launch, before any SDK view appears: until then the SDK treats the user as signed in. Set `MealioCart.onSignInRequired` to open the app's sign-in. The SDK's stored sign-out counter is the `UserDefaults` key `co.mealio.sdk.storeEpoch`; keep it when the app clears its own defaults.
 
 **Android.** Configure in `Application.onCreate`. Wrap Compose content in the theme provider.
 
@@ -390,11 +392,12 @@ MealioCart.configure(
 
 MealioThemeProvider(
     theme = MealioTheme(accent = BrandColor),
+    darkTheme = MealioDarkTheme(accent = BrandColorDark),
     colorScheme = MealioColorScheme.AUTO,
 ) { AppContent() }
 ```
 
-Call `MealioCart.setUser(user?.id)` wherever the app's signed-in user changes, including on launch, sign-out and account deletion. Pass `null` when nobody is signed in. Set `MealioCart.onSignInRequired` to open the app's sign-in.
+Call `MealioCart.setUser(user?.id)` wherever the app's signed-in user changes, including on launch, sign-out and account deletion. Pass `null` when nobody is signed in. Make the first call in `Application.onCreate`, before `setContent`: until then the SDK treats the user as signed in. Call it from the layer that owns auth, such as a repository or ViewModel, not from a composable. Set `MealioCart.onSignInRequired` to open the app's sign-in, pointing at something that outlives an Activity. The SDK's stored sign-out counter is the SharedPreferences file `co.mealio.sdk`, key `store_epoch`; keep it when the app clears its own preferences.
 
 **Flutter.** `MealioScope` hosts the store WebView, so it must sit above every page. It needs the navigator key. With a router package, pass that router's root navigator key.
 
@@ -468,7 +471,7 @@ function toMealioRecipe(r: AppRecipe, cookingFor?: number): Recipe {
 | `optional` | For garnishes and ingredients the recipe works without. Also starts unchecked |
 | `photoUrl` | Must be https. The sheet shows up to three |
 
-Optional fields accept `undefined`, and only `amount` and `unit` accept `null`. If the app uses `null` for missing values, convert with `?? undefined`.
+In TypeScript, optional fields accept `undefined`, and only `amount` and `unit` accept `null`. In Kotlin, Swift and Dart every optional field is nullable. If the app uses `null` for missing values, convert with `?? undefined`.
 
 Remove lines that are not groceries, such as water or a line that is only a section heading. When recipes share an ingredient, it starts checked if any of them needs it.
 
@@ -573,7 +576,8 @@ const cart = await mealio.prepareCart({ store, recipe });
 for (const item of cart.items) {
   // item.key, item.ingredient, item.quantity, item.status, item.startUnchecked
   const options = cart.options(item.key);         // Best first, up to 8.
-  const picked = cart.selectedId(item.key);       // Already set for remembered items.
+  const picked = cart.selectedId(item.key);       // Set for remembered items, null for startUnchecked ones.
+  const usual = item.selectedId;                  // The remembered product, even when startUnchecked.
 }
 
 cart.select(key, productId);                      // Only after the user taps a product.
@@ -590,6 +594,12 @@ const result = await cart.addToCart();
 
 Rules for custom screens:
 
+- The store sign-in is not yours to draw. On React Native, `MealioProvider` shows it in its own modal; on native and Flutter the SDK presents it. Your screen only waits for `prepareCart`.
+- When the user ticks a pantry or optional item, select `item.selectedId` if it has one, so their usual product comes back.
+- Keep Add disabled while `cart.searching` is true.
+- After the user picks from `stores`, call `setStore(id)`. If that fails with `location_required`, ask for a zip, list stores with `storeLocations`, and call `setStore(id, locationId)`.
+- An add that returns a result is not a failed add, even if some items are in `failed`. Show those items. On the done screen, use `addedTotal(result)`, which follows the same no-partial-total rule.
+- A cancelled job's error has a `reason`: `user_changed` when the user changed (prepare again for the new user, or show sign-in if the user is now null), `closed` when the sheet or provider went away (show nothing), and `cancelled` for your own cancel or a store sign-out.
 - Call `warm` when the screen appears, so sign-in is checked ahead of time. Jobs run one at a time, so a prepare waits for a warm-up or search to end.
 - If the user has no store, `prepareCart` fails with `store_required`. List choices with `stores`.
 - Kroger family stores also need `storeLocations` and `setStore`, or `location_required` comes back before any sign-in. Read the saved store with `storePreferences`.
@@ -658,7 +668,7 @@ Add tests that fit the repo:
 - The user passed to the SDK following sign-in, sign-out, account deletion and a direct user switch.
 - The SDK's stored sign-out counter surviving whatever the app does to storage on sign-out: `mealio-epoch` in the React Native example, `mealio_sdk.store_epoch` in Flutter's SharedPreferences.
 
-In React Native unit tests, use the SDK's ready mock: `jest.mock('@mealio/react-native-cart', () => require('@mealio/react-native-cart/jest'))`. The real package does not load under the usual jest presets. Existing tests of a screen with the button need this. To test guests, call the mock's `setMockUser(null)`, and the button then calls `onSignInRequired`.
+In React Native unit tests, use the SDK's ready mock: `jest.mock('@mealio/react-native-cart', () => require('@mealio/react-native-cart/jest'))`. The real package does not load under the usual jest presets. Existing tests of a screen with the button need this. To test guests, import `setMockUser` from `@mealio/react-native-cart/jest` and call `setMockUser(null)`; the button then calls `onSignInRequired`. The mock resets between tests. The mock's cart is a stub, so screens you build yourself need the real client: use the fake Mealio server in `@mealio/sdk-core/testing` (`createFakeMealio`), which runs the real `MealioClient` and `CartSession` with no network.
 
 In Flutter widget tests, a screen holding `MealioScope` needs a fake WebView platform. Call `installMealioTestPlatform()` from `package:mealio_sdk/testing.dart`, for example in `test/flutter_test_config.dart`, so the app's existing widget tests keep passing. `configureMealioForTesting` sets the SDK up with no network.
 
@@ -666,9 +676,11 @@ Check for leaks, and confirm nothing comes back from app code or tracked files:
 
 ```shell
 git grep --untracked -nE 'sk_(test|live)_[A-Za-z0-9]+'
-grep -rnE 'sk_(test|live)_[A-Za-z0-9]+' . --exclude-dir={node_modules,.git,Pods,build,.dart_tool,.gradle,dist}
+command grep -rnE 'sk_(test|live)_[A-Za-z0-9]+' . --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=Pods --exclude-dir=build --exclude-dir=.dart_tool --exclude-dir=.gradle --exclude-dir=dist
 git status --short
 ```
+
+If the app was built, also search what ships, because a key can come from the build machine's environment rather than a file. For Android, `unzip -p app/build/outputs/apk/*/*.apk 'classes*.dex' | command grep -ac 'sk_\(test\|live\)_'` must print 0. For Expo or React Native, search the exported bundle the same way.
 
 The second search also reads files git ignores, such as `.env`, `dart_defines.json`, `.xcconfig` and `local.properties`. The only acceptable hit is the server's own untracked env file. A key in any app config, or behind a public prefix like `EXPO_PUBLIC_`, ships inside the app.
 

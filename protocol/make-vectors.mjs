@@ -151,6 +151,22 @@ const vectors = {
     { body: JSON.stringify({ operationName: 'cartItemsV2', variables: {}, query: 'mutation cartItemsV2($p0: String!, $s0: String!, $w0: Float, $r0: String) { a0: addItemToCartV2(productId: $p0, skuId: $s0, weight: $w0, purchasePreferenceId: $r0) { __typename ... on Cart { id } } }' }), blocked: false },
     { body: '{"operationName":"MergeAndGetCart","variables":{}}', blocked: false },
     { body: '{"operationName":"updateItems","variables":{}}', blocked: false },
+    // 0.6 round 3. A leading byte order mark is dropped before parsing, as a
+    // server's JSON reader does, so it cannot turn a JSON body into "not JSON".
+    { body: '﻿' + JSON.stringify({ query: 'mutation { placeOrder { id } }' }), blocked: true },
+    { body: '﻿' + JSON.stringify([{ operationName: 'Search' }, { operationName: 'submitOrder' }]), blocked: true },
+    { body: '﻿{"operationName":"cartItemsV2","variables":{}}', blocked: false },
+    { body: '﻿', blocked: false },
+    // Raw multipart/form-data sent as a string: the operations part is judged
+    // as JSON, a query part as a document, an operationName part as a name.
+    { body: '--b\r\nContent-Disposition: form-data; name="operations"\r\n\r\n' + JSON.stringify({ query: 'mutation { placeOrder { id } }', variables: {} }) + '\r\n--b\r\nContent-Disposition: form-data; name="map"\r\n\r\n{}\r\n--b--\r\n', blocked: true },
+    { body: '--b\r\nContent-Disposition: form-data; name="operations"\r\nContent-Type: application/json\r\n\r\n' + JSON.stringify([{ operationName: 'Search' }, { operationName: 'submit_order' }]) + '\r\n--b--', blocked: true },
+    { body: '--b\nContent-Disposition: form-data; name="operations"\n\n' + JSON.stringify({ query: 'mutation Go { checkoutComplete { id } }' }) + '\n--b--\n', blocked: true },
+    { body: '--b\r\nContent-Disposition: form-data; name="operations"\r\n\r\n﻿' + JSON.stringify({ query: 'mutation { placeOrder { id } }' }), blocked: true },
+    { body: '--b\r\nContent-Disposition: form-data; name="query"\r\n\r\nmutation { placeOrder { id } }\r\n--b--', blocked: true },
+    { body: '--b\r\nContent-Disposition: form-data; name="operationName"\r\n\r\nPlaceOrder\r\n--b--', blocked: true },
+    { body: '--b\r\nContent-Disposition: form-data; name="operations"\r\n\r\n' + JSON.stringify({ query: 'mutation Upload($f: Upload!) { uploadPhoto(file: $f) { id } }', variables: { f: null } }) + '\r\n--b\r\nContent-Disposition: form-data; name="map"\r\n\r\n{"0":["variables.f"]}\r\n--b\r\nContent-Disposition: form-data; name="0"; filename="a.jpg"\r\nContent-Type: image/jpeg\r\n\r\nplaceOrder checkout\r\n--b--\r\n', blocked: false },
+    { body: '--b\r\nContent-Disposition: form-data; name="note"\r\n\r\n' + JSON.stringify({ query: 'mutation { placeOrder { id } }' }) + '\r\n--b--', blocked: false },
   ],
   matchers: [
     { msg: { type: 'ALB_SESSION', loggedIn: true, early: true }, m: { type: 'ALB_SESSION', ne: { early: true } }, ok: false },
@@ -160,5 +176,6 @@ const vectors = {
     { msg: { type: 'X' }, m: { type: 'Y' }, ok: false },
   ],
 };
-fs.writeFileSync(new URL('./test-vectors.json', import.meta.url), JSON.stringify(vectors, null, 2) + '\n');
+// A byte order mark is written escaped, so it is visible and no tool strips it.
+fs.writeFileSync(new URL('./test-vectors.json', import.meta.url), JSON.stringify(vectors, null, 2).replace(/\uFEFF/g, '\\ufeff') + '\n');
 console.log('wrote test-vectors.json, ktest =', publicRaw);

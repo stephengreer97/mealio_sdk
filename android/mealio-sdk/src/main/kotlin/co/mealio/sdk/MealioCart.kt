@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * The partner-facing entry point.
@@ -27,9 +28,16 @@ import kotlinx.coroutines.launch
 object MealioCart {
     const val SDK_VERSION = "0.6.0"
 
-    private class State(val client: MealioClient, val host: WebViewHost, val sessions: StoreSessions)
+    private class State(val client: MealioClient, val host: Host, val sessions: SessionStore, val release: () -> Unit)
 
     @Volatile private var state: State? = null
+
+    /**
+     * One job queue for every client configure makes: an old client's add
+     * still running holds the hidden page until it ends, and the new client's
+     * jobs wait for it.
+     */
+    private val queue = JobQueue()
 
     /** For work that outlives a screen, like the store sign-out after a user change. */
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -49,7 +57,8 @@ object MealioCart {
 
     /**
      * Set up the SDK once, e.g. in Application.onCreate. Calling it again
-     * replaces the previous setup.
+     * replaces the previous setup: carts still loading under it are cancelled,
+     * an add under way finishes first, and the new setup's jobs queue behind it.
      *
      * @param publishableKey the partner app's publishable key.
      * @param sessionTokenProvider returns an SDK session token from YOUR server
@@ -79,16 +88,41 @@ object MealioCart {
             epochProvider = { sessions.epoch() },
             debug = (app.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0,
         )
-        val old = state
-        val client = MealioClient(config, host)
-        // Carry the user over to the new client.
+        install(host, sessions, release = { host.destroy() }) { q ->
+            MealioClient(config, host, UrlConnectionTransport(), q).also {
+                // The hidden page and fetch redirects are checked against the same
+                // allowlist the runner uses, widenings included.
+                host.allowlist = it.allowlist
+            }
+        }
+    }
+
+    /**
+     * Make `client` the configured one (configure, and co.mealio.sdk.testing).
+     * Whatever the old client had loading is cancelled; its add runs on and
+     * its page is released after it, in the shared queue.
+     */
+    internal fun install(host: Host, sessions: SessionStore, release: () -> Unit, makeClient: (JobQueue) -> MealioClient): MealioClient {
+        val client = makeClient(queue)
+        // Carry the user over to the new client, without a store sign-out.
         val u = userState.value
         if (u.tracked) client.setUser(u.id)
-        // The hidden page and fetch redirects are checked against the same
-        // allowlist the runner uses, widenings included.
-        host.allowlist = client.allowlist
-        state = State(client, host, sessions)
-        old?.host?.destroy()
+        val old = state
+        state = State(client, host, sessions, release)
+        if (old != null) {
+            old.client.cancelJobs()
+            queueExclusive(scope, client) { old.release() }
+        }
+        return client
+    }
+
+    /** Forget the configuration and the user (co.mealio.sdk.testing, between tests). */
+    internal fun uninstall() {
+        val old = state
+        state = null
+        userState.value = MealioUser()
+        old?.client?.cancelJobs()
+        old?.release?.invoke()
     }
 
     val isConfigured: Boolean get() = state != null
@@ -188,9 +222,11 @@ object MealioCart {
         // Queued, so an add under way finishes first and the next cart waits for this.
         s.client.runExclusive {
             val hosts = s.client.allowlist.hostsFor(store) ?: STORES[store]
-            if (hosts != null) s.sessions.clearStore(hosts)
-            s.host.reset()
-            s.sessions.bumpEpoch()
+            signOutSteps(
+                { if (hosts != null) s.sessions.clearStore(hosts) },
+                { s.host.resetPage() },
+                { withContext(Dispatchers.IO) { s.sessions.bumpEpoch() } },
+            )
         }
     }
 
@@ -222,11 +258,12 @@ object MealioCart {
         }
     }
 
-    private suspend fun clearAllStores(s: State) {
-        s.sessions.clearAll()
-        s.host.reset()
-        s.sessions.bumpEpoch()
-    }
+    /** Each step bounded (see [signOutSteps]), so a sign-out never holds the queue for good. */
+    private suspend fun clearAllStores(s: State) = signOutSteps(
+        { s.sessions.clearAll() },
+        { s.host.resetPage() },
+        { withContext(Dispatchers.IO) { s.sessions.bumpEpoch() } },
+    )
 
     private fun current(): State =
         state ?: throw IllegalStateException("Call MealioCart.configure(context, publishableKey, sessionTokenProvider) first")

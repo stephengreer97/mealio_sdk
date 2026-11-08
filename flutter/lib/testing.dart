@@ -22,6 +22,26 @@
 ///
 /// Nothing here reaches a store or Mealio. The fake WebView never loads a
 /// page; [MealioFakeWebViewController] records what the SDK asked of it.
+///
+/// To run the real client against a scripted Mealio (cart items, options,
+/// prices, remembered picks, search results, an add result or failure), give
+/// [configureMealioForTesting] a [MealioFake]. The script format is the one
+/// `@mealio/sdk-core/testing` takes:
+///
+/// ```dart
+/// final fake = MealioFake(MealioFakeScript(
+///   items: <MealioFakeItem>[
+///     MealioFakeItem(key: 'onion', options: <Product>[Product(id: 'o1', name: 'Onion', unitPrice: 1.25)], remembered: 'o1'),
+///     MealioFakeItem(key: 'salt', options: <Product>[Product(id: 's1', name: 'Salt')], startUnchecked: true),
+///   ],
+///   search: <String, List<Product>>{'sweet onion': <Product>[Product(id: 'o9', name: 'Sweet Onion', unitPrice: 2)]},
+/// ));
+/// configureMealioForTesting(fake: fake);
+/// // ... pump a screen with MealioScope, tap, then:
+/// expect(fake.requests.map((MealioFakeRequest r) => r.kind), contains('add'));
+/// ```
+///
+/// Or, with no widgets: `final cart = await fake.client().prepareCart(recipe: recipe);`.
 library;
 
 import 'dart:async';
@@ -34,7 +54,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter_platform_interface/webview_flutter_platform_interface.dart';
 
 import 'src/client.dart' show defaultBaseUrl;
+import 'src/fake_mealio.dart';
 import 'src/mealio_cart.dart';
+
+export 'src/fake_mealio.dart';
 
 /// Makes `MealioScope` work in `flutter test`: installs
 /// [MealioFakeWebViewPlatform] as the WebView platform, and gives
@@ -45,6 +68,8 @@ MealioFakeWebViewPlatform installMealioTestPlatform({Map<String, Object> prefere
   // ignore: invalid_use_of_visible_for_testing_member
   SharedPreferences.setMockInitialValues(preferences);
   MealioFakeWebViewController.reset();
+  MealioFakeCookieManager.onClear = null;
+  MealioFakeCookieManager.clears = 0;
   final platform = MealioFakeWebViewPlatform();
   WebViewPlatform.instance = platform;
   return platform;
@@ -55,13 +80,29 @@ MealioFakeWebViewPlatform installMealioTestPlatform({Map<String, Object> prefere
 /// error, so a cart shows the error screen and a warm-up does nothing.
 /// `sessionTokenProvider` defaults to one that returns `"test-session"`.
 /// Configuring again in the next test replaces it.
+///
+/// With `fake`, the scripted [MealioFake] answers instead: its server, its
+/// store page (no WebView is driven) and its test key, which only a test
+/// configuration trusts. `sessionTokenProvider` then defaults to the fake's.
 MealioCart configureMealioForTesting({
   String publishableKey = 'pk_test_mealio',
   Future<String> Function()? sessionTokenProvider,
   http.Client? httpClient,
   String baseUrl = defaultBaseUrl,
   VoidCallback? onSignInRequired,
+  MealioFake? fake,
 }) {
+  if (fake != null) {
+    return configureMealioWithTestKeys(
+      publishableKey: publishableKey,
+      sessionTokenProvider: sessionTokenProvider ?? fake.sessionToken,
+      baseUrl: fake.baseUrl,
+      keys: fake.keys,
+      host: fake.host,
+      httpClient: fake.httpClient,
+      onSignInRequired: onSignInRequired,
+    );
+  }
   final client = httpClient ?? MockClient((http.Request _) async => mealioTestErrorResponse());
   return http.runWithClient(
     () => MealioCart.configure(
@@ -159,10 +200,15 @@ class MealioFakeWebViewController extends PlatformWebViewController {
   /// Called on each load instead of starting and finishing the page at once.
   static void Function(MealioFakeWebViewController controller, String url)? onLoad;
 
-  /// Forgets [all], [hangOn] and [onLoad].
+  /// When set, `loadRequest` of a URL containing this never completes (it is
+  /// still recorded in [loads]).
+  static String? hangLoadOn;
+
+  /// Forgets [all], [hangOn], [hangLoadOn] and [onLoad].
   static void reset() {
     all.clear();
     hangOn = null;
+    hangLoadOn = null;
     onLoad = null;
   }
 
@@ -191,6 +237,8 @@ class MealioFakeWebViewController extends PlatformWebViewController {
     final u = params.uri.toString();
     loads.add(u);
     url = u;
+    final hang = hangLoadOn;
+    if (hang != null && u.contains(hang)) return Completer<void>().future;
     final f = onLoad;
     if (f != null) {
       f(this, u);
@@ -226,10 +274,21 @@ class MealioFakeWebViewWidget extends PlatformWebViewWidget {
   Widget build(BuildContext context) => const SizedBox(key: ValueKey<String>('mealio-fake-webview'));
 }
 
-/// Clearing cookies succeeds and does nothing.
+/// Clearing cookies succeeds and does nothing, unless [onClear] says otherwise.
 class MealioFakeCookieManager extends PlatformWebViewCookieManager {
   MealioFakeCookieManager(super.params) : super.implementation();
 
+  /// Answers `clearCookies` instead, for example with a future that never
+  /// completes. [installMealioTestPlatform] clears it.
+  static Future<bool> Function()? onClear;
+
+  /// How many times cookies were cleared since [installMealioTestPlatform].
+  static int clears = 0;
+
   @override
-  Future<bool> clearCookies() async => true;
+  Future<bool> clearCookies() {
+    clears += 1;
+    final f = onClear;
+    return f == null ? Future<bool>.value(true) : f();
+  }
 }

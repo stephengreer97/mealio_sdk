@@ -1,0 +1,583 @@
+// MealioSDK testing support: run the REAL MealioClient and CartSession in
+// your XCTest against a scripted fake Mealio, with no network. Mirrors
+// `createFakeMealio` in `@mealio/sdk-core/testing`, with the same script
+// format, so one JSON script can drive every platform's tests.
+//
+//     let fake = FakeMealio(script: [
+//         "items": [["key": "milk", "remembered": "m1",
+//                    "options": [["id": "m1", "name": "Milk", "unitPrice": 3]]]],
+//         "search": ["oat milk": [["id": "o1", "name": "Oat milk", "unitPrice": 4]]],
+//     ])
+//     let client = fake.client()
+//     let cart = try await client.prepareCart(recipe: recipe)
+//
+// It uses nothing but the SDK's public API: a URLSession whose requests a
+// URLProtocol answers from the script, a fake store page (`fake.host`), and
+// the protocol TEST signing key (`FakeMealio.testKeys`), which no production
+// build trusts (MealioKeys.all holds only the production key).
+//
+// Debug builds only (#if DEBUG): it is compiled into your test runs, never
+// into a release build of your app.
+
+#if DEBUG
+import CryptoKit
+import Foundation
+
+public final class FakeMealio: @unchecked Sendable {
+    /// Which call a request was, as `FakeRequest.kind` in the TS kit.
+    public enum Kind: String, Equatable {
+        case prepare, search, add, warm, step, stores, preferences, locations, other
+    }
+
+    /// One call the client sent to the fake.
+    public struct Request: Equatable {
+        public let kind: Kind
+        /// For example "/api/v1/sdk/carts".
+        public let path: String
+        public let body: JSONValue?
+        /// The session token it carried, without "Bearer ".
+        public let token: String?
+    }
+
+    /// The protocol test key ("ktest", protocol/test-vectors.json). Pass as `keys`.
+    public static let testKeys: [String: String] = ["ktest": signer.publicKey.rawRepresentation.base64EncodedString()]
+
+    // The deterministic TEST key of protocol/make-vectors.mjs: a seed of 32 bytes of 7.
+    static let signer: Curve25519.Signing.PrivateKey = {
+        // A 32-byte seed is always a valid key.
+        try! Curve25519.Signing.PrivateKey(rawRepresentation: Data(repeating: 7, count: 32))
+    }()
+
+    private let lock = NSLock()
+    private var _script: JSONValue
+    private var _requests: [Request] = []
+    private var _hostCalls: [String] = []
+    private var carts: [String: (store: String, offered: [JSONValue])] = [:]
+    /// Jobs waiting on their sign-in step: what to send for each outcome.
+    private var jobs: [String: (store: String, cart: JSONValue)] = [:]
+    private var holds: [Kind: [DispatchSemaphore]] = [:]
+    private var nJob = 0
+    private var nCart = 0
+    private var _searchHandler: ((String, String) -> [JSONValue])?
+    private var _addHandler: (([Selection], [Product]) -> AddResult)?
+
+    /// Where the client sends its calls. Unique per fake, so two fakes never
+    /// answer each other. (The TS kit uses https://mealio.test.)
+    public let baseURL: URL
+    /// The session the client must use. `config` and `client` set it.
+    public let urlSession: URLSession
+    @MainActor private var madeHost: FakeStoreHost?
+    /// The fake store page. Records into `hostCalls`.
+    @MainActor public var host: FakeStoreHost {
+        if let h = madeHost { return h }
+        let h = FakeStoreHost(fake: self)
+        madeHost = h
+        return h
+    }
+
+    /// - Parameter script: the TS kit's FakeScript as plain data: `store`,
+    ///   `storeName`, `items` (key, ingredient, quantity, options, remembered,
+    ///   rememberedPreferenceId, rememberedUnavailable, startUnchecked,
+    ///   weightLb, recipes, unavailable), `recipes`, `warnings`, `search`
+    ///   (results by query, case-insensitive), `add` (`{"fail": error}`),
+    ///   `signIn` ("signed_in", "cancelled", "timeout"), `errors` (by call:
+    ///   prepare, search, add, warm, stores, preferences, locations, session;
+    ///   a code, or {code, message, status}; with a status it is an HTTP
+    ///   error, without one a job that fails), `stores`, `preferences`,
+    ///   `locations`, `warm` ({signedIn} or null).
+    public init(script: JSONValue = [:]) {
+        _script = script
+        let id = UUID().uuidString.lowercased()
+        baseURL = URL(string: "https://\(id).mealio.test")!
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FakeMealioURLProtocol.self]
+        urlSession = URLSession(configuration: config)
+        FakeMealioURLProtocol.register(self, host: baseURL.host ?? id)
+    }
+
+    /// A script from JSON text, for one file shared with the other platforms.
+    public convenience init(json: String) throws {
+        guard let script = JSONValue.parse(json) else {
+            throw MealioError(code: "bad_script", message: "The fake Mealio script is not JSON")
+        }
+        self.init(script: script)
+    }
+
+    deinit {
+        FakeMealioURLProtocol.unregister(host: baseURL.host ?? "")
+    }
+
+    /// The script in force. Change it between calls.
+    public var script: JSONValue {
+        get { lock.lock(); defer { lock.unlock() }; return _script }
+        set { lock.lock(); _script = newValue; lock.unlock() }
+    }
+
+    /// Set one top-level field of the script (nil removes it), e.g.
+    /// `fake.set("add", nil)`.
+    public func set(_ key: String, _ value: JSONValue?) {
+        lock.lock(); defer { lock.unlock() }
+        guard case .object(var o) = _script else { return }
+        o[key] = value
+        _script = .object(o)
+    }
+
+    /// The TS kit's `search` as a function: (query, key) -> products as JSON.
+    public var searchHandler: ((String, String) -> [JSONValue])? {
+        get { lock.lock(); defer { lock.unlock() }; return _searchHandler }
+        set { lock.lock(); _searchHandler = newValue; lock.unlock() }
+    }
+
+    /// The TS kit's `add` as a function: (selections, offered) -> result.
+    public var addHandler: (([Selection], [Product]) -> AddResult)? {
+        get { lock.lock(); defer { lock.unlock() }; return _addHandler }
+        set { lock.lock(); _addHandler = newValue; lock.unlock() }
+    }
+
+    /// Every request the client sent, in order.
+    public var requests: [Request] {
+        lock.lock(); defer { lock.unlock() }
+        return _requests
+    }
+
+    /// What the fake store page was asked to do: "open <url>", "script",
+    /// "login", "fetch", "reset".
+    public var hostCalls: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return _hostCalls
+    }
+
+    func hostDid(_ call: String) {
+        lock.lock(); _hostCalls.append(call); lock.unlock()
+    }
+
+    /// A config on this fake. `token` is your session function; by default
+    /// it returns "session_test", or fails as `errors.session` says.
+    public func config(publishableKey: String = "pk_test_fake",
+                       token: (() async throws -> String)? = nil,
+                       queue: JobQueue? = nil) -> MealioClientConfig {
+        let provider: () async throws -> String
+        if let token = token {
+            provider = token
+        } else {
+            provider = { [weak self] () async throws -> String in
+                if let e = self?.script["errors"]?["session"] {
+                    let x = FakeMealio.errorParts(e)
+                    throw MealioError(code: x.code, message: x.message)
+                }
+                return "session_test"
+            }
+        }
+        return MealioClientConfig(publishableKey: publishableKey, sessionTokenProvider: provider, baseURL: baseURL,
+                                  epochProvider: { 0 }, keys: FakeMealio.testKeys, urlSession: urlSession, queue: queue)
+    }
+
+    /// A real MealioClient on this fake and its store page.
+    @MainActor
+    public func client(publishableKey: String = "pk_test_fake", token: (() async throws -> String)? = nil,
+                       queue: JobQueue? = nil) -> MealioClient {
+        MealioClient(config: config(publishableKey: publishableKey, token: token, queue: queue), host: host)
+    }
+
+    /// The products a cart offered so far (prepare and its own searches).
+    public func offered(_ cartId: String) -> [Product] {
+        lock.lock(); defer { lock.unlock() }
+        return (carts[cartId]?.offered ?? []).compactMap { try? $0.decode(Product.self) }
+    }
+
+    /// Hold the next request of this kind until the returned function is called.
+    public func hold(_ kind: Kind) -> () -> Void {
+        let gate = DispatchSemaphore(value: 0)
+        lock.lock(); holds[kind, default: []].append(gate); lock.unlock()
+        var released = false
+        let once = NSLock()
+        return {
+            once.lock(); defer { once.unlock() }
+            if released { return }
+            released = true
+            gate.signal()
+        }
+    }
+
+    // MARK: - the server
+
+    static func kind(of path: String) -> Kind {
+        let p = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        switch path {
+        case "/api/v1/stores": return .stores
+        case "/api/v1/sdk/preferences": return .preferences
+        case "/api/v1/sdk/locations": return .locations
+        case "/api/v1/sdk/warm": return .warm
+        case "/api/v1/sdk/carts": return .prepare
+        default: break
+        }
+        if p.count == 6, p[0] == "api", p[2] == "sdk" {
+            if p[3] == "carts", p[5] == "search" { return .search }
+            if p[3] == "carts", p[5] == "add" { return .add }
+            if p[3] == "jobs", p[5] == "step" { return .step }
+        }
+        return .other
+    }
+
+    /// Answer one request: (status, JSON body). Called on URLSession's thread.
+    func answer(path: String, body: JSONValue?, auth: String?) -> (Int, JSONValue) {
+        let kind = FakeMealio.kind(of: path)
+        var token: String?
+        if let a = auth { token = a.hasPrefix("Bearer ") ? String(a.dropFirst(7)) : a }
+        lock.lock()
+        _requests.append(Request(kind: kind, path: path, body: body, token: token))
+        var gate: DispatchSemaphore?
+        if kind != .other, var list = holds[kind], !list.isEmpty {
+            gate = list.removeFirst()
+            holds[kind] = list
+        }
+        lock.unlock()
+        gate?.wait()
+        let s = script
+        let segment = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        let id = segment.count > 4 ? (segment[4].removingPercentEncoding ?? segment[4]) : ""
+        switch kind {
+        case .stores:
+            if let e = s["errors"]?["stores"] { return httpError(e) }
+            let fallback: JSONValue = [["id": "heb", "name": "H-E-B", "via": "device"]]
+            return (200, .object(["stores": s["stores"] ?? fallback]))
+        case .preferences:
+            if let e = s["errors"]?["preferences"] { return httpError(e) }
+            if let store = body?["store"]?.stringValue {
+                var location: JSONValue = prefs(s)["location"] ?? .null
+                if let lid = body?["locationId"]?.stringValue {
+                    location = (s["locations"]?.arrayValue ?? []).first { $0["id"]?.stringValue == lid } ?? .null
+                }
+                set("preferences", ["defaultStore": .string(store), "location": location])
+                return (200, prefs(script))
+            }
+            return (200, prefs(s))
+        case .locations:
+            if let e = s["errors"]?["locations"] { return httpError(e) }
+            return (200, ["locations": s["locations"] ?? []])
+        case .warm:
+            let store = body?["store"]?.stringValue ?? prefs(s)["defaultStore"]?.stringValue
+            if case .null? = s["warm"] { return (200, ["warm": .null]) }
+            guard let store = store else { return (200, ["warm": .null]) }
+            if let e = s["errors"]?["warm"] { return jobError(store, e) }
+            let warmed: JSONValue = ["store": .string(store), "signedIn": .bool(s["warm"]?["signedIn"]?.boolValue ?? true)]
+            return start(store, [done(warmed)])
+        case .prepare:
+            return prepare(s, body)
+        case .search:
+            return search(s, id, body)
+        case .add:
+            return add(s, id, body)
+        case .step:
+            lock.lock()
+            let j = jobs.removeValue(forKey: id)
+            lock.unlock()
+            guard let j = j else { return (404, ["error": ["code": "unknown_job", "message": "No such job"]]) }
+            let outcome = (body?["results"]?.arrayValue ?? []).compactMap { $0["outcome"]?.stringValue }.first
+            let next: [JSONValue] = outcome == "signed_in" ? [done(j.cart)]
+                : [failOp(["code": "login_cancelled", "message": "Sign-in was closed"])]
+            let seq = (body?["seq"]?.intValue ?? 1) + 1
+            return (200, ["envelope": FakeMealio.signTestEnvelope(job: id, seq: seq, store: j.store, instructions: next)])
+        case .other:
+            return (200, [:])
+        }
+    }
+
+    private func prefs(_ s: JSONValue) -> JSONValue {
+        s["preferences"] ?? ["defaultStore": s["store"] ?? "heb", "location": .null]
+    }
+
+    private func home(_ store: String) -> String {
+        "https://www.\(Allowlist().hostsFor(store)?.hosts.first ?? "heb.com")/"
+    }
+
+    private func loginURL(_ store: String) -> String {
+        let h = Allowlist().hostsFor(store)
+        if let first = h?.hosts.first { return "https://www.\(first)/login" }
+        return "https://\(h?.authHosts.first ?? "www.heb.com")/login"
+    }
+
+    private func prepare(_ s: JSONValue, _ body: JSONValue?) -> (Int, JSONValue) {
+        guard let store = body?["store"]?.stringValue ?? s["store"]?.stringValue ?? prefs(s)["defaultStore"]?.stringValue else {
+            return httpError(["code": "store_required", "message": "Pick a store", "status": 400])
+        }
+        if let e = s["errors"]?["prepare"] { return jobError(store, e) }
+        let items = (s["items"]?.arrayValue ?? []).map(FakeMealio.cartItem)
+        lock.lock()
+        nCart += 1
+        let cartId = "cart_\(nCart)"
+        carts[cartId] = (store, items.flatMap { $0["options"]?.arrayValue ?? [] })
+        lock.unlock()
+        let recipes: JSONValue
+        if let r = s["recipes"] {
+            recipes = r
+        } else {
+            var given: [JSONValue] = body?["recipes"]?.arrayValue ?? []
+            if given.isEmpty, let one = body?["recipe"] { given = [one] }
+            recipes = .array(given.map { (r: JSONValue) -> JSONValue in
+                .object(["id": r["id"] ?? .null, "title": r["title"] ?? .null])
+            })
+        }
+        let cart: JSONValue = [
+            "cartId": .string(cartId), "store": .string(store),
+            "storeName": s["storeName"] ?? .string(store == "heb" ? "H-E-B" : store),
+            "items": .array(items), "ready": [], "needsChoice": [], "unavailable": [],
+            "recipes": recipes, "warnings": s["warnings"] ?? [],
+        ]
+        // A Kroger family store has no page of its own: only its sign-in.
+        var open: [JSONValue] = []
+        if Allowlist().hostsFor(store)?.hosts.first != nil {
+            open = [["op": "page_open", "id": "open-1", "url": .string(home(store)), "timeoutMs": 15000]]
+        }
+        let signIn = s["signIn"]?.stringValue
+        if signIn == nil { return start(store, open + [done(cart)]) }
+        let login: JSONValue = ["op": "show_login", "id": "login-1", "url": .string(loginURL(store)), "title": "Sign in",
+                                "doneWhen": [["type": "FAKE_SIGNED_IN"]], "timeoutMs": 120_000]
+        return start(store, open + [login], waitingOn: cart)
+    }
+
+    private func search(_ s: JSONValue, _ cartId: String, _ body: JSONValue?) -> (Int, JSONValue) {
+        lock.lock()
+        let store = carts[cartId]?.store ?? "heb"
+        let handler = _searchHandler
+        lock.unlock()
+        if let e = s["errors"]?["search"] { return jobError(store, e) }
+        let key = body?["key"]?.stringValue ?? ""
+        let query = body?["query"]?.stringValue ?? ""
+        var found: [JSONValue] = []
+        if let handler = handler {
+            found = handler(query, key)
+        } else if case .object(let byQuery)? = s["search"] {
+            found = byQuery.first { $0.key.lowercased() == query.lowercased() }?.value.arrayValue ?? []
+        }
+        lock.lock()
+        carts[cartId]?.offered.append(contentsOf: found)
+        lock.unlock()
+        return start(store, [done(["key": .string(key), "query": .string(query), "options": .array(found)])])
+    }
+
+    private func add(_ s: JSONValue, _ cartId: String, _ body: JSONValue?) -> (Int, JSONValue) {
+        lock.lock()
+        let store = carts[cartId]?.store ?? "heb"
+        let offeredJSON = carts[cartId]?.offered ?? []
+        let handler = _addHandler
+        lock.unlock()
+        if let e = s["errors"]?["add"] { return jobError(store, e) }
+        if let e = s["add"]?["fail"] { return jobError(store, e) }
+        let offered = offeredJSON.compactMap { try? $0.decode(Product.self) }
+        let selections = (body?["selections"]?.arrayValue ?? []).compactMap { try? $0.decode(Selection.self) }
+        if let handler = handler {
+            let result = (try? JSONValue(encoding: handler(selections, offered))) ?? .null
+            return start(store, [done(result)])
+        }
+        var added: [JSONValue] = []
+        var skipped: [JSONValue] = []
+        var failed: [JSONValue] = []
+        for sel in selections {
+            guard let pid = sel.productId else {
+                skipped.append(["key": .string(sel.key), "reason": "not_selected"])
+                continue
+            }
+            guard let p = offeredJSON.first(where: { $0["id"]?.stringValue == pid }) else {
+                failed.append(["key": .string(sel.key), "productId": .string(pid), "name": .string(pid), "reason": "not_offered"])
+                continue
+            }
+            var a: [String: JSONValue] = ["key": .string(sel.key), "productId": .string(pid),
+                                          "name": p["name"] ?? .string(pid), "quantity": .int(sel.quantity ?? 1)]
+            if let w = sel.weightLb { a["weightLb"] = .double(w) }
+            if let v = p["unitPrice"], v.doubleValue != nil { a["unitPrice"] = v }
+            if let v = p["pricePerLb"], v.doubleValue != nil { a["pricePerLb"] = v }
+            if p["estimated"]?.boolValue == true { a["estimated"] = true }
+            added.append(.object(a))
+        }
+        let result: JSONValue = ["cartId": .string(cartId), "store": .string(store), "added": .array(added),
+                                 "skipped": .array(skipped), "failed": .array(failed),
+                                 "storeCartUrl": .string(home(store) + "cart"), "verified": true]
+        return start(store, [done(result)])
+    }
+
+    private func start(_ store: String, _ instructions: [JSONValue], waitingOn cart: JSONValue? = nil) -> (Int, JSONValue) {
+        lock.lock()
+        nJob += 1
+        let job = "job_\(nJob)"
+        if let cart = cart { jobs[job] = (store, cart) }
+        lock.unlock()
+        return (200, ["job": .string(job), "envelope": FakeMealio.signTestEnvelope(job: job, seq: 1, store: store, instructions: instructions)])
+    }
+
+    private func done(_ result: JSONValue) -> JSONValue {
+        ["op": "done", "id": "done-1", "result": result]
+    }
+
+    static func errorParts(_ e: JSONValue) -> (code: String, message: String, status: Int?) {
+        if let code = e.stringValue { return (code, code, nil) }
+        let code = e["code"]?.stringValue ?? "server"
+        return (code, e["message"]?.stringValue ?? code, e["status"]?.intValue)
+    }
+
+    private func failOp(_ e: JSONValue) -> JSONValue {
+        let x = FakeMealio.errorParts(e)
+        return ["op": "fail", "id": "fail-1", "code": .string(x.code), "message": .string(x.message)]
+    }
+
+    /// With a status: an HTTP error. Without: a job that fails.
+    private func jobError(_ store: String, _ e: JSONValue) -> (Int, JSONValue) {
+        let x = FakeMealio.errorParts(e)
+        if let status = x.status { return (status, ["error": ["code": .string(x.code), "message": .string(x.message)]]) }
+        return start(store, [failOp(e)])
+    }
+
+    private func httpError(_ e: JSONValue) -> (Int, JSONValue) {
+        let x = FakeMealio.errorParts(e)
+        return (x.status ?? 400, ["error": ["code": .string(x.code), "message": .string(x.message)]])
+    }
+
+    /// An envelope signed with the test key, for tests that script
+    /// instructions themselves. Same as `signTestEnvelope` in the TS kit.
+    public static func signTestEnvelope(job: String, seq: Int, store: String, instructions: [JSONValue]) -> JSONValue {
+        let payload: JSONValue = [
+            "v": 1, "kind": "instructions", "job": .string(job), "seq": .int(seq),
+            "exp": .int(4_102_444_800), "store": .string(store), "instructions": .array(instructions),
+        ]
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.withoutEscapingSlashes, .sortedKeys]
+        let text = (try? enc.encode(payload)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        let sig = (try? signer.signature(for: Data(text.utf8)))?.base64EncodedString() ?? ""
+        return ["payload": .string(text), "sig": .string(sig), "kid": "ktest"]
+    }
+
+    /// A cart item from a script line, as the server builds it. Same as
+    /// `fakeCartItem` in the TS kit.
+    public static func cartItem(_ f: JSONValue) -> JSONValue {
+        let key = f["key"]?.stringValue ?? ""
+        let options = f["options"]?.arrayValue ?? []
+        var rem: JSONValue?
+        if let rid = f["remembered"]?.stringValue {
+            rem = options.first { $0["id"]?.stringValue == rid } ?? ["id": .string(rid), "name": .string(rid)]
+        }
+        let remId = rem?["id"]?.stringValue
+        let usable = remId != nil && f["rememberedUnavailable"]?.boolValue != true && rem?["outOfStock"]?.boolValue != true
+            && options.contains { $0["id"]?.stringValue == remId }
+        let unavailable = f["unavailable"]?.stringValue
+        let status: String = (unavailable != nil || options.isEmpty) ? "unavailable"
+            : usable ? "remembered" : (remId != nil ? "remembered_unavailable" : "choose")
+        var o: [String: JSONValue] = [
+            "key": .string(key), "ingredient": f["ingredient"] ?? .string(key), "quantity": f["quantity"] ?? 1,
+            "status": .string(status), "options": .array(options),
+            "selectedId": usable ? .string(remId ?? "") : .null,
+            "remembered": .null,
+        ]
+        if case .object(var r)? = rem {
+            if !usable { r["outOfStock"] = true }
+            o["remembered"] = .object(r)
+        }
+        if let v = f["rememberedPreferenceId"] { o["rememberedPreferenceId"] = v }
+        if f["startUnchecked"]?.boolValue == true { o["startUnchecked"] = true }
+        if let v = f["weightLb"] { o["weightLb"] = v }
+        if let v = f["recipes"] { o["recipes"] = v }
+        if status == "unavailable" { o["reason"] = .string(unavailable ?? "not_found") }
+        return .object(o)
+    }
+}
+
+/// Answers each fake's requests. Fakes are found by host name.
+final class FakeMealioURLProtocol: URLProtocol {
+    private static let lock = NSLock()
+    private static var fakes: [String: WeakFake] = [:]
+
+    private final class WeakFake {
+        weak var fake: FakeMealio?
+        init(_ fake: FakeMealio) { self.fake = fake }
+    }
+
+    static func register(_ fake: FakeMealio, host: String) {
+        lock.lock(); fakes[host] = WeakFake(fake); lock.unlock()
+    }
+
+    static func unregister(host: String) {
+        lock.lock(); fakes[host] = nil; lock.unlock()
+    }
+
+    private static func fake(for host: String) -> FakeMealio? {
+        lock.lock(); defer { lock.unlock() }
+        return fakes[host]?.fake
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let url = request.url
+        let data = request.httpBody ?? FakeMealioURLProtocol.read(request.httpBodyStream)
+        let json = data.flatMap { JSONValue.parse($0) }
+        let result: (Int, JSONValue)
+        if let host = url?.host, let fake = FakeMealioURLProtocol.fake(for: host) {
+            result = fake.answer(path: url?.path ?? "", body: json,
+                                 auth: request.value(forHTTPHeaderField: "Authorization"))
+        } else {
+            result = (404, ["error": ["code": "server", "message": "No fake Mealio at this address"]])
+        }
+        let (status, answer) = result
+        let out = (try? JSONEncoder().encode(answer)) ?? Data("{}".utf8)
+        if let url = url, let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1",
+                                                         headerFields: ["Content-Type": "application/json"]) {
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        }
+        client?.urlProtocol(self, didLoad: out)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+
+    private static func read(_ stream: InputStream?) -> Data? {
+        guard let stream = stream else { return nil }
+        stream.open()
+        defer { stream.close() }
+        var out = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while stream.hasBytesAvailable {
+            let n = stream.read(&buffer, maxLength: buffer.count)
+            if n <= 0 { break }
+            out.append(buffer, count: n)
+        }
+        return out
+    }
+}
+
+/// The fake store page: every page opens, every script answers, and a
+/// sign-in ends as the script's `signIn` says.
+@MainActor
+public final class FakeStoreHost: MealioHost {
+    private weak var fake: FakeMealio?
+
+    init(fake: FakeMealio) {
+        self.fake = fake
+    }
+
+    public func openPage(store: String, url: String, timeoutMs: Int) async throws -> PageOpenOutcome {
+        fake?.hostDid("open \(url)")
+        return PageOpenOutcome(ok: true, finalUrl: url)
+    }
+
+    public func runScript(store: String, guardScript: String, script: String, until: [Matcher], timeoutMs: Int) async throws -> ScriptOutcome {
+        fake?.hostDid("script")
+        return ScriptOutcome(messages: [], timedOut: false)
+    }
+
+    public func showLogin(_ request: LoginRequest) async throws -> LoginOutcome {
+        fake?.hostDid("login")
+        if request.cancel?.cancelled == true { return LoginOutcome(outcome: .cancelled, messages: []) }
+        let said = fake?.script["signIn"]?.stringValue ?? "signed_in"
+        return LoginOutcome(outcome: LoginOutcomeKind(rawValue: said) ?? .signedIn, messages: [])
+    }
+
+    public func fetch(store: String, request: FetchRequest, timeoutMs: Int, maxBytes: Int) async throws -> FetchOutcome {
+        fake?.hostDid("fetch")
+        return FetchOutcome(ok: true, status: 200, headers: [:], body: "")
+    }
+
+    public func resetPage() {
+        fake?.hostDid("reset")
+    }
+}
+#endif

@@ -528,7 +528,7 @@ void main() {
       expect(c.searching, isFalse);
     });
 
-    test('restores picks from a failed add where the product is still offered', () {
+    test('restores picks from a failed add where the product is still offered', () async {
       final opts = <Object?>[
         prod(<String, Object?>{
           'id': 'p1',
@@ -554,13 +554,13 @@ void main() {
       old.deselect('b');
       old.select('c', 'gone');
       final fresh = session(items('new'));
-      fresh.restorePicks(old);
+      await fresh.restorePicks(old);
       expect(<Object?>[fresh.selectedId('a'), fresh.quantity('a'), fresh.isSelected('b'), fresh.selectedId('c')],
           <Object?>['p2', 4, false, 'new']);
       final elsewhere = session(<Map<String, Object?>>[
         item(<String, Object?>{'key': 'a', 'options': opts, 'selectedId': 'p1'}),
       ], store: 'walmart');
-      elsewhere.restorePicks(old);
+      await elsewhere.restorePicks(old);
       expect(elsewhere.selectedId('a'), 'p1');
     });
 

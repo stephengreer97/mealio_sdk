@@ -137,6 +137,11 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
     /// Drop the hidden page (after a sign-out, so nothing of the old session
     /// stays in memory). The next page_open makes a fresh one. A job waiting
     /// on the page is answered now instead of waiting out its timer.
+    /// MealioHost: before a job, after exclusive work outlived its cap.
+    public func resetPage() {
+        resetHiddenPage()
+    }
+
     public func resetHiddenPage() {
         pageWait?.settle(PageOpenOutcome(ok: false, error: "load_failed"))
         pageWait = nil

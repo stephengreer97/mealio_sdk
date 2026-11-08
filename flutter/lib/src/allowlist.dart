@@ -266,6 +266,14 @@ const String blockedGraphqlOperation =
     'check_?out|place_?order|submit_?order|confirm_?order|create_?order|purchase|payment';
 
 final RegExp _opsRe = RegExp(blockedGraphqlOperation, caseSensitive: false);
+/// A field of a multipart/form-data body sent as raw text (a string with the
+/// boundaries in it, not form data). Group 1 is the field's name, group 2 its
+/// value: everything after the part's blank line up to the next boundary line
+/// or the end. Parts named operationName, query and operations are judged as
+/// the form fields of the same names. MULTIPART_FIELD in allowlist.ts.
+const String multipartField =
+    r'name="(operationName|query|operations)"[^\r\n]*\r?\n(?:[^\r\n]+\r?\n)*\r?\n([\s\S]*?)(?=\r?\n--|$)';
+
 final RegExp _rawOperationRe = RegExp(r'"operationName"\s*:\s*"([^"]*)"');
 final RegExp _ignoredRe = RegExp(r'"""(?:\\"""|[\s\S])*?"""|"(?:[^"\\]|\\.)*"|#[^\n\r]*');
 final RegExp _tokenRe = RegExp(r'[A-Za-z_][A-Za-z0-9_]*|\.\.\.|[{}():@]');
@@ -395,13 +403,18 @@ List<String> mutationNames(String doc) {
 /// the server will (after JSON parsing, so `\u004f` escapes do not hide it),
 /// for a single request or a batch, or form-encoded, and the names of every
 /// mutation it carries (see [mutationNames]). A GraphQL multipart upload's
-/// `operations` field is JSON and is judged like a JSON body. A persisted
+/// `operations` field is JSON and is judged like a JSON body, whether it
+/// comes form-encoded or as raw multipart text ([multipartField]). A leading
+/// byte order mark is dropped first. A persisted
 /// query that sends only an innocent name and a hash cannot be read here; the
 /// signature on the envelope covers it. The guard script applies the same rule to requests a
 /// page script makes; this applies it to the runner's own `fetch` op, which
 /// never passes through the page.
 bool bodyBlocked(String? body) {
-  if (body == null || body.isEmpty) return false;
+  if (body == null) return false;
+  // A leading byte order mark is dropped, as a server's JSON reader would.
+  if (body.startsWith('\uFEFF')) body = body.substring(1);
+  if (body.isEmpty) return false;
   final names = <String>[
     for (final Match m in _rawOperationRe.allMatches(body)) m.group(1)!,
   ];
@@ -423,10 +436,20 @@ bool bodyBlocked(String? body) {
       if (q is String) docs.add(q);
     }
   } else {
-    // Not JSON: form-encoded, or a bare GraphQL document.
+    // Not JSON: form-encoded, raw multipart, or a bare GraphQL document.
     docs.add(body);
     for (final Match m in _formRe.allMatches(body)) {
       final v = decodePercent(m.group(2)!.replaceAll('+', ' '));
+      if (m.group(1) == 'query') {
+        docs.add(v);
+      } else if (m.group(1) == 'operations') {
+        if (bodyBlocked(v)) return true;
+      } else {
+        names.add(v);
+      }
+    }
+    for (final Match m in RegExp(multipartField).allMatches(body)) {
+      final v = m.group(2)!;
       if (m.group(1) == 'query') {
         docs.add(v);
       } else if (m.group(1) == 'operations') {

@@ -236,6 +236,71 @@ final class FlowTests: XCTestCase {
         model.close { _ in }
     }
 
+    @MainActor
+    func testOutsideCancelsRestartAtMostThreeTimesInARowThenTryAgainShowsAndWorks() async throws {
+        defer { reset() }
+        let server = JobServer()
+        StubURLProtocol.handler = { req, body in
+            server.rec.record(req, body: body)
+            return server.start([jobsOpen("o"), jobsDone(jobsCart)])
+        }
+        let host = ScriptedHost()
+        var cancels = 0
+        host.open = { url in
+            if cancels < 4 {
+                cancels += 1
+                // As signOutOfStore does, every time.
+                MealioCart.client?.cancelJobs()
+            }
+            return PageOpenOutcome(ok: true, finalUrl: url)
+        }
+        configure(host)
+        var errors = 0
+        let model = MealioFlowModel()
+        model.open(recipes: [recipe], store: "heb", zip: nil, onAdded: nil, onError: { _ in errors += 1 })
+        try await waitFor { model.phase == .error }
+        // The first prepare and three restarts; the fourth cancel shows the error.
+        XCTAssertEqual(server.paths.filter { $0 == "/carts" }.count, 4)
+        XCTAssertEqual(model.error?.code, MealioError.Code.cancelled)
+        XCTAssertEqual(errors, 1)
+        XCTAssertFalse(model.closeRequested)
+        // Try again resets the count, and the sheet loads.
+        model.retry()
+        try await waitFor { model.phase == .list }
+        XCTAssertEqual(model.restarts, 0)
+        model.close { _ in }
+    }
+
+    @MainActor
+    func testTheRestartCountResetsAfterAPrepareThatWorks() async throws {
+        defer { reset() }
+        let server = JobServer()
+        StubURLProtocol.handler = { req, body in
+            server.rec.record(req, body: body)
+            return server.start([jobsOpen("o"), jobsDone(jobsCart)])
+        }
+        let host = ScriptedHost()
+        var cancelNext = 2
+        host.open = { url in
+            if cancelNext > 0 {
+                cancelNext -= 1
+                MealioCart.client?.cancelJobs()
+            }
+            return PageOpenOutcome(ok: true, finalUrl: url)
+        }
+        configure(host)
+        let model = MealioFlowModel()
+        model.open(recipes: [recipe], store: "heb", zip: nil, onAdded: nil, onError: nil)
+        try await waitFor { model.phase == .list }
+        XCTAssertEqual(model.restarts, 0)
+        // Three more in a row from here are still restarts, not an error.
+        cancelNext = 3
+        model.pick("heb")
+        try await waitFor { model.phase == .list }
+        XCTAssertNil(model.error)
+        model.close { _ in }
+    }
+
     // MARK: after a failed add
 
     @MainActor
@@ -260,7 +325,7 @@ final class FlowTests: XCTestCase {
         try await waitFor { model.phase == .error }
         XCTAssertTrue(model.failedAdd === first)
 
-        model.start()
+        model.retry()
         try await waitFor { model.phase == .list }
         let again = try XCTUnwrap(model.cart)
         XCTAssertFalse(again === first)

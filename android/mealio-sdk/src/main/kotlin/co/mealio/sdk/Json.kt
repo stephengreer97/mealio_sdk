@@ -102,3 +102,159 @@ internal fun jsonEquals(a: Any?, b: Any?): Boolean {
     }
     return false
 }
+
+/**
+ * JSON.parse's grammar exactly (RFC 8259: no comments, no single quotes, no
+ * bare words, no trailing text, whitespace only space, tab, CR and LF), for
+ * judging request bodies. Values are Map, List, String, Double, Boolean and
+ * null; a repeated key keeps its last value, as JSON.parse does. org.json is
+ * lenient, and a body it accepts but a server's JSON.parse would not must not
+ * be read as JSON.
+ */
+internal object StrictJson {
+    /** What [parse] returns for text that is not JSON. */
+    val INVALID = Any()
+
+    private const val MAX_DEPTH = 1000
+
+    private class Bad : RuntimeException(null, null, false, false)
+
+    fun parse(text: String): Any? = try {
+        val p = P(text)
+        p.ws()
+        val v = p.value(0)
+        p.ws()
+        if (p.i != text.length) INVALID else v
+    } catch (e: Bad) {
+        INVALID
+    }
+
+    private class P(val s: String) {
+        var i = 0
+
+        fun ws() {
+            while (i < s.length && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) i++
+        }
+
+        fun value(depth: Int): Any? {
+            if (depth > MAX_DEPTH || i >= s.length) throw Bad()
+            return when (s[i]) {
+                '{' -> obj(depth)
+                '[' -> arr(depth)
+                '"' -> str()
+                't' -> word("true", true)
+                'f' -> word("false", false)
+                'n' -> word("null", null)
+                else -> num()
+            }
+        }
+
+        fun word(w: String, v: Any?): Any? {
+            if (!s.startsWith(w, i)) throw Bad()
+            i += w.length
+            return v
+        }
+
+        fun obj(depth: Int): Map<String, Any?> {
+            val out = LinkedHashMap<String, Any?>()
+            i++
+            ws()
+            if (i < s.length && s[i] == '}') { i++; return out }
+            while (true) {
+                ws()
+                if (i >= s.length || s[i] != '"') throw Bad()
+                val k = str()
+                ws()
+                if (i >= s.length || s[i] != ':') throw Bad()
+                i++
+                ws()
+                out[k] = value(depth + 1)
+                ws()
+                if (i >= s.length) throw Bad()
+                when (s[i++]) {
+                    ',' -> continue
+                    '}' -> return out
+                    else -> throw Bad()
+                }
+            }
+        }
+
+        fun arr(depth: Int): List<Any?> {
+            val out = ArrayList<Any?>()
+            i++
+            ws()
+            if (i < s.length && s[i] == ']') { i++; return out }
+            while (true) {
+                ws()
+                out.add(value(depth + 1))
+                ws()
+                if (i >= s.length) throw Bad()
+                when (s[i++]) {
+                    ',' -> continue
+                    ']' -> return out
+                    else -> throw Bad()
+                }
+            }
+        }
+
+        fun str(): String {
+            val sb = StringBuilder()
+            i++
+            while (true) {
+                if (i >= s.length) throw Bad()
+                val c = s[i++]
+                when {
+                    c == '"' -> return sb.toString()
+                    c < ' ' -> throw Bad()
+                    c == '\\' -> {
+                        if (i >= s.length) throw Bad()
+                        when (s[i++]) {
+                            '"' -> sb.append('"')
+                            '\\' -> sb.append('\\')
+                            '/' -> sb.append('/')
+                            'b' -> sb.append('\b')
+                            'f' -> sb.append('\u000C')
+                            'n' -> sb.append('\n')
+                            'r' -> sb.append('\r')
+                            't' -> sb.append('\t')
+                            'u' -> {
+                                if (i + 4 > s.length) throw Bad()
+                                var n = 0
+                                for (k in 0 until 4) {
+                                    val d = Character.digit(s[i + k], 16)
+                                    if (d < 0) throw Bad()
+                                    n = n * 16 + d
+                                }
+                                i += 4
+                                sb.append(n.toChar())
+                            }
+                            else -> throw Bad()
+                        }
+                    }
+                    else -> sb.append(c)
+                }
+            }
+        }
+
+        fun num(): Double {
+            val start = i
+            if (i < s.length && s[i] == '-') i++
+            if (i >= s.length) throw Bad()
+            if (s[i] == '0') i++
+            else if (s[i] in '1'..'9') while (i < s.length && s[i] in '0'..'9') i++
+            else throw Bad()
+            if (i < s.length && s[i] == '.') {
+                i++
+                if (i >= s.length || s[i] !in '0'..'9') throw Bad()
+                while (i < s.length && s[i] in '0'..'9') i++
+            }
+            if (i < s.length && (s[i] == 'e' || s[i] == 'E')) {
+                i++
+                if (i < s.length && (s[i] == '+' || s[i] == '-')) i++
+                if (i >= s.length || s[i] !in '0'..'9') throw Bad()
+                while (i < s.length && s[i] in '0'..'9') i++
+            }
+            return s.substring(start, i).toDouble()
+        }
+    }
+}

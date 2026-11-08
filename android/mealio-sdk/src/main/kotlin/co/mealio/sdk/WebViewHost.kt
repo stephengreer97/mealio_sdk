@@ -366,6 +366,8 @@ class WebViewHost(context: Context) : Host {
     }
 
     /** Leave the store page (after a sign-out). */
+    override suspend fun resetPage() { reset() }
+
     suspend fun reset() = onMain {
         webView?.stopLoading()
         webView?.loadUrl("about:blank")

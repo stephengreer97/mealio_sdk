@@ -109,7 +109,7 @@ void _phone(WidgetTester tester) {
 Future<String> _queueProbe(WidgetTester tester) async {
   MealioCart.configure(publishableKey: 'pk', sessionTokenProvider: () async => 't');
   var state = 'stuck';
-  unawaited(MealioCart.instance.client.runExclusive(() async => 1).then((_) => state = 'ran'));
+  unawaited(MealioCart.instance.client.runExclusive((_) async => 1).then((_) => state = 'ran'));
   await tester.pump(const Duration(seconds: 1));
   return state;
 }
@@ -240,14 +240,14 @@ void main() {
     final events = <String>[];
     final release = Completer<void>();
     Object? error;
-    unawaited(t.client.runExclusive(() async {
+    unawaited(t.client.runExclusive((_) async {
       events.add('first start');
       await release.future;
       events.add('first end');
     }).catchError((Object e) {
       error = e;
     }));
-    unawaited(t.client.runExclusive(() async => events.add('second')));
+    unawaited(t.client.runExclusive((_) async => events.add('second')));
     await tester.pump(const Duration(seconds: 31));
     expect(error, _code(MealioErrorCode.network));
     expect(events, <String>['first start']);
@@ -273,7 +273,7 @@ void main() {
     old.select('onion', 'o9');
     old.setQuantity('onion', 3);
     final next = CartSession(t.client, PreparedCart.fromJson(_cartJson()));
-    next.restorePicks(old);
+    await next.restorePicks(old);
     expect(next.selectedId('onion'), 'o9');
     expect(next.quantity('onion'), 3);
     expect(next.options('onion').map((Product p) => p.id), contains('o9'));
@@ -364,7 +364,7 @@ void main() {
       await tester.pumpAndSettle();
       // Something else holds the page, so the prepare waits in the queue.
       final hold = Completer<void>();
-      unawaited(MealioCart.instance.client.runExclusive(() => hold.future));
+      unawaited(MealioCart.instance.client.runExclusive((_) => hold.future));
       await tester.tap(find.byType(MealioCartButton));
       await tester.pump();
       MealioCart.instance.cancelJobs();

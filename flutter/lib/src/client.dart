@@ -127,15 +127,36 @@ class JobQueue {
   /// Cart calls waiting or running. A warm-up does not start while any are.
   int pending = 0;
 
-  Future<T> run<T>(Future<T> Function() job) {
+  /// Set when exclusive work outlived its cap and may have left the hidden
+  /// page half way: the next job resets the page before it starts.
+  bool pageDirty = false;
+
+  /// Run `job` after every job queued before it. With `cancel`, a job still
+  /// waiting when it fires settles at once with `cancelled` and never runs.
+  Future<T> run<T>(Future<T> Function() job, {CancelToken? cancel}) {
     // Idle: start from a fresh future in the caller's zone. The old tail may
     // belong to a zone that no longer runs anything (a finished widget test),
     // and chaining on it would never start this job.
     final before = _inFlight == 0 ? Future<void>.value() : _tail;
     _inFlight += 1;
-    final out = before.then((_) => job());
-    _tail = out.then<void>((_) {}, onError: (Object _) {}).whenComplete(() => _inFlight -= 1);
-    return out;
+    final out = Completer<T>();
+    var started = false;
+    final unlisten = cancel?.onCancel(() {
+      if (!started && !out.isCompleted) out.completeError(_cancelledError(cancel));
+    });
+    final turn = before.then<void>((_) async {
+      unlisten?.call();
+      // Left the queue while waiting: nothing to run.
+      if (out.isCompleted) return;
+      started = true;
+      try {
+        out.complete(await job());
+      } catch (e, s) {
+        out.completeError(e, s);
+      }
+    });
+    _tail = turn.whenComplete(() => _inFlight -= 1);
+    return out.future;
   }
 }
 
@@ -152,11 +173,22 @@ class _Pin {
 Future<T> _deadline<T>(Future<T> f, Duration d, Object Function() onLate) =>
     f.timeout(d, onTimeout: () => throw onLate());
 
+MealioException _cancelledError(CancelToken? cancel, [String? reason]) => MealioException(
+      MealioErrorCode.cancelled,
+      'Cancelled',
+      reason: reason ?? cancel?.reason ?? MealioCancelReason.cancelled,
+    );
+
 void _stopIf(CancelToken? cancel) {
-  if (cancel != null && cancel.cancelled) {
-    throw const MealioException(MealioErrorCode.cancelled, 'Cancelled');
-  }
+  if (cancel != null && cancel.cancelled) throw _cancelledError(cancel);
 }
+
+/// Exclusive work holds the hidden page at most this long
+/// ([MealioClient.runExclusive]).
+const Duration exclusiveCap = Duration(seconds: 60);
+
+/// How long the client waits for a host to reset its page.
+const Duration _pageResetTimeout = Duration(seconds: 10);
 
 /// An error's message without Dart's "Exception: " prefix.
 String _messageOf(Object e) {
@@ -336,7 +368,10 @@ class MealioClient {
     final cancel = CancelToken();
     _warmCancel = cancel;
     late final Future<void> w;
-    w = _queue.run(() => _runWarm(store, cancel)).whenComplete(() {
+    w = _queue.run(() async {
+      await _cleanPage();
+      await _runWarm(store, cancel);
+    }).whenComplete(() {
       if (identical(_warming, w)) _warming = null;
     });
     _warming = w;
@@ -364,41 +399,67 @@ class MealioClient {
     final wasUser = _tracking && _user != null;
     _tracking = true;
     _user = id;
-    cancelJobs();
+    cancelJobs(reason: MealioCancelReason.userChanged);
     resetSession();
     return wasUser;
   }
 
-  /// Cancel every prepare and search, waiting or running. An add is not touched.
-  void cancelJobs() {
+  /// Cancel every prepare and search, waiting or running. An add is not
+  /// touched. Their `cancelled` error carries `reason`.
+  void cancelJobs({String reason = MealioCancelReason.cancelled}) {
     for (final CancelToken c in List<CancelToken>.of(_active)) {
-      c.cancel();
+      c.cancel(reason);
     }
-    _warmCancel?.cancel();
+    _warmCancel?.cancel(reason);
   }
 
   /// Run `fn` with the hidden page to itself, in the queue with the jobs. For
   /// work that must not land in the middle of one, like clearing store sessions.
-  /// After [requestTimeout] the caller gets `network`, but the queue stays
-  /// held until `fn` has really finished, so no job runs alongside it.
-  Future<T> runExclusive<T>(Future<T> Function() fn) {
+  /// After [requestTimeout] the caller gets `network`. The queue stays held
+  /// until `fn` ends or [exclusiveCap] (60 seconds) passes, whichever is
+  /// first. At the cap `fn`'s `cancel` fires, the queue moves on, and the
+  /// next job loads a blank page before it starts.
+  Future<T> runExclusive<T>(Future<T> Function(CancelToken cancel) fn) {
     final result = Completer<T>();
     unawaited(_queue.run(() async {
+      await _cleanPage();
+      final stop = CancelToken();
       final timer = Timer(requestTimeout, () {
         if (!result.isCompleted) {
           result.completeError(const MealioException(MealioErrorCode.network, 'That took too long'));
         }
       });
-      try {
-        final v = await Future<T>.sync(fn);
+      final capped = Completer<void>();
+      final cap = Timer(exclusiveCap, () {
+        stop.cancel();
+        _queue.pageDirty = true;
+        if (!capped.isCompleted) capped.complete();
+      });
+      final work = Future<T>.sync(() => fn(stop)).then<void>((T v) {
         if (!result.isCompleted) result.complete(v);
-      } catch (e, s) {
+      }, onError: (Object e, StackTrace s) {
         if (!result.isCompleted) result.completeError(e, s);
-      } finally {
-        timer.cancel();
-      }
+      });
+      await Future.any(<Future<void>>[work, capped.future]);
+      timer.cancel();
+      cap.cancel();
     }));
     return result.future;
+  }
+
+  /// After exclusive work ran past its cap: put the hidden page back to
+  /// blank before this job uses it. A warm-up made on the old page is dropped.
+  Future<void> _cleanPage() async {
+    if (!_queue.pageDirty) return;
+    _queue.pageDirty = false;
+    clearWarm();
+    final Object h = _host;
+    if (h is! MealioPageReset) return;
+    try {
+      await h.resetPage().timeout(_pageResetTimeout);
+    } catch (_) {
+      // Best effort: the next page_open replaces whatever is there.
+    }
   }
 
   /// The current token. One that arrives after a reset belongs to the last
@@ -411,7 +472,7 @@ class MealioClient {
     void stopIfChanged() {
       _stopIf(cancel);
       if (cancel != null && _sessionGen != first) {
-        throw const MealioException(MealioErrorCode.cancelled, 'Cancelled');
+        throw _cancelledError(cancel, MealioCancelReason.userChanged);
       }
     }
 
@@ -429,6 +490,8 @@ class MealioClient {
           () => TimeoutException('getSessionToken did not answer in time'),
         );
       } catch (e) {
+        // Cancelled while it waited: that, not the failed fetch, is the answer.
+        _stopIf(cancel);
         if (gen != _sessionGen) {
           stopIfChanged();
           if (!pinned) continue;
@@ -571,10 +634,18 @@ class MealioClient {
     _queue.pending += 1;
     if (cancel != null) _active.add(cancel);
     try {
-      return await _queue.run(() {
+      return await _queue.run(() async {
+        _stopIf(cancel);
+        await _cleanPage();
         _stopIf(cancel);
         return fn();
-      });
+      }, cancel: cancel);
+    } catch (e) {
+      // Whatever failed after a cancel, the caller hears `cancelled`.
+      if (cancel != null && cancel.cancelled && !(e is MealioException && e.code == MealioErrorCode.cancelled)) {
+        throw _cancelledError(cancel);
+      }
+      rethrow;
     } finally {
       _queue.pending -= 1;
       if (cancel != null) _active.remove(cancel);

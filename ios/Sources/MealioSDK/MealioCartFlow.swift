@@ -235,7 +235,7 @@ public struct MealioCartFlow: View {
                                          onPicked: { _ in model.locationPicked(visit: visit) },
                                          back: locationBack)
                 } else {
-                    MealioErrorView(t: t, error: model.error, onRetry: { model.start() }, onClose: { requestClose() })
+                    MealioErrorView(t: t, error: model.error, onRetry: { model.retry() }, onClose: { requestClose() })
                 }
             case .list, .adding:
                 if let cart = model.cart {
@@ -256,12 +256,12 @@ public struct MealioCartFlow: View {
                                        requestClose()
                                    })
                 } else {
-                    MealioErrorView(t: t, error: model.error, onRetry: { model.start() }, onClose: { requestClose() })
+                    MealioErrorView(t: t, error: model.error, onRetry: { model.retry() }, onClose: { requestClose() })
                 }
             case .error:
                 MealioErrorView(t: t, error: model.error,
                                 note: model.failedAdd != nil ? ui.tr(.addFailedNote) : nil,
-                                onRetry: { model.start() }, onClose: { requestClose() })
+                                onRetry: { model.retry() }, onClose: { requestClose() })
             }
         }
     }
@@ -290,6 +290,10 @@ final class MealioFlowModel: ObservableObject {
     @Published private(set) var closeRequested = false
 
     private var run = 0
+    /// Restarts after an outside cancel, in a row, for this opening. Reset by
+    /// a prepare that works and by any user action (Try again, a store pick).
+    private(set) var restarts = 0
+    static let maxRestarts = 3
     /// The prepare under way, so closing can stop it.
     private var preparing: CancelToken?
     /// Bumped each time the location step opens, so a save that finishes after
@@ -328,6 +332,7 @@ final class MealioFlowModel: ObservableObject {
         failedAdd = nil
         closeRequested = false
         closeAfterAdd = false
+        restarts = 0
         openedFor = MealioCart.users.generation
         // VERIFY: as loginSub below, formed in this @MainActor method.
         userSub = MealioCart.users.$generation.sink { [weak self] gen in self?.userChanged(gen) }
@@ -420,9 +425,15 @@ final class MealioFlowModel: ObservableObject {
                 })
                 guard let self = self, self.run == id else { return }
                 if let old = self.failedAdd {
-                    c.restorePicks(from: old)
+                    // A searched pick is searched again on this cart; never sent as it was.
+                    await c.restorePicks(from: old, cancel: cancel, onStep: { [weak self] s, _ in
+                        guard let self = self, self.run == id else { return }
+                        self.step = s
+                    })
+                    guard self.run == id else { return }
                     self.failedAdd = nil
                 }
+                self.restarts = 0
                 self.store = c.store
                 self.cart = c
                 self.phase = .list
@@ -430,11 +441,19 @@ final class MealioFlowModel: ObservableObject {
             } catch {
                 guard let self = self, self.run == id else { return }
                 let code = (error as? MealioError)?.code
-                // Never an error. Closing bumped `run`, so this was something
-                // else (a store sign-out, cancelJobs): the sheet is still up, so
-                // prepare again. A user change closes the sheet instead.
+                // Closing bumped `run`, so this was something else (a store
+                // sign-out, cancelJobs, a session reset): the sheet is still up,
+                // so prepare again, at most `maxRestarts` times in a row; then
+                // the error screen with Try again. A user change closes the
+                // sheet instead.
                 if code == MealioError.Code.cancelled {
-                    if self.hosting && !self.closeRequested { self.start() }
+                    guard self.hosting, !self.closeRequested else { return }
+                    if self.restarts < MealioFlowModel.maxRestarts {
+                        self.restarts += 1
+                        self.start()
+                    } else {
+                        self.fail(error, step: .loading)
+                    }
                     return
                 }
                 if code == MealioError.Code.storeRequired || code == MealioError.Code.storeNotAllowed {
@@ -485,6 +504,7 @@ final class MealioFlowModel: ObservableObject {
     /// while the choice was saving. `visit` is the step the pick was made on.
     func locationPicked(visit: Int? = nil) {
         guard hosting, phase == .location, visit == nil || visit == locationVisit else { return }
+        restarts = 0
         start()
     }
 
@@ -492,6 +512,13 @@ final class MealioFlowModel: ObservableObject {
     func pick(_ id: String) {
         MealioCart.emit(.storePicked(store: id))
         store = id
+        restarts = 0
+        start()
+    }
+
+    /// The user tapped Try again.
+    func retry() {
+        restarts = 0
         start()
     }
 
@@ -593,7 +620,7 @@ final class MealioFlowModel: ObservableObject {
         let adding = phase == .adding
         run += 1
         // Nothing it was doing reports afterwards. An add is not stopped.
-        preparing?.cancel()
+        preparing?.cancel(reason: .closed)
         preparing = nil
         cart?.cancelSearches()
         let outcome = phase == .done ? result : nil

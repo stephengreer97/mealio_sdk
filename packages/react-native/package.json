@@ -21,6 +21,8 @@
     "src",
     "jest.js",
     "jest.d.ts",
+    "testing.js",
+    "testing.d.ts",
     "README.md",
     "LICENSE"
   ],

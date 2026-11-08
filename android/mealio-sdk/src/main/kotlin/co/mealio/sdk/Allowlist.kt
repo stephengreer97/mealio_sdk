@@ -349,17 +349,14 @@ fun mutationNames(doc: String): List<String> {
 private val GRAPHQL_KINDS = setOf("mutation", "query", "subscription", "fragment")
 
 /** JSON.parse as the reference uses it: an object or array, or null when the body is not JSON. */
-private fun parseJsonBody(body: String): Any? {
-    val s = body.trim()
-    if (!s.startsWith("{") && !s.startsWith("[")) return null
-    return try {
-        val tok = org.json.JSONTokener(s)
-        val v = tok.nextValue()
-        if (tok.nextClean() != 0.toChar()) null else v
-    } catch (e: Exception) {
-        null
-    }
-}
+/**
+ * A field of a multipart/form-data body sent as raw text. Same source as
+ * MULTIPART_FIELD in packages/core/src/allowlist.ts, with JavaScript's
+ * end-of-input `$` written as `\z` (Java's `$` also matches before a final newline).
+ */
+private val MULTIPART_FIELD_RE = Regex(
+    "name=\"(operationName|query|operations)\"[^\\r\\n]*\\r?\\n(?:[^\\r\\n]+\\r?\\n)*\\r?\\n([\\s\\S]*?)(?=\\r?\\n--|\\z)",
+)
 
 /**
  * Does a request body name a blocked operation? Reads `operationName` the way
@@ -372,29 +369,40 @@ private fun parseJsonBody(body: String): Any? {
  * applies it to the runner's own `fetch` op, which never passes through the page.
  */
 fun bodyBlocked(body: String?): Boolean {
-    if (body.isNullOrEmpty()) return false
+    if (body == null) return false
+    // A leading byte order mark is dropped, as a server's JSON reader would.
+    val text = body.removePrefix("\uFEFF")
+    if (text.isEmpty()) return false
     val names = ArrayList<String>()
     val docs = ArrayList<String>()
-    for (m in OPERATION_NAME_RE.findAll(body)) names.add(m.groupValues[1])
-    val j = parseJsonBody(body)
-    if (j != null) {
-        val list: List<Any?> = when (j) {
-            is org.json.JSONArray -> (0 until j.length()).map { j.opt(it) }
-            else -> listOf(j)
-        }
+    for (m in OPERATION_NAME_RE.findAll(text)) names.add(m.groupValues[1])
+    // Strict, as JSON.parse: text org.json would bend into JSON (single
+    // quotes, bare words, comments) is judged as a document instead.
+    val j = StrictJson.parse(text)
+    if (j !== StrictJson.INVALID) {
+        val list: List<Any?> = if (j is List<*>) j else listOf(j)
         for (o in list) {
-            if (o !is org.json.JSONObject) continue
-            (o.opt("operationName") as? String)?.let { names.add(it) }
-            (o.opt("query") as? String)?.let { docs.add(it) }
+            if (o !is Map<*, *>) continue
+            (o["operationName"] as? String)?.let { names.add(it) }
+            (o["query"] as? String)?.let { docs.add(it) }
         }
     } else {
-        // Not JSON: form-encoded, or a bare GraphQL document.
+        // Not JSON: form-encoded, raw multipart, or a bare GraphQL document.
+        val body = text
         docs.add(body)
         for (m in FORM_FIELD_RE.findAll(body)) {
             val v = decodePercent(m.groupValues[2].replace('+', ' '))
             when (m.groupValues[1]) {
                 "query" -> docs.add(v)
                 // GraphQL multipart: `operations` is JSON, judged like a JSON body.
+                "operations" -> if (bodyBlocked(v)) return true
+                else -> names.add(v)
+            }
+        }
+        for (m in MULTIPART_FIELD_RE.findAll(body)) {
+            val v = m.groupValues[2]
+            when (m.groupValues[1]) {
+                "query" -> docs.add(v)
                 "operations" -> if (bodyBlocked(v)) return true
                 else -> names.add(v)
             }

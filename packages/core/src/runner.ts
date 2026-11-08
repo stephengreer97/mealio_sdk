@@ -19,14 +19,26 @@ export const FETCH_PER_MINUTE = 120;
  */
 export const HOST_GRACE_MS = 5_000;
 
+/**
+ * Why a job was cancelled, carried on its `cancelled` error:
+ * - `user_changed`: setUser moved to another user, or resetSession ran while
+ *   the job waited for its session. Prepare again for the new user.
+ * - `closed`: the screen that asked for it went away.
+ * - `cancelled`: anything else (cancelJobs, a store sign-out, your own token).
+ */
+export type CancelReason = 'user_changed' | 'closed' | 'cancelled';
+
 /** Stops a prepare or a search. See MealioClient.prepareCart. */
 export class CancelToken {
   cancelled = false;
+  /** Why it was cancelled. Null until it is. The first cancel's reason stands. */
+  reason: CancelReason | null = null;
   private listeners: Array<() => void> = [];
 
-  cancel(): void {
+  cancel(reason: CancelReason = 'cancelled'): void {
     if (this.cancelled) return;
     this.cancelled = true;
+    this.reason = reason;
     const list = this.listeners;
     this.listeners = [];
     for (const fn of list) { try { fn(); } catch { /* one listener never stops the rest */ } }
@@ -69,6 +81,13 @@ export interface Host {
     /** Close the sheet as `cancelled` when this fires. */
     cancel?: CancelToken;
   }): Promise<{ outcome: 'signed_in' | 'cancelled' | 'timeout'; messages: JsonMessage[] }>;
+  /**
+   * Optional. Load about:blank in the hidden page and forget which store it
+   * was on. Called before the next job when exclusive work (runExclusive) was
+   * cut off by its cap and may have left the page in any state. Bounded by
+   * the client at PAGE_RESET_MS.
+   */
+  resetPage?(): Promise<void>;
   /** One HTTP request with the store's cookies. */
   fetch(store: string, req: FetchOp['request'], timeoutMs: number, maxBytes: number):
     Promise<{ ok: boolean; status?: number; headers?: Record<string, string>; body?: string; truncated?: boolean; error?: string }>;

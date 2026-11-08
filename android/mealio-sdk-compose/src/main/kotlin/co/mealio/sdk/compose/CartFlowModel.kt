@@ -5,6 +5,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import co.mealio.sdk.AddResult
+import co.mealio.sdk.CancelReason
 import co.mealio.sdk.CancelToken
 import co.mealio.sdk.CartSession
 import co.mealio.sdk.MealioCart
@@ -127,6 +128,11 @@ internal class CartFlowModel(
     private var attached = 0
     /** Ends this model when no screen takes it back after a recreation. */
     private var reclaim: Job? = null
+    /**
+     * No screen took this model back while an add ran. The add still reports
+     * (straight to the partner's callbacks), then the model is disposed.
+     */
+    private var orphaned = false
     /** Prepares restarted in a row after a cancel the user did not ask for. */
     private var restarts = 0
 
@@ -170,14 +176,19 @@ internal class CartFlowModel(
         reclaim?.cancel()
         reclaim = scope.launch {
             delay(RECLAIM_MS)
-            if (attached == 0) dispose()
+            if (attached > 0) return@launch
+            // An add is never dropped: it reports when it ends, then this goes.
+            if (adding) orphaned = true else dispose()
         }
     }
 
-    /** A partner callback now, or when a composition shows this again. */
+    /**
+     * A partner callback now, or when a composition shows this again. Hidden
+     * or orphaned, no composition will: now.
+     */
     private fun deliver(fn: () -> Unit) {
         if (finished) return
-        if (attached > 0) fn() else queued.add(fn)
+        if (attached > 0 || hidden || orphaned) fn() else queued.add(fn)
     }
 
     fun stepNow(): MealioSheetStep = if (login.active) MealioSheetStep.SIGNIN else when (phase) {
@@ -231,11 +242,15 @@ internal class CartFlowModel(
 
     fun pickStore(id: String) {
         ui.emit(MealioEvent.StorePicked(id))
+        restarts = 0
         start(id)
     }
 
     /** Try again, with the store as it stands now. */
-    fun retry() = start(store)
+    fun retry() {
+        restarts = 0
+        start(store)
+    }
 
     fun start(storeId: String?) {
         if (finished || adding) return
@@ -249,8 +264,14 @@ internal class CartFlowModel(
             try {
                 val c = backend.prepareCart(storeId, recipes, cancel) { s, _ -> if (run == id) step = s }
                 if (run != id) return@launch
+                // A searched pick is searched for again on the new cart, under this prepare's cancel.
+                failedAdd?.let {
+                    c.restorePicks(it, cancel) { s, _ -> if (run == id) step = s }
+                    if (run != id) return@launch
+                    failedAdd = null
+                    version += 1
+                }
                 restarts = 0
-                failedAdd?.let { c.restorePicks(it); failedAdd = null; version += 1 }
                 store = c.store
                 cart = c
                 phase = Phase.LIST
@@ -268,9 +289,11 @@ internal class CartFlowModel(
                     // cancelJobs, a user change): never an error. Load again
                     // while the sheet is open, or close quietly when what it
                     // showed was another user's.
-                    "cancelled" -> {
-                        if (userNow() != openedFor || restarts >= MAX_RESTARTS) close()
-                        else { restarts += 1; start(storeId) }
+                    "cancelled" -> when {
+                        userNow() != openedFor || (ex as MealioException).reason == CancelReason.USER_CHANGED -> close()
+                        // Cancelled again and again from outside: stop, and let the user try again.
+                        restarts >= MAX_RESTARTS -> fail(ex, ui.tr("somethingWrongSentence"), MealioSheetStep.LOADING)
+                        else -> { restarts += 1; start(storeId) }
                     }
                     "store_required", "store_not_allowed" -> {
                         store = null
@@ -318,6 +341,8 @@ internal class CartFlowModel(
                 if (run == id) userCheck?.let { checkUser(it) }
                 // Hidden by the partner meanwhile: the result is out, now close.
                 if (run == id && hidden && !finished) close()
+                // No screen took it back: the result is out, now go.
+                if (run == id && orphaned && !finished) dispose()
             }
         }
     }
@@ -325,8 +350,8 @@ internal class CartFlowModel(
     /** Stop what can be stopped. Nothing it was doing reports afterwards. */
     private fun stop() {
         run += 1
-        preparing?.cancel()
-        cart?.cancelSearches()
+        preparing?.cancel(CancelReason.CLOSED)
+        cart?.cancelSearches(CancelReason.CLOSED)
     }
 
     /**
@@ -401,7 +426,10 @@ internal class CartFlowModel(
 /** How long a model waits for a recreated screen to show it again. */
 internal const val RECLAIM_MS = 5_000L
 
-/** Restarts after an outside cancel before the sheet gives up and closes. */
+/**
+ * Restarts in a row after an outside cancel. One more cancel shows the error
+ * screen with Try again; a good prepare or any user action starts the count over.
+ */
 private const val MAX_RESTARTS = 3
 
 /**

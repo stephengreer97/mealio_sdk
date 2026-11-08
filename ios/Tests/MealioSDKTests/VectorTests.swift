@@ -115,6 +115,15 @@ final class VectorTests: XCTestCase {
         XCTAssertEqual(MealioScripts.guardScript, try Fixtures.text("guard-script", "js"))
     }
 
+    func testTheGuardJudgesRawMultipartWithTheSamePatternAsBodyBlocked() {
+        XCTAssertTrue(MealioScripts.guardScript.contains("  var PART = " + MealioScripts.jsStringLiteral(Allowlist.multipartField) + ";\n"))
+    }
+
+    func testABodyWithOnlyAByteOrderMarkIsNotBlocked() {
+        XCTAssertFalse(Allowlist.bodyBlocked("\u{FEFF}"))
+        XCTAssertTrue(Allowlist.bodyBlocked("\u{FEFF}{\"query\":\"mutation { placeOrder { id } }\"}"))
+    }
+
     func testBridgeShimMatchesTheReferenceByteForByte() throws {
         XCTAssertEqual(MealioScripts.bridgeShim, try Fixtures.text("bridge-shim", "js"))
     }

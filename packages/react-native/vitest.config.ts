@@ -9,6 +9,7 @@ export default defineConfig({
   esbuild: { jsx: 'transform', jsxFactory: 'React.createElement', jsxFragment: 'React.Fragment' },
   resolve: {
     alias: [
+      { find: /^@mealio\/sdk-core\/testing$/, replacement: path.join(here, '../core/src/testing.ts') },
       { find: /^@mealio\/sdk-core$/, replacement: path.join(here, '../core/src/index.ts') },
       { find: /^react-native$/, replacement: path.join(here, 'test/stubs/rn.tsx') },
       { find: /^react-native-webview$/, replacement: path.join(here, 'test/stubs/webview.tsx') },

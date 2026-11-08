@@ -1,5 +1,25 @@
 ## Unreleased
 
+- `restorePicks` is async: a pick the user found with search is searched again
+  on the new cart and kept only if it comes back. A product the new cart was
+  not offered is never sent.
+- Nothing waits forever: each step of a store sign-out (cookies, the stored
+  epoch, the blank page) gets 10 seconds and stops on cancel. `runExclusive`
+  passes a `CancelToken` and holds the queue at most 60 seconds
+  (`exclusiveCap`); after that the next job loads a blank page first. A job
+  cancelled while it waits in the queue fails with `cancelled` at once.
+- The sheet starts again after an outside cancel at most 3 times in a row
+  (`maxOutsideRestarts`), then shows the error screen with Try again.
+  `resetSession` during the session fetch counts as an outside cancel.
+- A prepare or search cancelled by `cancelJobs` reports `cancelled`, even when
+  its session fetch then fails. `MealioException.reason` says why:
+  `user_changed`, `closed` or `cancelled` (`MealioCancelReason`).
+- Guard: a leading byte order mark is dropped before parsing, raw multipart
+  text bodies are judged by their `operations` part, same-origin frames get
+  the guard, and workers from blob: or data: URLs are refused.
+- `package:mealio_sdk/testing.dart`: `MealioFake` and `MealioFakeScript`, a
+  scripted Mealio for the real client and sheet (`configureMealioForTesting(fake: ...)`).
+
 - One job at a time on the hidden page: prepare, search, add and warm-up queue
   as whole jobs. Every request has a 30 second timeout (`network`), and every
   page step ends at its own timeout plus 5 seconds, injection included.

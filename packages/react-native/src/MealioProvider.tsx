@@ -11,7 +11,7 @@ import React, { createContext, useCallback, useContext, useEffect, useLayoutEffe
 import { Modal, Platform, Pressable, SafeAreaView, StyleSheet, Text, useColorScheme, View, type ImageSourcePropType } from 'react-native';
 import { WebView, type WebViewMessageEvent, type WebViewNavigation } from 'react-native-webview';
 import {
-  JobQueue, MealioClient, MealioError, matchesAny, parseMessage, safeListener, textTools,
+  CancelToken as CancelTokenClass, JobQueue, MealioClient, MealioError, PAGE_RESET_MS, matchesAny, parseMessage, safeListener, textTools,
   type MealioEventListener, type MealioStrings, type TextTools,
   type CancelToken, type CartSession, type Host, type JsonMessage, type Matcher, type PrepareCartInput, type StepListener, type StoreInfo, type StoreLocation, type StorePreferences,
 } from '@mealio/sdk-core';
@@ -43,6 +43,19 @@ export interface MealioUi extends TextTools {
 export interface EpochStorage {
   get(): Promise<number>;
   set(n: number): Promise<void>;
+}
+
+/**
+ * A fake Mealio for tests: what createFakeMealio from
+ * `@mealio/react-native-cart/testing` returns. With it the provider drives
+ * the real client against the fake server and store page, renders no
+ * WebView, and trusts the protocol test key.
+ */
+export interface MealioTesting {
+  fetchImpl: typeof fetch;
+  host: Host;
+  keys: Record<string, string>;
+  baseUrl: string;
 }
 
 export interface MealioProviderProps {
@@ -78,6 +91,8 @@ export interface MealioProviderProps {
   onEvent?: MealioEventListener;
   /** @deprecated use theme.accent */
   accentColor?: string;
+  /** Tests only: run on a fake Mealio (createFakeMealio from `@mealio/react-native-cart/testing`). */
+  testing?: MealioTesting;
   children: React.ReactNode;
 }
 
@@ -424,6 +439,12 @@ export function MealioProvider(props: MealioProviderProps) {
         if (state.check) checkTimer.current = setInterval(injectCheck, Math.max(1000, state.check.intervalMs));
       });
     },
+    async resetPage() {
+      hiddenStore.current = null;
+      pageWaiter.current?.resolve({ ok: false, error: 'superseded' });
+      scriptWaiter.current?.resolve({ timedOut: false, error: 'superseded' });
+      setHiddenUri((cur) => ({ uri: 'about:blank', n: cur.n + 1 }));
+    },
     async fetch(store, req, timeoutMs, maxBytes) {
       const ctl = new AbortController();
       const t = setTimeout(() => ctl.abort(), timeoutMs);
@@ -460,42 +481,54 @@ export function MealioProvider(props: MealioProviderProps) {
   if (!trackUser.current) clientKey.current = props.getSessionToken;
   const queue = useRef(new JobQueue()).current;
 
+  const testing = props.testing;
   const client = useMemo(() => new MealioClient({
     publishableKey: props.publishableKey,
     getSessionToken: () => sessionFn.current(),
     platform: 'react-native',
     sdkVersion: SDK_VERSION,
-    baseUrl: props.baseUrl,
+    baseUrl: testing ? testing.baseUrl : props.baseUrl,
     getEpoch: () => epochStore.get(),
     userId,
     queue,
     debug: typeof __DEV__ !== 'undefined' && !!__DEV__,
-  }, host), [props.publishableKey, clientKey.current, props.baseUrl, host, epochStore, queue]);
+    ...(testing ? { fetchImpl: testing.fetchImpl, keys: testing.keys } : {}),
+  }, testing ? testing.host : host), [props.publishableKey, clientKey.current, props.baseUrl, host, epochStore, queue, testing]);
   allowRef.current = client.allowlist;
   const clientRef = useRef(client);
   clientRef.current = client;
 
   // Nothing may keep running in, or remember, the old session's page. Queued,
   // so an add under way finishes first and the next user's cart waits for this.
-  const clearStores = useCallback(() => client.runExclusive(async () => {
-    await epochStore.set((await epochStore.get()) + 1);
-    hiddenStore.current = null;
-    setHiddenUri((cur) => ({ uri: 'about:blank', n: cur.n + 1 }));
-    hidden.current?.clearCache?.(true);
+  // Every step is bounded by PAGE_RESET_MS and stops on the cancel token, so a
+  // storage or cookie call that never answers cannot hold the queue. A step
+  // that fails or runs late does not stop the next: the cookies are cleared
+  // even if the epoch could not be saved. The first failure is thrown at the end.
+  const clearStores = useCallback(() => client.runExclusive(async (cancel) => {
+    let first: unknown = null;
+    const step = async (fn: () => unknown) => {
+      if (cancel.cancelled) throw new MealioError('cancelled', 'Cancelled', cancel.reason ?? 'cancelled');
+      try { await boundedStep(fn, cancel); } catch (e) { if (cancel.cancelled) throw e; first = first ?? e; }
+    };
+    await step(async () => { await epochStore.set((await boundedStep(() => epochStore.get(), cancel)) + 1); });
+    await step(() => {
+      hiddenStore.current = null;
+      setHiddenUri((cur) => ({ uri: 'about:blank', n: cur.n + 1 }));
+      hidden.current?.clearCache?.(true);
+    });
     // Without a cookie manager there is no way to delete a WebView cookie
     // from React Native, so the stores' logins would survive. Saying so beats
     // a sign-out that only looks like it worked.
-    const cookies = loadCookieManager();
-    if (!cookies) {
-      throw new MealioError('unsupported', `Install ${COOKIE_MANAGER} to sign out of stores.`);
+    const cookies = testing ? null : loadCookieManager();
+    if (!cookies && !testing) throw new MealioError('unsupported', `Install ${COOKIE_MANAGER} to sign out of stores.`);
+    if (cookies && typeof cookies.clearAllStores === 'function') {
+      await step(() => cookies.clearAllStores!());
+    } else if (cookies) {
+      await step(() => cookies.clearAll?.(true));
+      await step(() => cookies.clearAll?.(false));
     }
-    if (typeof cookies.clearAllStores === 'function') {
-      await cookies.clearAllStores();
-    } else {
-      await cookies.clearAll?.(true);
-      await cookies.clearAll?.(false);
-    }
-  }), [client, epochStore]);
+    if (first) throw first;
+  }), [client, epochStore, testing]);
 
   // A layout effect, so it lands before any child's effect warms for the new user.
   useLayoutEffect(() => {
@@ -504,8 +537,9 @@ export function MealioProvider(props: MealioProviderProps) {
     if (client.setUser(userId)) clearStores().catch(() => { /* never blocks a user change */ });
   }, [client, clearStores, userId]);
 
+  // The provider went away, and every screen under it: `closed`.
   useEffect(() => () => {
-    clientRef.current.cancelJobs();
+    clientRef.current.cancelJobs('closed');
     endLogin('cancelled');
   }, [endLogin]);
 
@@ -550,7 +584,7 @@ export function MealioProvider(props: MealioProviderProps) {
       <InternalCtx.Provider value={internal}>
         {props.children}
         {settingsOpen && userId !== null ? <MealioStoreSettings visible onClose={() => setSettingsOpen(false)} /> : null}
-        <View pointerEvents="none" style={styles.hidden}>
+        {testing ? null : <View pointerEvents="none" style={styles.hidden}>
           <WebView
             ref={hidden}
             // A new key per navigation remounts the WebView, so re-opening the
@@ -577,7 +611,7 @@ export function MealioProvider(props: MealioProviderProps) {
             setSupportMultipleWindows={false}
             style={styles.hiddenView}
           />
-        </View>
+        </View>}
         <Modal visible={!!login && hosts === 0} animationType="slide" onRequestClose={() => endLogin('cancelled')} presentationStyle="pageSheet">
           <SafeAreaView style={[styles.flex, { backgroundColor: theme.background }]}>
             <View style={[styles.bar, { borderBottomColor: theme.border }]}>
@@ -592,6 +626,21 @@ export function MealioProvider(props: MealioProviderProps) {
       </InternalCtx.Provider>
     </ApiCtx.Provider>
   );
+}
+
+/**
+ * One step of a store sign-out: `fn`'s result, or a `network` error after
+ * PAGE_RESET_MS, or `cancelled` as soon as `cancel` fires.
+ */
+export function boundedStep<T>(fn: () => T | Promise<T>, cancel: CancelTokenClass, ms: number = PAGE_RESET_MS): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => { off(); reject(new MealioError('network', 'Signing out of the stores took too long')); }, ms);
+    const off = cancel.onCancel(() => { clearTimeout(t); reject(new MealioError('cancelled', 'Cancelled', cancel.reason ?? 'cancelled')); });
+    Promise.resolve().then(fn).then(
+      (v) => { clearTimeout(t); off(); resolve(v); },
+      (e) => { clearTimeout(t); off(); reject(e); },
+    );
+  });
 }
 
 const IOS_IDLE = { html: '<html><body></body></html>', baseUrl: 'about:blank' };

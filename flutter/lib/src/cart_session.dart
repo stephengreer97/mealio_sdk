@@ -162,6 +162,9 @@ class CartSession extends ChangeNotifier {
   final Map<String, List<Product>> _extra = <String, List<Product>>{};
   final Map<String, int> _qty = <String, int>{};
   final Map<String, double> _lb = <String, double>{};
+
+  /// Each item's last search that answered, for [restorePicks].
+  final Map<String, String> _queries = <String, String>{};
   Future<AddResult>? _adding;
   final Set<CancelToken> _searches = <CancelToken>{};
 
@@ -357,45 +360,67 @@ class CartSession extends ChangeNotifier {
   /// item key, on the same store: what they unticked stays unticked, and a
   /// product still offered comes back with its quantity, weight and
   /// preference. A product no longer offered leaves the item as this cart set it.
-  /// Products the user found with [search] come along as options, so a pick
-  /// made from a search stays, with its quantity.
-  void restorePicks(CartSession from) {
+  ///
+  /// Mealio knows a searched product only on the cart it was found in, so a
+  /// pick the user made from [search] is never sent to this cart as it is.
+  /// Instead the item's last search runs again here (it counts toward the
+  /// search cap), and the same product is selected if it comes back. If it
+  /// does not, or that search fails, the item keeps this cart's own pick.
+  /// Only a `cancelled` search is thrown. `onStep` and `cancel` are passed to
+  /// those searches.
+  Future<void> restorePicks(CartSession from, {StepListener? onStep, CancelToken? cancel}) async {
     if (from.store != store) return;
+    final again = <String>[];
     for (final CartItem it in items) {
       if (from._find(it.key) == null) continue;
-      final found = from._extra[it.key];
-      if (found != null && found.isNotEmpty) {
-        final mine = _extra[it.key] ?? const <Product>[];
-        final seen = mine.map((Product p) => p.id).toSet();
-        _extra[it.key] = <Product>[...mine, ...found.where((Product p) => !seen.contains(p.id))];
-      }
       final productId = from.selectedId(it.key);
       if (productId == null) {
         deselect(it.key);
         continue;
       }
-      Product? product;
-      for (final Product p in options(it.key)) {
-        if (p.id == productId) product = p;
-      }
-      if (product == null) continue;
-      final pref = from.preferenceId(it.key);
-      final offered = product.preferences.any((ProductPreference p) => p.id == pref);
-      select(it.key, productId, preferenceId: offered ? pref : null);
-      final q = from._qty[it.key];
-      if (q != null) setQuantity(it.key, q);
-      final lb = from._lb[it.key];
-      if (lb != null) setWeight(it.key, lb);
+      if (_restoreOne(it.key, from, productId)) continue;
+      final query = from._queries[it.key];
+      final searched = from._extra[it.key]?.any((Product p) => p.id == productId) ?? false;
+      if (searched && query != null) again.add(it.key);
     }
+    for (final String key in again) {
+      try {
+        await search(key, from._queries[key]!, onStep: onStep, cancel: cancel);
+      } on MealioException catch (e) {
+        if (e.code == MealioErrorCode.cancelled) rethrow;
+        continue;
+      } catch (_) {
+        continue;
+      }
+      _restoreOne(key, from, from.selectedId(key)!);
+    }
+  }
+
+  /// Select `productId` for `key` as `from` had it, if this cart offers it.
+  bool _restoreOne(String key, CartSession from, String productId) {
+    Product? product;
+    for (final Product p in options(key)) {
+      if (p.id == productId) product = p;
+    }
+    if (product == null) return false;
+    final pref = from.preferenceId(key);
+    final offered = product.preferences.any((ProductPreference p) => p.id == pref);
+    select(key, productId, preferenceId: offered ? pref : null);
+    final q = from._qty[key];
+    if (q != null) setQuantity(key, q);
+    final lb = from._lb[key];
+    if (lb != null) setWeight(key, lb);
+    return true;
   }
 
   /// True while a search runs. Keep Add disabled until it ends.
   bool get searching => _searches.isNotEmpty;
 
-  /// Stop every search of this cart. Closing the sheet does this.
-  void cancelSearches() {
+  /// Stop every search of this cart. Closing the sheet does this, with
+  /// `reason` `closed`.
+  void cancelSearches([String reason = MealioCancelReason.cancelled]) {
     for (final CancelToken c in List<CancelToken>.of(_searches)) {
-      c.cancel();
+      c.cancel(reason);
     }
   }
 
@@ -411,6 +436,7 @@ class CartSession extends ChangeNotifier {
       final prev = _extra[key] ?? const <Product>[];
       final seen = prev.map((Product p) => p.id).toSet();
       _extra[key] = <Product>[...r.options.where((Product p) => !seen.contains(p.id)), ...prev];
+      _queries[key] = query;
       return r.options;
     } finally {
       _searches.remove(stop);

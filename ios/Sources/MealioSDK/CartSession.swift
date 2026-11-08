@@ -148,6 +148,8 @@ public final class CartSession: ObservableObject {
     @Published private var picks: [String: Pick] = [:]
     /// Options found with `search`, by item key, newest first.
     @Published private var extra: [String: [Product]] = [:]
+    /// Each item's last search query, so a retry on a new cart can search again.
+    private var lastQuery: [String: String] = [:]
     /// Quantities the user changed, by item key.
     @Published private var qty: [String: Int] = [:]
     /// Weights (lb) the user changed, by item key.
@@ -343,30 +345,51 @@ public final class CartSession: ObservableObject {
 
     /// Take the user's picks from an earlier cart, after a failed add. Works
     /// by item key, on the same store: what they unticked stays unticked, and
-    /// a product still offered comes back with its quantity, weight and
-    /// preference. Products the user found with `search` come along as
-    /// options, so a searched pick stays. A product no longer offered leaves
-    /// the item as this cart set it.
-    public func restorePicks(from old: CartSession) {
+    /// a product this cart offers comes back with its quantity, weight and
+    /// preference.
+    ///
+    /// The server only knows a searched product on the cart it was found in,
+    /// so a pick the user found with `search` is never sent here as it was:
+    /// the item's last search runs again on this cart (it counts toward the
+    /// search cap), and the same product is picked if it comes back. If it
+    /// does not, or the search fails, the item keeps this cart's own pick.
+    /// Pass `cancel` to stop the searches; `cancelSearches` stops them too.
+    public func restorePicks(from old: CartSession, cancel: CancelToken? = nil, onStep: StepListener? = nil) async {
         guard old.store == store else { return }
+        var again: [(key: String, query: String)] = []
         for it in items {
             guard old.find(it.key) != nil else { continue }
-            // What the user found with search stays an option, so a searched pick survives.
-            if let found = old.extra[it.key], !found.isEmpty {
-                let have = Set(options(for: it.key).map(\.id))
-                extra[it.key] = (extra[it.key] ?? []) + found.filter { !have.contains($0.id) }
-            }
             guard let productId = old.selectedId(for: it.key) else {
                 deselect(key: it.key)
                 continue
             }
-            guard let product = options(for: it.key).first(where: { $0.id == productId }) else { continue }
-            let pref = old.preferenceId(for: it.key)
-            let keep = (product.preferences ?? []).contains { $0.id == pref }
-            try? select(key: it.key, productId: productId, preferenceId: keep ? pref : nil)
-            if let n = old.qty[it.key] { setQuantity(key: it.key, to: n) }
-            if let w = old.lb[it.key] { setWeight(key: it.key, to: w) }
+            if restore(it.key, productId, from: old) { continue }
+            // Not offered here. Found with search there: search again here.
+            let searched = (old.extra[it.key] ?? []).contains { $0.id == productId }
+            if searched, let q = old.lastQuery[it.key] { again.append((key: it.key, query: q)) }
         }
+        for (key, query) in again {
+            if cancel?.cancelled == true { return }
+            guard let productId = old.selectedId(for: key) else { continue }
+            do {
+                _ = try await search(key: key, query: query, cancel: cancel, onStep: onStep)
+            } catch {
+                continue
+            }
+            _ = restore(key, productId, from: old)
+        }
+    }
+
+    /// Pick `productId` for `key` as the old cart had it, if this cart offers
+    /// it. Returns false (and changes nothing) when it does not.
+    private func restore(_ key: String, _ productId: String, from old: CartSession) -> Bool {
+        guard let product = options(for: key).first(where: { $0.id == productId }) else { return false }
+        let pref = old.preferenceId(for: key)
+        let keep = (product.preferences ?? []).contains { $0.id == pref }
+        try? select(key: key, productId: productId, preferenceId: keep ? pref : nil)
+        if let n = old.qty[key] { setQuantity(key: key, to: n) }
+        if let w = old.lb[key] { setWeight(key: key, to: w) }
+        return true
     }
 
     /// True while a search runs. Keep Add disabled until it ends.
@@ -387,6 +410,7 @@ public final class CartSession: ObservableObject {
         searches[id] = token
         defer { searches[id] = nil }
         let r = try await client.search(cartId: cart.cartId, key: key, query: query, cancel: token, onStep: onStep)
+        lastQuery[key] = query
         let prev = extra[key] ?? []
         let seen = Set(prev.map(\.id))
         extra[key] = r.options.filter { !seen.contains($0.id) } + prev

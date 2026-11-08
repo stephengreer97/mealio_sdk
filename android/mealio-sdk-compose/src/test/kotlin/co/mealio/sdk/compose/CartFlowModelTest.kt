@@ -569,4 +569,149 @@ class CartFlowModelTest {
         assertEquals("p9", m.cart!!.selectedId("milk"))
         assertEquals(2, m.cart!!.quantity("milk"))
     }
+
+    // ── 0.6 round 3 ─────────────────────────────────────────────────
+
+    @Test
+    fun hiddenMidAddThenRotatedWithNoScreenTakingItBackStillReportsTheAdd() = runTest {
+        val h = Harness(this)
+        h.answer = { p, _ -> if (p.endsWith("/add")) h.start(p, open(), done(added)) else h.start(p, done(cart())) }
+        val m = FlowModels.obtain("hid-rot-${System.nanoTime()}", openedNow = true) { h.model() }!!
+        advanceUntilIdle()
+        h.openGate = CompletableDeferred()
+        m.add()
+        runCurrent()
+        // The partner sets visible = false mid-add, then the activity is recreated
+        // and the new one does not show the sheet: nothing attaches again.
+        m.hidden = true
+        m.detach()
+        testScheduler.advanceTimeBy(RECLAIM_MS + 1)
+        runCurrent()
+        assertFalse("not disposed while adding", m.finished)
+        h.openGate!!.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(1, h.sent.count { it.endsWith("/add") })
+        assertEquals(1, h.addedResults.size)
+        assertSame(h.addedResults.single(), h.closed.single())
+        assertTrue(m.finished)
+    }
+
+    @Test
+    fun anAddLeftWithNoScreenReportsAndThenTheModelGoes() = runTest {
+        val h = Harness(this)
+        h.answer = { p, _ -> if (p.endsWith("/add")) h.start(p, open(), done(added)) else h.start(p, done(cart())) }
+        val before = FlowModels.size()
+        val m = FlowModels.obtain("orphan-${System.nanoTime()}", openedNow = true) { h.model() }!!
+        advanceUntilIdle()
+        h.openGate = CompletableDeferred()
+        m.add()
+        runCurrent()
+        m.detach()
+        testScheduler.advanceTimeBy(RECLAIM_MS + 1)
+        runCurrent()
+        assertFalse(m.finished)
+        h.openGate!!.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(1, h.addedResults.size)
+        assertTrue(m.finished)
+        assertEquals(before, FlowModels.size())
+    }
+
+    /** A prepare that waits at the page, and a cancel from outside for each one. */
+    private fun TestScope.cancelFromOutside(h: Harness) {
+        runCurrent()
+        val gate = h.openGate!!
+        h.openGate = CompletableDeferred()
+        h.client.cancelJobs()
+        gate.complete(Unit)
+        runCurrent()
+    }
+
+    @Test
+    fun aFourthOutsideCancelInARowShowsTryAgainInsteadOfClosing() = runTest {
+        val h = Harness(this)
+        h.openGate = CompletableDeferred()
+        h.answer = { p, _ -> h.start(p, open(), done(cart())) }
+        val m = h.model()
+        repeat(3) { cancelFromOutside(h) }
+        assertEquals(Phase.LOADING, m.phase)
+        cancelFromOutside(h)
+        assertEquals(Phase.ERROR, m.phase)
+        assertFalse(m.finished)
+        assertTrue(h.closed.isEmpty())
+        assertEquals(4, h.sent.count { it.endsWith("/carts") })
+        // Try again starts the count over: three more outside cancels load again.
+        m.retry()
+        repeat(3) { cancelFromOutside(h) }
+        assertEquals(Phase.LOADING, m.phase)
+        h.openGate!!.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(Phase.LIST, m.phase)
+    }
+
+    @Test
+    fun pickingAStoreStartsTheRestartCountOver() = runTest {
+        val h = Harness(this)
+        h.openGate = CompletableDeferred()
+        h.answer = { p, _ -> h.start(p, open(), done(cart())) }
+        val m = h.model()
+        repeat(3) { cancelFromOutside(h) }
+        m.pickStore("heb")
+        repeat(3) { cancelFromOutside(h) }
+        assertEquals(Phase.LOADING, m.phase)
+        cancelFromOutside(h)
+        assertEquals(Phase.ERROR, m.phase)
+    }
+
+    @Test
+    fun closingCancelsThePrepareWithReasonClosed() = runTest {
+        val h = Harness(this)
+        h.openGate = CompletableDeferred()
+        h.answer = { p, _ -> h.start(p, open(), done(cart())) }
+        var seen: CancelToken? = null
+        val inner = h.backend
+        val m = CartFlowModel(
+            listOf(Recipe("r", listOf(RecipeIngredient("milk")))), "heb", h.ui, FlowCallbacks({}, {}, {}),
+            object : FlowBackend by inner {
+                override suspend fun prepareCart(store: String?, recipes: List<Recipe>, cancel: CancelToken, onStep: StepListener): CartSession {
+                    seen = cancel
+                    return inner.prepareCart(store, recipes, cancel, onStep)
+                }
+            },
+            h.login, h.dispatcher, MealioUser(), { MealioUser() },
+        ).also { it.attach() }
+        runCurrent()
+        m.close()
+        assertEquals(co.mealio.sdk.CancelReason.CLOSED, seen!!.reason)
+    }
+
+    @Test
+    fun tryAgainAfterAFailedAddSearchesAgainOnTheNewCart() = runTest {
+        val h = Harness(this)
+        var searches = 0
+        h.answer = { p, _ ->
+            when {
+                p.endsWith("/add") -> HttpResponse(500, JSONObject().put("error", JSONObject().put("code", "store_unavailable").put("message", "down")).toString())
+                p.endsWith("/search") -> {
+                    searches += 1
+                    // The new cart's search does not offer the goat milk.
+                    val id = if (searches == 1) "p9" else "p8"
+                    h.start(p, done(JSONObject().put("key", "milk").put("options", JSONArray().put(JSONObject().put("id", id).put("name", "Goat milk").put("unitPrice", 6)))))
+                }
+                else -> h.start(p, done(cart()))
+            }
+        }
+        val m = h.model()
+        advanceUntilIdle()
+        m.cart!!.search("milk", "goat milk")
+        m.cart!!.select("milk", "p9")
+        m.add()
+        advanceUntilIdle()
+        m.retry()
+        advanceUntilIdle()
+        assertEquals(Phase.LIST, m.phase)
+        assertEquals(2, searches)
+        assertEquals("goat milk", h.bodies.last { it.has("query") }.getString("query"))
+        assertEquals("p1", m.cart!!.selectedId("milk"))
+    }
 }

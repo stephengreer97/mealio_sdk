@@ -1,7 +1,7 @@
 // The partner-facing flow, platform neutral. A platform SDK supplies a Host
 // (WebViews + HTTP) and wraps this in its own idiom.
 
-import { CancelToken, Runner, type Host } from './runner';
+import { CancelToken, Runner, type CancelReason, type Host } from './runner';
 import { Allowlist } from './allowlist';
 import { openEnvelope, EnvelopeError } from './verify';
 import { MAX_RECIPES, SUPPORTED_OPS } from './protocol';
@@ -34,7 +34,16 @@ export function stepOf(ins: Instruction): Step {
 }
 
 export class MealioError extends Error {
-  constructor(public code: MealioErrorCode, message: string) { super(message); this.name = 'MealioError'; }
+  /**
+   * Set when `code` is `cancelled`: why (see CancelReason). `user_changed`
+   * means a prepare for the new user is what the screen wants next.
+   */
+  reason?: CancelReason;
+  constructor(public code: MealioErrorCode, message: string, reason?: CancelReason) {
+    super(message);
+    this.name = 'MealioError';
+    if (reason) this.reason = reason;
+  }
 }
 
 export interface ClientConfig {
@@ -80,6 +89,12 @@ function deadline<T>(p: Promise<T>, ms: number, onLate: () => Error): Promise<T>
   return Promise.race([p, late]).finally(() => clearTimeout(timer));
 }
 
+/** How long runExclusive may hold the queue, whatever its work does. */
+export const EXCLUSIVE_CAP_MS = 60_000;
+
+/** How long each bounded step of a page reset or a store sign-out may take. */
+export const PAGE_RESET_MS = 10_000;
+
 /**
  * One job at a time on the hidden page. Prepare, search, add and warm all run
  * through here, and a new job waits for the one before it to end.
@@ -88,11 +103,33 @@ export class JobQueue {
   private tail: Promise<unknown> = Promise.resolve();
   /** Cart calls waiting or running. A warm-up does not start while any are. */
   pending = 0;
+  /**
+   * Exclusive work outlived EXCLUSIVE_CAP_MS and may still be touching the
+   * hidden page. The next job resets the page before it starts.
+   */
+  dirty = false;
 
-  run<T>(job: () => Promise<T>): Promise<T> {
-    const out = this.tail.then(job, job);
-    this.tail = out.catch(() => {});
-    return out;
+  /**
+   * Run `job` after every job before it. With `cancel`: cancelled while it
+   * waits, it settles at once with `cancelled` and never runs (its turn
+   * passes straight on).
+   */
+  run<T>(job: () => Promise<T>, cancel?: CancelToken): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      let state: 'waiting' | 'running' | 'gone' = 'waiting';
+      const off = cancel?.onCancel(() => {
+        if (state !== 'waiting') return;
+        state = 'gone';
+        reject(cancelledError(cancel));
+      });
+      const turn = this.tail.then(async () => {
+        if (state === 'gone') return;
+        state = 'running';
+        off?.();
+        try { resolve(await job()); } catch (e) { reject(e); }
+      });
+      this.tail = turn.catch(() => {});
+    });
   }
 }
 
@@ -113,7 +150,7 @@ export class MealioClient {
   private warmCancel: CancelToken | null = null;
   private lastWarmAt = 0;
 
-  constructor(private cfg: ClientConfig, host: Host) {
+  constructor(private cfg: ClientConfig, private host: Host) {
     this.runner = new Runner(host, new Allowlist(), cfg.keys);
     this.base = (cfg.baseUrl || DEFAULT_BASE_URL).replace(/\/$/, '');
     // Bound, because a browser's fetch throws "Illegal invocation" when called as a method of another object.
@@ -203,6 +240,7 @@ export class MealioClient {
     const warming: Promise<void> = this.queue.run(async () => {
       try {
         stopIf(cancel);
+        await this.cleanPage();
         const about = await this.about();
         stopIf(cancel);
         const start = await this.post<JobStart | { warm: null }>('/api/v1/sdk/warm', { store: opts.store ?? undefined, ...about }, { cancel });
@@ -214,9 +252,9 @@ export class MealioClient {
       } catch {
         // A warm-up that fails costs the user nothing: the cart runs as it always has.
         if (!cancel.cancelled) this.warmed = null;
-      } finally {
-        if (this.warming === warming) this.warming = null;
       }
+    }, cancel).catch(() => { /* cancelled while it waited */ }).finally(() => {
+      if (this.warming === warming) this.warming = null;
     });
     this.warming = warming;
     return warming;
@@ -230,7 +268,7 @@ export class MealioClient {
   resetSession(): void {
     this.sessionGen += 1;
     this.token = null;
-    this.warmCancel?.cancel();
+    this.warmCancel?.cancel('user_changed');
     this.clearWarm();
   }
 
@@ -245,37 +283,62 @@ export class MealioClient {
     const old = this.user;
     if (id === old) return false;
     this.user = id;
-    this.cancelJobs();
+    this.cancelJobs('user_changed');
     this.resetSession();
     return typeof old === 'string';
   }
 
-  /** Cancel every prepare and search, waiting or running. An add is not touched. */
-  cancelJobs(): void {
-    for (const c of [...this.active]) c.cancel();
-    this.warmCancel?.cancel();
+  /**
+   * Cancel every prepare and search, waiting or running. An add is not
+   * touched. Each fails with `cancelled` and this `reason`. One waiting in the
+   * queue fails at once.
+   */
+  cancelJobs(reason: CancelReason = 'cancelled'): void {
+    for (const c of [...this.active]) c.cancel(reason);
+    this.warmCancel?.cancel(reason);
   }
 
   /**
    * Run `fn` with the hidden page to itself, in the queue with the jobs. For
    * work that must not land in the middle of one, like clearing store sessions.
    * After REQUEST_TIMEOUT_MS the caller gets `network` and `fn`'s cancel token
-   * fires, but the queue stays held until `fn` has really finished.
+   * fires. The queue stays held until `fn` ends or EXCLUSIVE_CAP_MS passes,
+   * whichever is first; past the cap the queue moves on and the next job
+   * resets the hidden page (Host.resetPage) before it starts.
    */
   runExclusive<T>(fn: (cancel: CancelToken) => Promise<T>): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       void this.queue.run(async () => {
+        await this.cleanPage();
         const cancel = new CancelToken();
         const timer = setTimeout(() => { cancel.cancel(); reject(new MealioError('network', 'That took too long')); }, REQUEST_TIMEOUT_MS);
-        try {
-          resolve(await fn(cancel));
-        } catch (e) {
-          reject(e);
-        } finally {
-          clearTimeout(timer);
-        }
+        let cap: ReturnType<typeof setTimeout> | undefined;
+        const work = Promise.resolve().then(() => fn(cancel)).then(resolve, reject).finally(() => clearTimeout(timer));
+        const capped = new Promise<void>((done) => {
+          cap = setTimeout(() => { this.queue.dirty = true; cancel.cancel(); done(); }, EXCLUSIVE_CAP_MS);
+        });
+        await Promise.race([work, capped]);
+        clearTimeout(cap);
       });
     });
+  }
+
+  /**
+   * Before a job: if exclusive work was cut off by its cap, load about:blank
+   * in the hidden page, bounded by PAGE_RESET_MS. A warm-up is no longer worth
+   * anything after that.
+   */
+  private async cleanPage(): Promise<void> {
+    if (!this.queue.dirty) return;
+    this.queue.dirty = false;
+    this.runner.pageOpens += 1;
+    if (!this.host.resetPage) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      Promise.resolve().then(() => this.host.resetPage!()).catch(() => {}),
+      new Promise<void>((r) => { timer = setTimeout(r, PAGE_RESET_MS); }),
+    ]);
+    clearTimeout(timer);
   }
 
   /**
@@ -301,8 +364,11 @@ export class MealioClient {
     } catch (e: any) {
       failed = e ?? new Error('Could not start a Mealio session');
     }
+    // Cancelled while the token was on its way: that is the answer, even if
+    // the fetch failed too.
+    if (opts.cancel?.cancelled) stopIf(opts.cancel);
     if (gen !== this.sessionGen) {
-      if (opts.cancel) throw new MealioError('cancelled', 'Cancelled');
+      if (opts.cancel) throw new MealioError('cancelled', 'Cancelled', 'user_changed');
       if (opts.gen !== undefined) throw sessionChanged();
       return this.sessionToken();
     }
@@ -388,10 +454,11 @@ export class MealioClient {
     this.queue.pending += 1;
     if (cancel) this.active.add(cancel);
     try {
-      return await this.queue.run(() => {
+      return await this.queue.run(async () => {
         if (cancel) stopIf(cancel);
+        await this.cleanPage();
         return fn();
-      });
+      }, cancel);
     } finally {
       this.queue.pending -= 1;
       if (cancel) this.active.delete(cancel);
@@ -424,7 +491,7 @@ export class MealioClient {
   }
 
   /** One HTTP call, bounded: headers and body both inside REQUEST_TIMEOUT_MS. `json` is null if it was not JSON. */
-  private async request(path: string, init: RequestInit): Promise<{ status: number; ok: boolean; json: any }> {
+  private async request(path: string, init: RequestInit, cancel?: CancelToken): Promise<{ status: number; ok: boolean; json: any }> {
     const ctl = new AbortController();
     const send = async () => {
       const res = await this.f(this.base + path, { ...init, signal: ctl.signal });
@@ -432,10 +499,18 @@ export class MealioClient {
       try { json = await res.json(); } catch { /* the caller decides what that means */ }
       return { status: res.status, ok: res.ok, json };
     };
+    // A cancel aborts the request in flight, so the job ends now, not when Mealio answers.
+    let off = () => {};
+    const stopped = new Promise<never>((_, reject) => {
+      off = cancel ? cancel.onCancel(() => { ctl.abort(); reject(cancelledError(cancel)); }) : off;
+    });
     try {
-      return await deadline(send(), REQUEST_TIMEOUT_MS, () => { ctl.abort(); return new Error('timeout'); });
-    } catch {
+      return await Promise.race([deadline(send(), REQUEST_TIMEOUT_MS, () => { ctl.abort(); return new Error('timeout'); }), stopped]);
+    } catch (e) {
+      if (cancel?.cancelled) throw cancelledError(cancel);
       throw new MealioError('network', 'Could not reach Mealio');
+    } finally {
+      off();
     }
   }
 
@@ -457,7 +532,7 @@ export class MealioClient {
       const a = await deadline(this.cfg.getAttestation(), REQUEST_TIMEOUT_MS, () => new Error('timeout')).catch(() => null);
       if (a) headers['x-mealio-attestation'] = a;
     }
-    const { status, ok, json } = await this.request(path, { method: 'POST', headers, body: JSON.stringify(body) });
+    const { status, ok, json } = await this.request(path, { method: 'POST', headers, body: JSON.stringify(body) }, opts.cancel);
     if (status === 401 && !opts.retried) {
       if (opts.pin && opts.pin.gen !== this.sessionGen) throw sessionChanged();
       if (this.token === token) this.token = null;
@@ -484,8 +559,12 @@ function sessionChanged(): MealioError {
   return new MealioError('session_expired', 'The signed-in user changed');
 }
 
+function cancelledError(cancel?: CancelToken): MealioError {
+  return new MealioError('cancelled', 'Cancelled', cancel?.reason ?? 'cancelled');
+}
+
 function stopIf(cancel: CancelToken): void {
-  if (cancel.cancelled) throw new MealioError('cancelled', 'Cancelled');
+  if (cancel.cancelled) throw cancelledError(cancel);
 }
 
 /**
@@ -538,6 +617,8 @@ export class CartSession {
   private lb = new Map<string, number>();
   private adding: Promise<AddResult> | null = null;
   private searches = new Set<CancelToken>();
+  /** Each item's last search that answered, for restorePicks on a new cart. */
+  private queries = new Map<string, string>();
 
   constructor(private client: MealioClient, public readonly cart: PreparedCart) {
     for (const it of this.items) {
@@ -691,26 +772,43 @@ export class CartSession {
    * item key, on the same store: what they unticked stays unticked, and a
    * product still offered comes back with its quantity, weight and preference.
    * A product no longer offered leaves the item as this cart set it.
+   *
+   * A product the user found with search() is known to the server only on the
+   * cart it was found in, so it is never sent to this cart directly. Instead
+   * that item's last search runs again on this cart (it counts toward the
+   * search cap), and the product is picked if it comes back. If it does not,
+   * or the search fails, the item keeps this cart's own pick.
+   *
+   * Everything except those searches is done before this returns; the promise
+   * resolves when the searches end. It never rejects. Pass `cancel` to stop
+   * the searches (closing the screen).
    */
-  restorePicks(from: CartSession): void {
+  async restorePicks(from: CartSession, opts: { cancel?: CancelToken } = {}): Promise<void> {
     if (from.store !== this.store) return;
+    const again: Array<{ key: string; productId: string; query: string }> = [];
     for (const it of this.items) {
       if (!from.find(it.key)) continue;
-      // What the user found with search stays an option, so a searched pick survives.
-      const found = from.extra.get(it.key);
-      if (found?.length) {
-        const have = new Set(this.options(it.key).map((p) => p.id));
-        this.extra.set(it.key, [...(this.extra.get(it.key) || []), ...found.filter((p) => !have.has(p.id))]);
-      }
       const productId = from.selectedId(it.key);
       if (!productId) { this.deselect(it.key); continue; }
-      const product = this.options(it.key).find((p) => p.id === productId);
-      if (!product) continue;
-      const pref = from.preferenceId(it.key);
-      this.select(it.key, productId, { preferenceId: product.preferences?.some((p) => p.id === pref) ? pref : null });
-      if (from.qty.has(it.key)) this.setQuantity(it.key, from.qty.get(it.key) as number);
-      if (from.lb.has(it.key)) this.setWeight(it.key, from.lb.get(it.key) as number);
+      if (this.options(it.key).some((p) => p.id === productId)) { this.takePick(from, it.key, productId); continue; }
+      const query = from.queries.get(it.key);
+      if (query && (from.extra.get(it.key) || []).some((p) => p.id === productId)) again.push({ key: it.key, productId, query });
     }
+    for (const a of again) {
+      if (opts.cancel?.cancelled) return;
+      try { await this.search(a.key, a.query, { cancel: opts.cancel }); } catch { continue; }
+      if (this.options(a.key).some((p) => p.id === a.productId)) this.takePick(from, a.key, a.productId);
+    }
+  }
+
+  /** Select `productId` (offered on this cart) with `from`'s preference, quantity and weight for it. */
+  private takePick(from: CartSession, key: string, productId: string): void {
+    const product = this.options(key).find((p) => p.id === productId);
+    if (!product) return;
+    const pref = from.preferenceId(key);
+    this.select(key, productId, { preferenceId: product.preferences?.some((p) => p.id === pref) ? pref : null });
+    if (from.qty.has(key)) this.setQuantity(key, from.qty.get(key) as number);
+    if (from.lb.has(key)) this.setWeight(key, from.lb.get(key) as number);
   }
 
   /** True while a search runs. Keep Add disabled until it ends. */
@@ -730,6 +828,7 @@ export class CartSession {
       const prev = this.extra.get(key) || [];
       const seen = new Set(prev.map((p) => p.id));
       this.extra.set(key, [...r.options.filter((p) => !seen.has(p.id)), ...prev]);
+      this.queries.set(key, query);
       return r.options;
     } finally {
       this.searches.delete(cancel);

@@ -502,11 +502,52 @@ Both sum whole cents line by line, so the list and done totals agree.
 (`ingredients_dropped`, `lines_dropped`, `servings_ignored`); debug builds log them.
 
 A prepare or search can be stopped with a `CancelToken`: it stops after the
-current step, never shows sign-in, and fails with `cancelled`.
+current step, never shows sign-in, and fails with `cancelled`. A job cancelled
+while it waits for another to finish fails at once. The `cancelled` error's
+`reason` says why: `.userChanged` (`setUser` changed the user: prepare again
+for the new user), `.closed` (pass `token.cancel(reason: .closed)` when your
+screen goes away), or `.cancelled` (anything else).
 `session.searching` is true while a search runs (keep Add off), and
 `session.cancelSearches()` stops them. An add cannot be cancelled, and a second
 `addToCart` while one runs gets the same result. After a failed add, prepare a
-new cart and call `newSession.restorePicks(from: oldSession)` to keep the user's picks.
+new cart and call `await newSession.restorePicks(from: oldSession)` to keep the
+user's picks. A product the user found with search is searched for again on
+the new cart (it counts toward the search cap) and picked if it comes back;
+otherwise the item keeps the new cart's own pick.
+
+### Testing your own screens
+
+`FakeMealio` runs the real `MealioClient` and `CartSession` in your XCTest
+against a scripted fake Mealio, with no network. It is in the SDK's debug
+builds only (`#if DEBUG`), so your test runs have it and a release build of
+your app does not. It uses the SDK's public API and the protocol test key,
+which no production client trusts.
+
+```swift
+import MealioSDK
+import XCTest
+
+@MainActor
+func testMyListShowsTheRememberedMilk() async throws {
+    let fake = FakeMealio(script: [
+        "items": [["key": "milk", "remembered": "m1",
+                   "options": [["id": "m1", "name": "Milk", "unitPrice": 3]]]],
+        "search": ["oat milk": [["id": "o1", "name": "Oat milk", "unitPrice": 4]]],
+    ])
+    let cart = try await fake.client().prepareCart(recipe: recipe)
+    XCTAssertEqual(cart.selectedId(for: "milk"), "m1")
+}
+```
+
+The script is the same plain data as `createFakeMealio` in
+`@mealio/sdk-core/testing` (`FakeMealio(json:)` reads a shared JSON file):
+`items` (key, options, remembered, rememberedPreferenceId, startUnchecked,
+weightLb, unavailable...), `search` by query, `add` (`{"fail": code}`),
+`signIn` (`"signed_in"`, `"cancelled"`), `errors` by call (`prepare`,
+`search`, `add`, `session`...; a code, or `{code, message, status}`),
+`warnings`, `stores`, `preferences`, `locations`. Change it between calls with
+`fake.set(key, value)`. `fake.requests`, `fake.hostCalls`, `fake.offered(cartId)`
+and `fake.hold(.prepare)` let a test see and time what the client did.
 
 ### Upgrading from 0.1
 
@@ -559,7 +600,7 @@ All errors are `MealioError` with a `code` and a readable `message`:
 | `session_expired` | The SDK session token expired twice in a row; get a new one from your server |
 | `session_failed` | Your session function threw or took over 30 seconds; `message` is your error's |
 | `not_signed_in` | `setUser(nil)`: nobody is signed in, so there is no session |
-| `cancelled` | A prepare or search was stopped (the sheet closed or the user changed) |
+| `cancelled` | A prepare or search was stopped; `reason` is `.userChanged`, `.closed` or `.cancelled` |
 | `network` | Could not reach Mealio |
 | `unsupported` | An instruction this SDK version does not know (update the SDK) |
 | `server` | Mealio answered with an error, or something the SDK could not read |

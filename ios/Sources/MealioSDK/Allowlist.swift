@@ -148,6 +148,14 @@ public final class Allowlist {
         try! NSRegularExpression(pattern: #"(?:^|&)(operationName|query|operations)=([^&]*)"#, options: [])
     }()
 
+    /// MULTIPART_FIELD in allowlist.ts: a field of a multipart/form-data body
+    /// sent as raw text. Group 1 is the field's name, group 2 its value. JS's
+    /// `$` (no m flag) is the very end of the text, which ICU spells `\z`.
+    public static let multipartField = #"name="(operationName|query|operations)"[^\r\n]*\r?\n(?:[^\r\n]+\r?\n)*\r?\n([\s\S]*?)(?=\r?\n--|$)"#
+    private static let multipartFieldRegex: NSRegularExpression = {
+        try! NSRegularExpression(pattern: multipartField.replacingOccurrences(of: "|$)", with: "|\\z)"), options: [])
+    }()
+
     /// A URL split into scheme, host and path + query, or nil if it is not one
     /// we will reason about. STRICT on purpose: the authority must be a bare host
     /// name with an optional port. A browser reads `https://www.heb.com:x@evil.com/`
@@ -312,13 +320,18 @@ public final class Allowlist {
     /// way the server will (after JSON parsing, so `\u004f` escapes do not hide
     /// it), for a single request or a batch, or form-encoded, and the names of
     /// every mutation it carries (see `mutationNames`). A GraphQL multipart
-    /// upload's `operations` field is JSON and is judged like a JSON body. A persisted query that sends only an
+    /// upload's `operations` field is JSON and is judged like a JSON body,
+    /// form-encoded or as raw multipart text (`multipartField`). A leading
+    /// byte order mark is dropped first. A persisted query that sends only an
     /// innocent name and a hash cannot be read here; the signature on the
     /// envelope covers it. The guard script applies the same rule to requests a
     /// page script makes; this applies it to the runner's own `fetch` op, which
     /// never passes through the page.
-    public static func bodyBlocked(_ body: String?) -> Bool {
-        guard let body = body, !body.isEmpty else { return false }
+    public static func bodyBlocked(_ given: String?) -> Bool {
+        guard var body = given else { return false }
+        // A leading byte order mark is dropped, as a server's JSON reader would.
+        if body.unicodeScalars.first == "\u{FEFF}" { body = String(body.unicodeScalars.dropFirst()) }
+        if body.isEmpty { return false }
         var names: [String] = []
         var docs: [String] = []
         let ns = body as NSString
@@ -334,10 +347,21 @@ public final class Allowlist {
                 if let q = o["query"] as? String { docs.append(q) }
             }
         } else {
-            // Not JSON: form-encoded, or a bare GraphQL document.
+            // Not JSON: form-encoded, raw multipart, or a bare GraphQL document.
             docs.append(body)
             for m in formFieldRegex.matches(in: body, options: [], range: NSRange(location: 0, length: ns.length)) {
                 let v = decodePercent(ns.substring(with: m.range(at: 2)).replacingOccurrences(of: "+", with: " "))
+                let field = ns.substring(with: m.range(at: 1))
+                if field == "query" {
+                    docs.append(v)
+                } else if field == "operations" {
+                    if bodyBlocked(v) { return true }
+                } else {
+                    names.append(v)
+                }
+            }
+            for m in multipartFieldRegex.matches(in: body, options: [], range: NSRange(location: 0, length: ns.length)) {
+                let v = ns.substring(with: m.range(at: 2))
                 let field = ns.substring(with: m.range(at: 1))
                 if field == "query" {
                     docs.append(v)

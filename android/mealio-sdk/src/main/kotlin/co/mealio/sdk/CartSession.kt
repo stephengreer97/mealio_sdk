@@ -91,6 +91,8 @@ class CartSession internal constructor(
     private val extra = HashMap<String, List<Product>>()
     private val qty = HashMap<String, Int>()
     private val lb = HashMap<String, Double>()
+    /** Each item's last search that answered, for [restorePicks]. */
+    private val queries = HashMap<String, String>()
     private var adding: CompletableDeferred<AddResult>? = null
     private val searches = LinkedHashSet<CancelToken>()
 
@@ -287,44 +289,67 @@ class CartSession internal constructor(
     /**
      * Take the user's picks from an earlier cart, after a failed add. Works by
      * item key, on the same store: what they unticked stays unticked, and a
-     * product still offered comes back with its quantity, weight and preference.
-     * Products the user found with search() come along into this cart's
-     * options, so a searched pick stays too. A product no longer offered
-     * leaves the item as this cart set it.
+     * product this cart offers comes back with its quantity, weight and
+     * preference. A product no longer offered leaves the item as this cart set it.
+     *
+     * Mealio knows a searched product only on the cart it was found in, so a
+     * pick the user made from [search] is never sent to this cart as it is.
+     * The item's last search runs again here instead (it counts toward the
+     * search cap), and the same product is selected if it comes back. If it
+     * does not, or that search fails, the item keeps this cart's own pick.
+     * Only a "cancelled" search is thrown. `cancel` and [cancelSearches] stop
+     * those searches.
      */
-    fun restorePicks(from: CartSession) {
+    @JvmOverloads
+    suspend fun restorePicks(from: CartSession, cancel: CancelToken = CancelToken(), onStep: StepListener? = null) {
         if (from === this || from.store != store) return
         // Read the old cart first, so the two locks are never held together.
-        class Old(val known: Boolean, val productId: String?, val pref: String?, val qty: Int?, val lb: Double?, val found: List<Product>)
         val old = synchronized(from) {
-            items.associate { it.key to Old(from.find(it.key) != null, from.picks[it.key]?.productId, from.picks[it.key]?.preferenceId, from.qty[it.key], from.lb[it.key], from.extra[it.key] ?: emptyList()) }
+            items.associate { it.key to Old(from.find(it.key) != null, from.picks[it.key]?.productId, from.picks[it.key]?.preferenceId, from.qty[it.key], from.lb[it.key], from.extra[it.key] ?: emptyList(), from.queries[it.key]) }
         }
+        val again = ArrayList<Pair<String, String>>()
         synchronized(this) {
             for (it in items) {
                 val o = old[it.key] ?: continue
                 if (!o.known) continue
-                if (o.found.isNotEmpty()) {
-                    val prev = extra[it.key] ?: emptyList()
-                    val seen = prev.mapTo(HashSet()) { p -> p.id }
-                    extra[it.key] = prev + o.found.filter { p -> p.id !in seen }
-                }
                 val productId = o.productId
                 if (productId == null) { deselect(it.key); continue }
-                val product = options(it.key).firstOrNull { p -> p.id == productId } ?: continue
-                select(it.key, productId, o.pref.takeIf { pref -> product.preferences.any { p -> p.id == pref } })
-                o.qty?.let { n -> setQuantity(it.key, n) }
-                o.lb?.let { w -> setWeight(it.key, w) }
+                if (restoreOne(it.key, o)) continue
+                // Not offered here. Found with search there: search again here.
+                if (o.query != null && o.found.any { p -> p.id == productId }) again.add(it.key to o.query)
             }
         }
+        for ((key, query) in again) {
+            try {
+                search(key, query, cancel, onStep)
+            } catch (e: MealioException) {
+                if (e.code == "cancelled") throw e
+                continue
+            }
+            synchronized(this) { restoreOne(key, old.getValue(key)) }
+        }
+    }
+
+    private class Old(val known: Boolean, val productId: String?, val pref: String?, val qty: Int?, val lb: Double?, val found: List<Product>, val query: String?)
+
+    /** Select the old pick for `key` if this cart offers it. False (nothing changed) when it does not. */
+    private fun restoreOne(key: String, o: Old): Boolean {
+        val productId = o.productId ?: return false
+        val product = options(key).firstOrNull { p -> p.id == productId } ?: return false
+        select(key, productId, o.pref.takeIf { pref -> product.preferences.any { p -> p.id == pref } })
+        o.qty?.let { n -> setQuantity(key, n) }
+        o.lb?.let { w -> setWeight(key, w) }
+        return true
     }
 
     /** True while a search runs. Keep Add disabled until it ends. */
     val searching: Boolean get() = synchronized(searches) { searches.isNotEmpty() }
 
-    /** Stop every search of this cart. Closing the sheet does this. */
-    fun cancelSearches() {
+    /** Stop every search of this cart. Closing the sheet does this, with reason [CancelReason.CLOSED]. */
+    @JvmOverloads
+    fun cancelSearches(reason: String = CancelReason.CANCELLED) {
         val list = synchronized(searches) { searches.toList() }
-        for (c in list) c.cancel()
+        for (c in list) c.cancel(reason)
     }
 
     /** Search the store for something else and add the results to this item's options. */
@@ -342,6 +367,7 @@ class CartSession internal constructor(
                 val prev = extra[key] ?: emptyList()
                 val seen = prev.mapTo(HashSet()) { it.id }
                 extra[key] = r.options.filter { it.id !in seen } + prev
+                queries[key] = query
             }
             return r.options
         } finally {

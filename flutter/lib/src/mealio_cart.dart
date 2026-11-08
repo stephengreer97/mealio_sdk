@@ -4,8 +4,9 @@
 
 import 'dart:async';
 
-import 'package:flutter/foundation.dart' show ChangeNotifier, Listenable, kDebugMode;
+import 'package:flutter/foundation.dart' show ChangeNotifier, Listenable, kDebugMode, kReleaseMode;
 import 'package:flutter/widgets.dart' show BuildContext, ValueChanged, VoidCallback;
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
@@ -26,7 +27,7 @@ const String _epochKey = 'mealio_sdk.store_epoch';
 
 /// Resolves the mounted MealioScope's host at call time, so `configure` can
 /// run before the first frame.
-class _ScopedHost implements MealioHost, MealioPageIdentity {
+class _ScopedHost implements MealioHost, MealioPageIdentity, MealioPageReset {
   /// The mounted scope's page. A remount brings a new, blank one.
   @override
   Object? get currentPage => WebViewHost.current?.page;
@@ -41,6 +42,9 @@ class _ScopedHost implements MealioHost, MealioPageIdentity {
 
   @override
   Future<PageLoad> openPage(String store, String url, int timeoutMs) => _h.openPage(store, url, timeoutMs);
+
+  @override
+  Future<void> resetPage() async => WebViewHost.current?.resetPage();
 
   @override
   Future<ScriptRun> runScript(
@@ -110,6 +114,38 @@ class MealioCart {
     MealioSheetOptions? sheet,
     MealioEventListener? onEvent,
     VoidCallback? onSignInRequired,
+  }) =>
+      _configure(
+        publishableKey: publishableKey,
+        sessionTokenProvider: sessionTokenProvider,
+        baseUrl: baseUrl,
+        attestationProvider: attestationProvider,
+        theme: theme,
+        darkTheme: darkTheme,
+        colorScheme: colorScheme,
+        strings: strings,
+        formatMoney: formatMoney,
+        sheet: sheet,
+        onEvent: onEvent,
+        onSignInRequired: onSignInRequired,
+      );
+
+  static MealioCart _configure({
+    required String publishableKey,
+    required Future<String> Function() sessionTokenProvider,
+    String baseUrl = defaultBaseUrl,
+    Future<String?> Function()? attestationProvider,
+    MealioTheme? theme,
+    MealioTheme? darkTheme,
+    MealioColorScheme? colorScheme,
+    Map<String, String>? strings,
+    MealioMoneyFormat? formatMoney,
+    MealioSheetOptions? sheet,
+    MealioEventListener? onEvent,
+    VoidCallback? onSignInRequired,
+    Map<String, String>? keys,
+    MealioHost? host,
+    http.Client? httpClient,
   }) {
     MealioLook.configured = MealioLook(
       theme: theme,
@@ -130,9 +166,11 @@ class MealioCart {
         getAttestation: attestationProvider,
         getEpoch: storeEpoch,
         queue: _queue,
+        keys: keys,
+        httpClient: httpClient,
         debug: kDebugMode,
       ),
-      _ScopedHost(),
+      host ?? _ScopedHost(),
     );
     // The hidden page checks its own navigations against the same list.
     WebViewHost.sharedAllowlist = client.allowlist;
@@ -288,18 +326,19 @@ class MealioCart {
 
   /// Nothing may keep running in, or remember, the old session's page.
   /// Queued, so an add under way finishes first and the next cart waits.
-  Future<void> _clearStores() => _client.runExclusive(() async {
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.setInt(_epochKey, (prefs.getInt(_epochKey) ?? 0) + 1);
+  /// Every platform step is bounded ([storeStepTimeout]) and stops when
+  /// `cancel` fires (the exclusive cap).
+  Future<void> _clearStores() => _client.runExclusive((CancelToken cancel) async {
+        final prefs = await boundedStoreStep(SharedPreferences.getInstance, cancel);
+        if (prefs != null) {
+          final epoch = prefs.getInt(_epochKey) ?? 0;
+          await boundedStoreStep(() => prefs.setInt(_epochKey, epoch + 1), cancel);
+        }
         final host = WebViewHost.current;
         if (host != null) {
-          await host.clearStoreSessions();
+          await host.clearStoreSessions(cancel: cancel);
         } else {
-          try {
-            await WebViewCookieManager().clearCookies();
-          } catch (_) {
-            // No WebView platform; nothing to clear.
-          }
+          await boundedStoreStep(() => WebViewCookieManager().clearCookies(), cancel);
         }
       });
 
@@ -310,10 +349,37 @@ class MealioCart {
   /// The device's store-session epoch. Starts at 0.
   static Future<int> storeEpoch() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = await SharedPreferences.getInstance().timeout(storeStepTimeout);
       return prefs.getInt(_epochKey) ?? 0;
     } catch (_) {
       return 0;
     }
   }
+}
+
+/// For package:mealio_sdk/testing.dart only (not exported by
+/// package:mealio_sdk/mealio_sdk.dart): [MealioCart.configure] with the
+/// protocol test keys and a fake store page. Refused in a release build, so
+/// no shipped app can trust the test key.
+MealioCart configureMealioWithTestKeys({
+  required String publishableKey,
+  required Future<String> Function() sessionTokenProvider,
+  required String baseUrl,
+  required Map<String, String> keys,
+  MealioHost? host,
+  http.Client? httpClient,
+  VoidCallback? onSignInRequired,
+}) {
+  if (kReleaseMode) {
+    throw StateError('Mealio test keys are for tests only.');
+  }
+  return MealioCart._configure(
+    publishableKey: publishableKey,
+    sessionTokenProvider: sessionTokenProvider,
+    baseUrl: baseUrl,
+    keys: keys,
+    host: host,
+    httpClient: httpClient,
+    onSignInRequired: onSignInRequired,
+  );
 }

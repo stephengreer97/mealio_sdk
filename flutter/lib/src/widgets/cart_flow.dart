@@ -47,6 +47,10 @@ typedef PrepareCarts = Future<CartSession> Function({
 List<Recipe> _recipeList(Recipe? recipe, List<Recipe>? recipes) =>
     recipes ?? (recipe == null ? const <Recipe>[] : <Recipe>[recipe]);
 
+/// How many times in a row the sheet starts its cart again after something
+/// outside it cancelled the prepare, before it shows the error screen.
+const int maxOutsideRestarts = 3;
+
 /// Lists the stores. The default is `MealioCart.instance.stores`.
 typedef LoadStores = Future<List<StoreInfo>> Function();
 
@@ -260,6 +264,10 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
   /// The prepare under way, so closing can stop it.
   CancelToken? _preparing;
 
+  /// Restarts in a row after a prepare was cancelled from outside the sheet.
+  /// Reset by a prepare that works and by anything the user does.
+  int _outsideRestarts = 0;
+
   /// An add under way. It runs to its end: nothing closes the sheet meanwhile.
   bool _adding = false;
 
@@ -377,8 +385,8 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
   /// Stop what can be stopped: the prepare and any search.
   void _stop() {
     _run += 1;
-    _preparing?.cancel();
-    _cart?.cancelSearches();
+    _preparing?.cancel(MealioCancelReason.closed);
+    _cart?.cancelSearches(MealioCancelReason.closed);
   }
 
   void _onLogin() {
@@ -457,7 +465,10 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
     unawaited(_start(id));
   }
 
-  Future<void> _start(String? storeId) async {
+  /// Start (or start again) the cart. `byUser` false is the sheet's own
+  /// restart after an outside cancel, which is capped ([maxOutsideRestarts]).
+  Future<void> _start(String? storeId, {bool byUser = true}) async {
+    if (byUser) _outsideRestarts = 0;
     final id = ++_run;
     _preparing?.cancel();
     final cancel = _preparing = CancelToken();
@@ -488,9 +499,11 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
       if (_run != id || !mounted) return;
       final failed = _failedAdd;
       if (failed != null) {
-        c.restorePicks(failed);
+        await c.restorePicks(failed, onStep: onStep, cancel: cancel);
+        if (_run != id || !mounted) return;
         _failedAdd = null;
       }
+      _outsideRestarts = 0;
       setState(() {
         _store = c.store.isEmpty ? storeId : c.store;
         _cart = c;
@@ -501,9 +514,17 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
       if (_run != id || !mounted) return;
       if (e is MealioException && e.code == MealioErrorCode.cancelled) {
         // Cancelled by something other than this sheet (a store sign-out,
-        // cancelJobs, a new configure) while it is still open: start again.
-        // A cancelled prepare never shows an error.
-        if (cancel.cancelled && identical(_preparing, cancel)) unawaited(_start(storeId));
+        // cancelJobs, a new configure, resetSession during the session
+        // fetch) while it is still open: start again, without an error. At
+        // most [maxOutsideRestarts] times in a row; then the error screen,
+        // whose Try again starts over.
+        if (!identical(_preparing, cancel)) return;
+        if (_outsideRestarts < maxOutsideRestarts) {
+          _outsideRestarts += 1;
+          unawaited(_start(storeId, byUser: false));
+          return;
+        }
+        _fail(MealioException(MealioErrorCode.cancelled, '', reason: e.reason), 'somethingWrongSentence', MealioSheetStep.loading);
         return;
       }
       if (e is MealioException && (e.code == MealioErrorCode.storeRequired || e.code == MealioErrorCode.storeNotAllowed)) {
