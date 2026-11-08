@@ -501,6 +501,11 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
       if (failed != null) {
         await c.restorePicks(failed, onStep: onStep, cancel: cancel);
         if (_run != id || !mounted) return;
+        // restorePicks never throws. A cancel from outside the sheet while it
+        // ran restarts the cart like any other outside cancel.
+        if (cancel.cancelled) {
+          throw MealioException(MealioErrorCode.cancelled, 'Cancelled', reason: cancel.reason);
+        }
         _failedAdd = null;
       }
       _outsideRestarts = 0;

@@ -817,7 +817,7 @@ class JobsTest {
     }
 
     @Test
-    fun aResetSessionWhileTheTokenComesIsAnOutsideCancel() = runTest {
+    fun aResetSessionWhileTheTokenComesIsAnOutsideCancelWithReasonUserChanged() = runTest {
         val gate = CompletableDeferred<String>()
         var asks = 0
         val t = Setup(token = { asks += 1; if (asks == 1) gate.await() else "tok2" }) { _, _ -> start(doneOp("d", cartJson)) }
@@ -827,8 +827,101 @@ class JobsTest {
         gate.complete("tok1")
         val e = p.await()!!
         assertEquals("cancelled", e.code)
-        assertEquals(CancelReason.CANCELLED, e.reason)
+        // Round 4: the reason is user_changed, as in the TypeScript reference.
+        assertEquals(CancelReason.USER_CHANGED, e.reason)
         assertTrue(t.sent.isEmpty())
+    }
+
+    // ── 0.6 round 4 ────────────────────────────────────────────────────
+
+    @Test
+    fun aDirtyPageResetInvalidatesAWarmUp() = runTest {
+        val q = JobQueue()
+        val t = Setup(queue = q) { p, _ ->
+            if (p.endsWith("/warm")) start(doneOp("d", JSONObject().put("store", "heb").put("signedIn", true)))
+            else start(doneOp("d", cartJson))
+        }
+        t.client.warm()
+        q.dirty = true
+        t.client.prepareCart(null, recipe)
+        assertEquals(listOf("reset"), t.host.calls)
+        assertFalse("the page the warm-up left is gone", t.sent.last().body.has("warm"))
+    }
+
+    @Test
+    fun aDirtyPageResetIsBoundedAtTenSeconds() = runTest {
+        val q = JobQueue()
+        val host = object : Host0() { override suspend fun resetPage() { calls += "reset"; awaitCancellation() } }
+        val t = Setup(host, queue = q) { _, _ -> start(doneOp("d", cartJson)) }
+        q.dirty = true
+        val p = async { t.client.prepareCart(null, recipe) }
+        advanceTimeBy(PAGE_RESET_MS + 1)
+        assertTrue("the job starts once the reset has had 10s", p.isCompleted)
+        assertEquals(listOf("/carts"), t.paths())
+    }
+
+    @Test
+    fun resetSessionStopsAWarmUpWithUserChanged() = runTest {
+        val gate = CompletableDeferred<String>()
+        val t = Setup(token = { gate.await() }) { _, _ -> start(doneOp("d", JSONObject().put("store", "heb").put("signedIn", true))) }
+        var reason: String? = null
+        val w = launch { t.client.warm() }
+        runCurrent()
+        val tokenField = MealioClient::class.java.getDeclaredField("warmCancel").also { it.isAccessible = true }
+        val tok = tokenField.get(t.client) as CancelToken
+        t.client.resetSession()
+        reason = tok.reason
+        gate.complete("tok1")
+        w.join()
+        assertEquals(CancelReason.USER_CHANGED, reason)
+    }
+
+    @Test
+    fun restorePicksRerunsTheSearchThatFoundThePickNotTheLastOne() = runTest {
+        val t = Setup { _, b ->
+            val q = b.getString("query")
+            val id = if (q == "goat milk") "goat" else "oat"
+            start(doneOp("d", JSONObject().put("key", "a").put("options", JSONArray().put(prod(id)))))
+        }
+        val old = session(listOf(item("a", "p1", listOf(prod("p1")))), client = t.client, cartId = "c1")
+        old.search("a", "goat milk")
+        old.search("a", "oat milk")
+        old.select("a", "goat")
+        val fresh = session(listOf(item("a", "p1", listOf(prod("p1")))), client = t.client, cartId = "c2")
+        fresh.restorePicks(old)
+        assertEquals("goat milk", t.sent.last().body.getString("query"))
+        assertEquals(listOf("/carts/c1/search", "/carts/c1/search", "/carts/c2/search"), t.paths())
+        assertEquals("goat", fresh.selectedId("a"))
+    }
+
+    @Test
+    fun restorePicksNeverThrowsACancelAndEndsWithWhatItRestored() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val host = object : Host0() { override suspend fun open(url: String): PageLoad { gate.await(); return PageLoad(true, url) } }
+        var n = 0
+        val t = Setup(host) { p, b ->
+            n += 1
+            val id = if (b.getString("key") == "a") "fa" else "fb"
+            if (n <= 2) start(doneOp("d", JSONObject().put("key", b.getString("key")).put("options", JSONArray().put(prod(id)))))
+            else start(open("o"), doneOp("d", JSONObject().put("key", b.getString("key")).put("options", JSONArray().put(prod(id)))))
+        }
+        val items = listOf(item("a", "p1", listOf(prod("p1"))), item("b", "p1", listOf(prod("p1"))))
+        val old = session(items, client = t.client, cartId = "c1")
+        old.search("a", "x")
+        old.search("b", "y")
+        old.select("a", "fa")
+        old.select("b", "fb")
+        val fresh = session(items, client = t.client, cartId = "c2")
+        val stop = CancelToken()
+        val r = async { runCatching { fresh.restorePicks(old, stop) } }
+        runCurrent()
+        stop.cancel()
+        gate.complete(Unit)
+        val out = r.await()
+        assertTrue("never throws: ${out.exceptionOrNull()}", out.isSuccess)
+        // The cancelled search ran; the next one never started.
+        assertEquals(3, t.paths().count { it.endsWith("/search") })
+        assertEquals("p1", fresh.selectedId("a"))
     }
 
     @Test

@@ -80,7 +80,7 @@ For a monorepo, list the apps and find the one that shows recipes. If iOS and An
 
 Record these details, because they change the code:
 
-- **React Native:** Expo or bare. Managed Expo needs a development build, and Expo Go cannot run the SDK. New or old architecture: check `newArchEnabled` in the app config or `android/gradle.properties`. If the key is missing on a recent Expo, assume new architecture. Minimum `react-native` 0.74 and `react` 18.
+- **React Native:** Expo or bare. Managed Expo needs a development build, and Expo Go cannot run the SDK. New or old architecture: check `newArchEnabled` in the app config or `android/gradle.properties`. Recent Expo versions no longer have the key and always use the new architecture; do not add it. Minimum `react-native` 0.74 and `react` 18.
 - **iOS:** SwiftUI or UIKit, and the deployment target. The SDK needs iOS 15. Swift Package Manager or CocoaPods.
 - **Android:** Jetpack Compose or Views. `minSdk` must be 24 or higher. The drop-in is Compose only, so a Views app hosts it in a `ComposeView`.
 - **Flutter:** which navigator the app uses, such as plain `MaterialApp` or a router package.
@@ -166,7 +166,7 @@ Decide these yourself and list them in the plan. Do not ask about them.
 - `externalUserId`: the app's stable user id.
 - Ingredient mapping and recipe id: see "Map recipes" in Phase 4.
 - `epochStorage` on React Native: use the app's existing storage.
-- Calling `signOutOfAllStores` on app sign-out and `DELETE /api/v1/users/{externalUserId}` on account deletion. See "Respect the user's lifecycle" in Phase 4.
+- Passing the signed-in user to the SDK, which signs out of the stores on every user change, and calling `DELETE /api/v1/users/{externalUserId}` on account deletion. See Step 4 and "Respect the user's lifecycle" in Phase 4.
 - `strings`, when the app has i18n. `formatMoney`, only to show US dollars in the user's locale. Otherwise leave them out.
 - A "Change my grocery store" row, when the app has a settings screen.
 
@@ -280,7 +280,7 @@ If the app has no server at all, plan the smallest function that fits its hostin
 
 ```shell
 npm install @mealio/react-native-cart react-native-webview
-# Optional, for signOutOfAllStores. New Architecture:
+# Lets a user change sign out of the stores. New Architecture:
 npm install @preeternal/react-native-cookie-manager
 # Old architecture, use @react-native-cookies/cookies instead.
 cd ios && pod install
@@ -288,7 +288,7 @@ cd ios && pod install
 
 On Expo, use `npx expo install` for `react-native-webview`, and skip the `pod install`. These are native dependencies, so a new development build is needed. If the app has no `expo-dev-client`, add it with `npx expo install expo-dev-client`. The build itself is `npx expo run:ios`, `npx expo run:android` or EAS. Tell the developer. Do not start one yourself.
 
-Without a cookie manager, `signOutOfAllStores` throws `unsupported`. Install one so sign-out works.
+Without a cookie manager, React Native cannot clear store logins, so a user change cannot sign the last user out of the stores. Install one.
 
 **iOS**
 
@@ -315,6 +315,8 @@ Use the project's version catalog if it has one. The SDK's manifest adds what it
 ```shell
 flutter pub add mealio_sdk
 ```
+
+Release Android builds need the `INTERNET` permission in the app's main `AndroidManifest.xml`; debug builds have it already. The SDK has its own `Recipe` class; if the app has one too, import the SDK with a prefix (`import 'package:mealio_sdk/mealio_sdk.dart' as mealio;`).
 
 ### Step 3: Read the installed API
 
@@ -432,7 +434,7 @@ MaterialApp.router(
 
 The SDK keeps one small value in SharedPreferences, under `mealio_sdk.store_epoch`. If the app clears SharedPreferences on sign-out, remove its own keys instead of calling `clear()`.
 
-Call `MealioCart.instance.setUser(user?.id)` wherever the app's signed-in user changes, including on launch, sign-out and account deletion. Pass `null` when nobody is signed in. Pass `onSignInRequired` to `MealioCart.configure` to open the app's sign-in.
+Call `MealioCart.instance.setUser(user?.id)` wherever the app's signed-in user changes, including on launch, sign-out and account deletion. Pass `null` when nobody is signed in. Make the first call in `main()`, before `runApp`: until then the SDK treats the user as signed in. Pass `onSignInRequired` to `MealioCart.configure` to open the app's sign-in.
 
 **Map the theme.** `MealioTheme` has `accent`, `onAccent`, `background`, `surface`, `text`, `muted`, `border`, `radius`, `fontFamily` (`fontName` on iOS), `warnBackground` and `warnText`. Set the ones the app has tokens for. Keep `muted` at 4.5:1 contrast against `background`. If the app has dark mode, set `darkTheme`. Then set `colorScheme` to follow the app: `auto` when the app follows the phone, and the app's current `light` or `dark` when it has its own appearance setting. The sheet is light unless you say otherwise. Only use a font the app has actually loaded.
 
@@ -557,11 +559,11 @@ The sheet shows its own errors. Use `onError` for logging, not for a second aler
 ### Step 7: Add the extras from the plan
 
 - **Text and language:** `strings` changes any word in the sheet. Keys are in `protocol/strings.json` in the SDK repo, and `DEFAULT_STRINGS` lists them in React Native. Placeholders like `{store}` are filled in, and `_one` and `_other` are singular and plural forms. On Android `strings` is a map of string keys, and on iOS it uses `MealioStringKey`. Connect to the app's i18n, and only override what the app translates. The "Cart by Mealio" line stays.
-- **Money:** prices come from US stores in US dollars. `formatMoney` changes how a price looks, never its currency, so only use it to show dollars in the user's locale. Never format them as the app's own currency. If any item has no price, no total shows.
+- **Money:** prices come from US stores in US dollars. `formatMoney` changes how a price looks, never its currency, so only use it to show dollars in the user's locale. Never format them as the app's own currency. Outside English, show the symbol as `US$`, because `$` alone reads as pesos in much of Latin America. On Flutter the default words are in `mealioDefaultStrings`; if the app's strings come from ARB files, keep `{store}` and the other placeholders literal, because gen-l10n would otherwise treat them as its own. If any item has no price, no total shows.
 - **Sheet:** `sheet` takes `showTotal`, `height` and `logo`. Height is `auto`, `full`, or a share from 0.5 to 1. Use the platform's form: `MealioSheetOptions` and `MealioSheetHeight` on native and Flutter.
 - **Done screen:** `doneMessage`, and `doneAction`. On React Native it is `{ label, onPress }`. Native and Flutter use `MealioDoneAction`, whose callback is `handler` on iOS, `onClick` on Android and `onPress` on Flutter.
 - **Analytics:** `onEvent` reports `sheet_opened`, `store_picked`, `location_asked`, `signin_shown`, `list_shown`, `item_unchecked`, `item_checked`, `add_started`, `cart_added`, `error` and `sheet_closed`. Nothing goes to Mealio. Adapt the names to the app's scheme. `step` on `sheet_closed` shows where people dropped off.
-- **Store settings:** if the app has a settings screen, add "Change my grocery store". On React Native call `openStoreSettings`, or render `MealioStoreSettings`. On iOS use `mealioStoreSettings(isPresented:onChange:)`. On Android use `MealioStoreSettings`. On Flutter call `openStoreSettings`.
+- **Store settings:** if the app has a settings screen, add "Change my grocery store", and optionally "Sign out of grocery stores", which calls `signOutOfAllStores` for the current user without changing who is signed in to the app. On React Native call `openStoreSettings`, or render `MealioStoreSettings`. On iOS use `mealioStoreSettings(isPresented:onChange:)`. On Android use `MealioStoreSettings`. On Flutter call `openStoreSettings`.
 - **Webhook:** a handler for `cart.completed` and `cart.partial`, with the `Mealio-Signature` check from https://developers.mealio.co/docs/webhooks. Answer within three seconds. Keep the webhook secret on the server. A cart where nothing went in still sends `cart.completed`, with an empty `added`.
 
 ### Custom screens
@@ -668,11 +670,11 @@ Add tests that fit the repo:
 - The user passed to the SDK following sign-in, sign-out, account deletion and a direct user switch.
 - The SDK's stored sign-out counter surviving whatever the app does to storage on sign-out: `mealio-epoch` in the React Native example, `mealio_sdk.store_epoch` in Flutter's SharedPreferences.
 
-In React Native unit tests, use the SDK's ready mock: `jest.mock('@mealio/react-native-cart', () => require('@mealio/react-native-cart/jest'))`. The real package does not load under the usual jest presets. Existing tests of a screen with the button need this. To test guests, import `setMockUser` from `@mealio/react-native-cart/jest` and call `setMockUser(null)`; the button then calls `onSignInRequired`. The mock resets between tests. The mock's cart is a stub, so screens you build yourself need the real client: use the fake Mealio server in `@mealio/sdk-core/testing` (`createFakeMealio`), which runs the real `MealioClient` and `CartSession` with no network.
+In React Native unit tests, use the SDK's ready mock: `jest.mock('@mealio/react-native-cart', () => require('@mealio/react-native-cart/jest'))`. The real package does not load under the usual jest presets, so any test that imports the package, even indirectly through a mapper that imports `MAX_RECIPES`, needs this. To test guests, import `setMockUser` from `@mealio/react-native-cart/jest` and call `setMockUser(null)`; the button then calls `onSignInRequired`. The mock resets between tests. When a test renders the real `MealioProvider` with `userId`, the provider's value wins, so drive the app's own auth instead. The mock's cart is a stub, so screens you build yourself need the real client: use the fake Mealio server in `@mealio/sdk-core/testing` (`createFakeMealio`), which runs the real `MealioClient` and `CartSession` with no network, or pass it to `<MealioProvider testing={fake}>` to run the real drop-in in a test.
 
 In Flutter widget tests, a screen holding `MealioScope` needs a fake WebView platform. Call `installMealioTestPlatform()` from `package:mealio_sdk/testing.dart`, for example in `test/flutter_test_config.dart`, so the app's existing widget tests keep passing. `configureMealioForTesting` sets the SDK up with no network.
 
-Check for leaks, and confirm nothing comes back from app code or tracked files:
+Check for leaks, and confirm nothing comes back from app code or tracked files. Give the session endpoint's tests a fake secret that does not look like a key, such as `dummy-server-secret`, so they do not trip this check:
 
 ```shell
 git grep --untracked -nE 'sk_(test|live)_[A-Za-z0-9]+'
@@ -680,7 +682,7 @@ command grep -rnE 'sk_(test|live)_[A-Za-z0-9]+' . --exclude-dir=node_modules --e
 git status --short
 ```
 
-If the app was built, also search what ships, because a key can come from the build machine's environment rather than a file. For Android, `unzip -p app/build/outputs/apk/*/*.apk 'classes*.dex' | command grep -ac 'sk_\(test\|live\)_'` must print 0. For Expo or React Native, search the exported bundle the same way.
+If the app was built, also search what ships, because a key can come from the build machine's environment rather than a file. For Android, `unzip -p app/build/outputs/apk/*/*.apk 'classes*.dex' | command grep -ac 'sk_\(test\|live\)_'` must print 0. For Flutter, Dart code is not in the dex, so search the whole APK: `unzip -p build/app/outputs/flutter-apk/*.apk | command grep -ac 'sk_\(test\|live\)_'`. For Expo or React Native, search the exported bundle the same way.
 
 The second search also reads files git ignores, such as `.env`, `dart_defines.json`, `.xcconfig` and `local.properties`. The only acceptable hit is the server's own untracked env file. A key in any app config, or behind a public prefix like `EXPO_PUBLIC_`, ships inside the app.
 

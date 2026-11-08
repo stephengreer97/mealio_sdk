@@ -547,7 +547,10 @@ weightLb, unavailable...), `search` by query, `add` (`{"fail": code}`),
 `search`, `add`, `session`...; a code, or `{code, message, status}`),
 `warnings`, `stores`, `preferences`, `locations`. Change it between calls with
 `fake.set(key, value)`. `fake.requests`, `fake.hostCalls`, `fake.offered(cartId)`
-and `fake.hold(.prepare)` let a test see and time what the client did.
+and `fake.hold(.prepare)` let a test see and time what the client did. A held
+request ties up no thread (other calls are answered meanwhile), and dropping
+the fake releases its holds. `protocol/fake-script.json` is one script every
+platform's kit runs.
 
 ### Upgrading from 0.1
 

@@ -8,15 +8,16 @@
 // the hidden WebView uses.
 
 import React, { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Modal, Platform, Pressable, SafeAreaView, StyleSheet, Text, useColorScheme, View, type ImageSourcePropType } from 'react-native';
-import { WebView, type WebViewMessageEvent, type WebViewNavigation } from 'react-native-webview';
+import { Modal, Platform, Pressable, StatusBar, StyleSheet, Text, useColorScheme, View, type ImageSourcePropType } from 'react-native';
+import type { WebView, WebViewMessageEvent, WebViewNavigation } from 'react-native-webview';
 import {
-  CancelToken as CancelTokenClass, JobQueue, MealioClient, MealioError, PAGE_RESET_MS, matchesAny, parseMessage, safeListener, textTools,
+  CancelToken as CancelTokenClass, GUARD_SCRIPT, JobQueue, MealioClient, MealioError, PAGE_RESET_MS, matchesAny, parseMessage, safeListener, textTools,
   type MealioEventListener, type MealioStrings, type TextTools,
   type CancelToken, type CartSession, type Host, type JsonMessage, type Matcher, type PrepareCartInput, type StepListener, type StoreInfo, type StoreLocation, type StorePreferences,
 } from '@mealio/sdk-core';
 import { money, resolveTheme, type MealioColorScheme, type MealioTheme } from './theme';
 import { MealioStoreSettings } from './MealioStoreSettings';
+import { loadInsetView, loadWebView } from './optional';
 
 export const SDK_VERSION = '0.6.0';
 
@@ -367,10 +368,15 @@ export function MealioProvider(props: MealioProviderProps) {
     return l.allowNavigation(req.url);
   }, [endLogin]);
 
-  const loginWebView = login ? (
-    <WebView
+  const WebViewView = props.testing ? null : loadWebView().WebView;
+  const loginWebView = login && WebViewView ? (
+    <WebViewView
       ref={loginView}
       source={{ uri: login.url }}
+      // The guard in every frame from its first script (iOS; Android loads it
+      // in the main frame only, and the guard's own frame hooks cover the rest).
+      injectedJavaScriptBeforeContentLoaded={login.guard}
+      injectedJavaScriptBeforeContentLoadedForMainFrameOnly={false}
       onLoadEnd={injectCheck}
       onMessage={onLoginMessage}
       onNavigationStateChange={onLoginNav}
@@ -584,9 +590,16 @@ export function MealioProvider(props: MealioProviderProps) {
       <InternalCtx.Provider value={internal}>
         {props.children}
         {settingsOpen && userId !== null ? <MealioStoreSettings visible onClose={() => setSettingsOpen(false)} /> : null}
-        {testing ? null : <View pointerEvents="none" style={styles.hidden}>
-          <WebView
+        {!WebViewView ? null : <View pointerEvents="none" style={styles.hidden}>
+          <WebViewView
             ref={hidden}
+            // The guard goes into every frame at document start, before any
+            // store script (iOS: every frame; Android: react-native-webview
+            // injects the main frame only, so the guard's own frame hooks are
+            // what reach the frames there). runScript injects it again; it
+            // installs once per window.
+            injectedJavaScriptBeforeContentLoaded={GUARD_SCRIPT}
+            injectedJavaScriptBeforeContentLoadedForMainFrameOnly={false}
             // A new key per navigation remounts the WebView, so re-opening the
             // same URL really reloads it. Cookies and storage are shared.
             key={`mealio-hidden-${hiddenUri.n}`}
@@ -612,8 +625,8 @@ export function MealioProvider(props: MealioProviderProps) {
             style={styles.hiddenView}
           />
         </View>}
-        <Modal visible={!!login && hosts === 0} animationType="slide" onRequestClose={() => endLogin('cancelled')} presentationStyle="pageSheet">
-          <SafeAreaView style={[styles.flex, { backgroundColor: theme.background }]}>
+        <Modal visible={!!login && hosts === 0} animationType="slide" onRequestClose={() => endLogin('cancelled')} presentationStyle="pageSheet" {...EDGE_TO_EDGE}>
+          <Inset style={[styles.flex, { backgroundColor: theme.background }]}>
             <View style={[styles.bar, { borderBottomColor: theme.border }]}>
               <Text style={[styles.title, { color: theme.text, fontFamily: theme.fontFamily }]} numberOfLines={1}>{login?.title}</Text>
               <Pressable accessibilityRole="button" onPress={() => endLogin('cancelled')} hitSlop={12}>
@@ -621,11 +634,26 @@ export function MealioProvider(props: MealioProviderProps) {
               </Pressable>
             </View>
             {hosts === 0 ? loginWebView : null}
-          </SafeAreaView>
+          </Inset>
         </Modal>
       </InternalCtx.Provider>
     </ApiCtx.Provider>
   );
+}
+
+/**
+ * The sign-in sheet's frame, clear of the status bar, notch and navigation
+ * bar. The Modal draws edge to edge on Android (statusBarTranslucent and
+ * navigationBarTranslucent), so the insets are the same whether or not the app
+ * itself is edge to edge. With react-native-safe-area-context installed its
+ * SafeAreaView measures them; without it, the status bar height on Android
+ * and nothing on iOS, where the page sheet already starts below it.
+ */
+export function Inset(p: { style?: any; children?: React.ReactNode }) {
+  const Safe = loadInsetView();
+  if (Safe) return <Safe style={p.style} edges={['top', 'right', 'bottom', 'left']}>{p.children}</Safe>;
+  const top = Platform.OS === 'android' ? StatusBar.currentHeight ?? 0 : 0;
+  return <View style={[p.style, { paddingTop: top }]}>{p.children}</View>;
 }
 
 /**
@@ -642,6 +670,13 @@ export function boundedStep<T>(fn: () => T | Promise<T>, cancel: CancelTokenClas
     );
   });
 }
+
+/**
+ * The sign-in Modal draws under the status and navigation bars on Android,
+ * whether or not the app is edge to edge, and Inset keeps its content clear.
+ * navigationBarTranslucent is React Native 0.77+; older versions ignore it.
+ */
+const EDGE_TO_EDGE: object = { statusBarTranslucent: true, navigationBarTranslucent: true };
 
 const IOS_IDLE = { html: '<html><body></body></html>', baseUrl: 'about:blank' };
 

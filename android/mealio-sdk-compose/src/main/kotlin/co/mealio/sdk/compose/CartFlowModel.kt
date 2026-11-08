@@ -178,7 +178,14 @@ internal class CartFlowModel(
             delay(RECLAIM_MS)
             if (attached > 0) return@launch
             // An add is never dropped: it reports when it ends, then this goes.
-            if (adding) orphaned = true else dispose()
+            if (adding) orphaned = true else {
+                // One that already ended inside the window queued its report for
+                // a screen that never came: it goes to the partner now.
+                val now = queued.toList()
+                queued.clear()
+                for (fn in now) fn()
+                dispose()
+            }
         }
     }
 
@@ -203,7 +210,8 @@ internal class CartFlowModel(
 
     private fun fail(e: Exception, fallback: String, at: MealioSheetStep) {
         val code = (e as? MealioException)?.code ?: "error"
-        error = FlowError(code, e.message ?: fallback)
+        // "cancelled" (the restart cap) shows the normal text, not the word Cancelled.
+        error = FlowError(code, if (code == "cancelled") fallback else e.message ?: fallback)
         phase = Phase.ERROR
         ui.emit(MealioEvent.Error(code, at))
         deliver { callbacks.onError(e) }
@@ -268,6 +276,8 @@ internal class CartFlowModel(
                 failedAdd?.let {
                     c.restorePicks(it, cancel) { s, _ -> if (run == id) step = s }
                     if (run != id) return@launch
+                    // restorePicks ends quietly on a cancel; one from outside restarts like any other.
+                    if (cancel.cancelled) throw MealioException("cancelled", "Cancelled", reason = cancel.reason ?: CancelReason.CANCELLED)
                     failedAdd = null
                     version += 1
                 }

@@ -163,8 +163,8 @@ class CartSession extends ChangeNotifier {
   final Map<String, int> _qty = <String, int>{};
   final Map<String, double> _lb = <String, double>{};
 
-  /// Each item's last search that answered, for [restorePicks].
-  final Map<String, String> _queries = <String, String>{};
+  /// Per item, the search that found each product, for [restorePicks].
+  final Map<String, Map<String, String>> _foundBy = <String, Map<String, String>>{};
   Future<AddResult>? _adding;
   final Set<CancelToken> _searches = <CancelToken>{};
 
@@ -363,14 +363,17 @@ class CartSession extends ChangeNotifier {
   ///
   /// Mealio knows a searched product only on the cart it was found in, so a
   /// pick the user made from [search] is never sent to this cart as it is.
-  /// Instead the item's last search runs again here (it counts toward the
-  /// search cap), and the same product is selected if it comes back. If it
-  /// does not, or that search fails, the item keeps this cart's own pick.
-  /// Only a `cancelled` search is thrown. `onStep` and `cancel` are passed to
-  /// those searches.
+  /// Instead the search that found that product runs again here (it counts
+  /// toward the search cap), and the same product is selected if it comes
+  /// back. If it does not, or that search fails, the item keeps this cart's
+  /// own pick.
+  ///
+  /// It never throws: it ends with whatever it could restore. `onStep` and
+  /// `cancel` are passed to those searches; once `cancel` fires no more run.
+  /// Check `cancel.cancelled` afterwards to tell a stop from the end.
   Future<void> restorePicks(CartSession from, {StepListener? onStep, CancelToken? cancel}) async {
     if (from.store != store) return;
-    final again = <String>[];
+    final again = <(String, String, String)>[];
     for (final CartItem it in items) {
       if (from._find(it.key) == null) continue;
       final productId = from.selectedId(it.key);
@@ -379,20 +382,17 @@ class CartSession extends ChangeNotifier {
         continue;
       }
       if (_restoreOne(it.key, from, productId)) continue;
-      final query = from._queries[it.key];
-      final searched = from._extra[it.key]?.any((Product p) => p.id == productId) ?? false;
-      if (searched && query != null) again.add(it.key);
+      final query = from._foundBy[it.key]?[productId];
+      if (query != null) again.add((it.key, productId, query));
     }
-    for (final String key in again) {
+    for (final (String key, String productId, String query) in again) {
+      if (cancel != null && cancel.cancelled) return;
       try {
-        await search(key, from._queries[key]!, onStep: onStep, cancel: cancel);
-      } on MealioException catch (e) {
-        if (e.code == MealioErrorCode.cancelled) rethrow;
-        continue;
+        await search(key, query, onStep: onStep, cancel: cancel);
       } catch (_) {
         continue;
       }
-      _restoreOne(key, from, from.selectedId(key)!);
+      _restoreOne(key, from, productId);
     }
   }
 
@@ -436,7 +436,10 @@ class CartSession extends ChangeNotifier {
       final prev = _extra[key] ?? const <Product>[];
       final seen = prev.map((Product p) => p.id).toSet();
       _extra[key] = <Product>[...r.options.where((Product p) => !seen.contains(p.id)), ...prev];
-      _queries[key] = query;
+      final found = _foundBy[key] ??= <String, String>{};
+      for (final Product p in r.options) {
+        found.putIfAbsent(p.id, () => query);
+      }
       return r.options;
     } finally {
       _searches.remove(stop);

@@ -24,6 +24,14 @@
       "types": "./dist/testing.d.ts",
       "default": "./dist/testing.js"
     },
+    "./testing.js": {
+      "types": "./testing.d.ts",
+      "default": "./testing.js"
+    },
+    "./dist": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
     "./dist/*.js": "./dist/*.js",
     "./dist/*": "./dist/*.js",
     "./src/*": "./src/*",

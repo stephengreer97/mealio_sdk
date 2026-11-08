@@ -6,8 +6,13 @@
 // To test a guest, setMockUser(null): hasUser turns false and MealioCartButton
 // calls onSignInRequired (its own, else the provider's), or is disabled.
 // setMockUser('u1') signs someone in, setMockUser(undefined) stops tracking.
-// Everything resets after each test (resetMealioMock, run from afterEach when
-// Jest's afterEach exists): mocked answers, the user, and recorded calls.
+// Everything resets after each test: mocked answers, the user, and recorded
+// calls. Loaded at a file's top level (the usual jest.mock line), it registers
+// that afterEach itself. Loaded inside a test (a lazy require, or
+// jest.isolateModules), where Jest refuses new hooks, it does not; then add
+//   require('@mealio/react-native-cart/jest').setupMealioMock();
+// to a setup file (Jest's setupFilesAfterEnv) to register it for every test
+// file. It registers once however often it is called.
 // To run your screens on the real client and a fake server instead, see
 // require('@mealio/react-native-cart/testing').
 // Plain JS on purpose: partners' Jest loads it untransformed.
@@ -121,8 +126,31 @@ function resetMealioMock() {
   fill();
 }
 fill();
+
+/** True while a test (or its beforeEach/afterEach) runs: Jest and Vitest both name it. */
+function insideTest() {
+  try {
+    return typeof expect !== 'undefined' && typeof expect.getState === 'function' && !!expect.getState().currentTestName;
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * Reset the mock after every test. Call it from a Jest setup file
+ * (setupFilesAfterEnv) when the mock may first load inside a test. Returns
+ * false where hooks cannot be added (no afterEach, or inside a test).
+ */
+let registered = false;
+function setupMealioMock() {
+  if (registered) return true;
+  if (typeof afterEach !== 'function' || insideTest()) return false;
+  afterEach(() => resetMealioMock());
+  registered = true;
+  return true;
+}
 // Each test starts clean, without the partner having to remember to.
-if (typeof afterEach === 'function') afterEach(() => resetMealioMock());
+setupMealioMock();
 
 /** Sign a user in (an id), out (null), or stop tracking users (undefined). */
 function setMockUser(id) {
@@ -157,7 +185,7 @@ function MealioCartButton(props) {
 }
 
 module.exports = {
-  MealioProvider, useMealio, MealioCartButton, mockCart, setMockUser, resetMealioMock,
+  MealioProvider, useMealio, MealioCartButton, mockCart, setMockUser, resetMealioMock, setupMealioMock,
   MealioCartFlow: nothing, MealioCartList: nothing, MealioCartSheet: nothing, MealioStoreSettings: nothing,
   forRecipes: () => null,
   CancelToken, MealioError, CartSession,

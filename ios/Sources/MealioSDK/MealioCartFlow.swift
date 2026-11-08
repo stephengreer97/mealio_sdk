@@ -431,6 +431,11 @@ final class MealioFlowModel: ObservableObject {
                         self.step = s
                     })
                     guard self.run == id else { return }
+                    // restorePicks never throws. A cancel from outside the
+                    // sheet while it ran restarts like any outside cancel.
+                    if cancel.cancelled {
+                        throw MealioError(code: MealioError.Code.cancelled, message: "Cancelled", reason: cancel.reason ?? .cancelled)
+                    }
                     self.failedAdd = nil
                 }
                 self.restarts = 0

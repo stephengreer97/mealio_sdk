@@ -352,10 +352,14 @@ private val GRAPHQL_KINDS = setOf("mutation", "query", "subscription", "fragment
 /**
  * A field of a multipart/form-data body sent as raw text. Same source as
  * MULTIPART_FIELD in packages/core/src/allowlist.ts, with JavaScript's
- * end-of-input `$` written as `\z` (Java's `$` also matches before a final newline).
+ * end-of-input `$` written as `\z` (Java's `$` also matches before a final
+ * newline) and JavaScript's `\s` spelled out (Java's has no Unicode spaces).
+ * The name may be double-quoted, single-quoted or bare; `operationsX` is
+ * another field.
  */
 private val MULTIPART_FIELD_RE = Regex(
-    "name=\"(operationName|query|operations)\"[^\\r\\n]*\\r?\\n(?:[^\\r\\n]+\\r?\\n)*\\r?\\n([\\s\\S]*?)(?=\\r?\\n--|\\z)",
+    "name=[\"']?(operationName|query|operations)(?=[\"';\\s\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]|\\z)" +
+        "[^\\r\\n]*\\r?\\n(?:[^\\r\\n]+\\r?\\n)*\\r?\\n([\\s\\S]*?)(?=\\r?\\n--|\\z)",
 )
 
 /**

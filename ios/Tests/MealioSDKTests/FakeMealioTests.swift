@@ -210,4 +210,236 @@ final class FakeMealioTests: XCTestCase {
         let fake = try FakeMealio(json: #"{"store":"heb","items":[{"key":"k","remembered":"p","options":[{"id":"p","name":"P"}]}]}"#)
         XCTAssertEqual(fake.script["store"], "heb")
     }
+
+    // MARK: round 4: one shared script, holds that block no thread
+
+    /// protocol/fake-script.json: every platform's kit loads each case's
+    /// script with its JSON loader and runs the same steps.
+    @MainActor
+    func testRunsEveryCaseOfTheSharedFakeScript() async throws {
+        let file = try XCTUnwrap(JSONValue.parse(try Fixtures.data("fake-script", "json")))
+        let recipe = try XCTUnwrap(file["recipe"]).decode(Recipe.self)
+        let cases = try XCTUnwrap(file["cases"]?.arrayValue)
+        XCTAssertFalse(cases.isEmpty)
+        for c in cases {
+            let name = c["name"]?.stringValue ?? "?"
+            let text = try XCTUnwrap(String(data: try JSONEncoder().encode(try XCTUnwrap(c["script"])), encoding: .utf8))
+            let fake = try FakeMealio(json: text)
+            let client = fake.client()
+            var carts: [String: CartSession] = [:]
+            for (n, step) in (c["steps"]?.arrayValue ?? []).enumerated() {
+                let what = step["do"]?.stringValue ?? ""
+                let at = "\(name) step \(n) \(what)"
+                let expect = step["expect"]
+                let wantError = expect?["error"]?.stringValue
+                let named = step["cart"]?.stringValue ?? "a"
+                let key = step["key"]?.stringValue ?? ""
+                var failure: String?
+                do {
+                    switch what {
+                    case "prepare":
+                        let cart = try await client.prepareCart(recipe: recipe)
+                        carts[named] = cart
+                        if let e = expect { checkCart(cart, e, at) }
+                    case "search":
+                        let cart = try XCTUnwrap(carts[named], at)
+                        let found = try await cart.search(key: key, query: step["query"]?.stringValue ?? "")
+                        if let ids = expect?["options"]?.arrayValue {
+                            XCTAssertEqual(found.map(\.id), ids.compactMap(\.stringValue), at)
+                        }
+                    case "select":
+                        let cart = try XCTUnwrap(carts[named], at)
+                        try cart.select(key: key, productId: step["productId"]?.stringValue ?? "")
+                        if let id = expect?["selectedId"] { XCTAssertEqual(cart.selectedId(for: key), id.stringValue, at) }
+                    case "add":
+                        let cart = try XCTUnwrap(carts[named], at)
+                        let r = try await cart.addToCart()
+                        if let e = expect, wantError == nil {
+                            XCTAssertEqual(r.added.map(\.key), keys(e["added"]), at)
+                            XCTAssertEqual(r.skipped.map(\.key), keys(e["skipped"]), at)
+                            XCTAssertEqual(r.failed.map(\.key), keys(e["failed"]), at)
+                            if let want = e["addedTotal"]?.doubleValue {
+                                let got = try XCTUnwrap(cart.addedTotal(r).total, at)
+                                XCTAssertEqual((got * 100).rounded(), (want * 100).rounded(), at)
+                            }
+                        }
+                    case "restorePicks":
+                        let cart = try XCTUnwrap(carts[named], at)
+                        let from = try XCTUnwrap(carts[step["from"]?.stringValue ?? ""], at)
+                        await cart.restorePicks(from: from)
+                        if let e = expect { checkCart(cart, e, at) }
+                    case "setScript":
+                        for (k, v) in step["set"]?.objectValue ?? [:] { fake.set(k, v == .null ? nil : v) }
+                    case "requests":
+                        XCTAssertEqual(fake.requests.map(\.kind.rawValue), keys(expect), at)
+                    case "searches":
+                        let queries = fake.requests.filter { $0.kind == .search }.compactMap { $0.body?["query"]?.stringValue }
+                        XCTAssertEqual(queries, keys(expect), at)
+                    default:
+                        XCTFail("\(at): unknown step")
+                    }
+                } catch let e as MealioError {
+                    failure = e.code
+                }
+                XCTAssertEqual(failure, wantError, at)
+            }
+        }
+    }
+
+    private func keys(_ v: JSONValue?) -> [String] {
+        (v?.arrayValue ?? []).compactMap(\.stringValue)
+    }
+
+    /// The parts of a cart a script step names: store, storeName, recipes, items.
+    @MainActor
+    private func checkCart(_ cart: CartSession, _ e: JSONValue, _ at: String) {
+        if let v = e["store"] { XCTAssertEqual(cart.store, v.stringValue, at) }
+        if let v = e["storeName"] { XCTAssertEqual(cart.storeName, v.stringValue, at) }
+        if let v = e["recipes"]?.arrayValue {
+            XCTAssertEqual(cart.recipes, v.map { CartRecipe(id: $0["id"]?.stringValue ?? "", title: $0["title"]?.stringValue) }, at)
+        }
+        for (key, want) in e["items"]?.objectValue ?? [:] {
+            let item = cart.items.first { $0.key == key }
+            XCTAssertNotNil(item, "\(at): no item \(key)")
+            if let v = want["status"] { XCTAssertEqual(item?.status.rawValue, v.stringValue, "\(at) \(key)") }
+            if let v = want["selectedId"] { XCTAssertEqual(cart.selectedId(for: key), v.stringValue, "\(at) \(key)") }
+            if let v = want["quantity"]?.intValue { XCTAssertEqual(cart.quantity(for: key), v, "\(at) \(key)") }
+        }
+    }
+
+    func testCoversEveryStepKindTheOtherPlatformsMustInterpret() throws {
+        let file = try XCTUnwrap(JSONValue.parse(try Fixtures.data("fake-script", "json")))
+        let kinds = Set((file["cases"]?.arrayValue ?? []).flatMap { ($0["steps"]?.arrayValue ?? []).compactMap { $0["do"]?.stringValue } })
+        XCTAssertEqual(kinds.sorted(), ["add", "prepare", "requests", "restorePicks", "search", "searches", "select", "setScript"])
+    }
+
+    // MARK: restorePicks (round 4; packages/core/test/round4.test.ts)
+
+    private let r4Recipe = Recipe(id: "r1", title: "T", ingredients: [RecipeIngredient(name: "garlic"), RecipeIngredient(name: "milk")])
+    private let r4Garlic: JSONValue = ["key": "garlic", "options": [["id": "g1", "name": "Garlic", "unitPrice": 0.5]], "remembered": "g1"]
+    private let r4Milk: JSONValue = ["key": "milk", "options": [["id": "m1", "name": "Milk", "unitPrice": 3]], "remembered": "m1"]
+
+    private func searchQueries(_ fake: FakeMealio) -> [String] {
+        fake.requests.filter { $0.kind == .search }.compactMap { $0.body?["query"]?.stringValue }
+    }
+
+    @MainActor
+    func testReRunsTheSearchThatFoundThePickNotTheItemsLastSearch() async throws {
+        let fake = FakeMealio(script: ["items": [r4Garlic, r4Milk],
+                                       "search": ["minced": [["id": "jar", "name": "Jar", "unitPrice": 3]], "peeled": [["id": "pl", "name": "Peeled"]]],
+                                       "add": ["fail": "store_unavailable"]])
+        let c = fake.client()
+        let a = try await c.prepareCart(recipe: r4Recipe)
+        _ = try await a.search(key: "garlic", query: "minced")
+        try a.select(key: "garlic", productId: "jar")
+        _ = try await a.search(key: "garlic", query: "peeled") // looked again, kept the jar
+        let failed = await fakeCodeOf { try await a.addToCart() }
+        XCTAssertEqual(failed, "store_unavailable")
+        fake.set("add", nil)
+        let b = try await c.prepareCart(recipe: r4Recipe)
+        await b.restorePicks(from: a)
+        XCTAssertEqual(b.selectedId(for: "garlic"), "jar")
+        XCTAssertEqual(searchQueries(fake), ["minced", "peeled", "minced"])
+    }
+
+    @MainActor
+    func testAPickFromALaterSearchIsReRunWithThatLaterQuery() async throws {
+        let fake = FakeMealio(script: ["items": [r4Garlic],
+                                       "search": ["minced": [["id": "jar", "name": "Jar"]], "peeled": [["id": "pl", "name": "Peeled"]]]])
+        let c = fake.client()
+        let a = try await c.prepareCart(recipe: r4Recipe)
+        _ = try await a.search(key: "garlic", query: "minced")
+        _ = try await a.search(key: "garlic", query: "peeled")
+        try a.select(key: "garlic", productId: "pl")
+        let b = try await c.prepareCart(recipe: r4Recipe)
+        await b.restorePicks(from: a)
+        XCTAssertEqual(b.selectedId(for: "garlic"), "pl")
+        XCTAssertEqual(searchQueries(fake), ["minced", "peeled", "peeled"])
+    }
+
+    @MainActor
+    func testAnOutsideCancelMidSearchEndsKeepsWhatItHadAndTheCallersTokenSaysCancelled() async throws {
+        let fake = FakeMealio(script: ["items": [r4Garlic, r4Milk], "search": ["minced": [["id": "jar", "name": "Jar"]]]])
+        let c = fake.client()
+        let a = try await c.prepareCart(recipe: r4Recipe)
+        _ = try await a.search(key: "garlic", query: "minced")
+        try a.select(key: "garlic", productId: "jar")
+        a.deselect(key: "milk")
+        let b = try await c.prepareCart(recipe: r4Recipe)
+        let release = fake.hold(.search)
+        let tok = CancelToken()
+        let restoring = Task { await b.restorePicks(from: a, cancel: tok) }
+        try await tick()
+        c.cancelJobs()
+        // This client does not abort a request in flight: let the held one answer.
+        release()
+        await restoring.value
+        XCTAssertTrue(tok.cancelled)
+        XCTAssertEqual(tok.reason, .cancelled)
+        XCTAssertEqual(b.selectedId(for: "garlic"), "g1") // the cart's own pick stays
+        XCTAssertFalse(b.isSelected("milk")) // what was done before the search stays done
+    }
+
+    @MainActor
+    func testNeverThrowsAFailingSearchAnotherStoreOrAnItemTheNewCartLacks() async throws {
+        let fake = FakeMealio(script: ["items": [r4Garlic, r4Milk], "search": ["minced": [["id": "jar", "name": "Jar"]]]])
+        let c = fake.client()
+        let a = try await c.prepareCart(recipe: r4Recipe)
+        _ = try await a.search(key: "garlic", query: "minced")
+        try a.select(key: "garlic", productId: "jar")
+        fake.set("errors", ["search": "store_unavailable"])
+        let b = try await c.prepareCart(recipe: r4Recipe)
+        await b.restorePicks(from: a)
+        XCTAssertEqual(b.selectedId(for: "garlic"), "g1")
+        fake.set("items", [r4Milk])
+        let d = try await c.prepareCart(recipe: r4Recipe)
+        await d.restorePicks(from: a)
+        XCTAssertEqual(d.selectedId(for: "milk"), "m1")
+        let other = try await c.prepareCart(store: "safeway", recipe: r4Recipe)
+        await other.restorePicks(from: a)
+        XCTAssertEqual(other.store, "safeway")
+    }
+
+    /// A held request waits without blocking a thread: the same session
+    /// answers another call meanwhile. Releasing twice does nothing.
+    @MainActor
+    func testAHoldBlocksNoThreadTheSameSessionAnswersOtherCallsMeanwhile() async throws {
+        let fake = FakeMealio(script: script())
+        let release = fake.hold(.search)
+        let base = fake.baseURL.absoluteString
+        var search = URLRequest(url: try XCTUnwrap(URL(string: base + "/api/v1/sdk/carts/c1/search")))
+        search.httpMethod = "POST"
+        search.httpBody = Data(#"{"key":"garlic","query":"jar"}"#.utf8)
+        let session = fake.urlSession
+        let request = search
+        let held = Task { () -> Int in
+            let (_, r) = try await session.data(for: request)
+            return (r as? HTTPURLResponse)?.statusCode ?? 0
+        }
+        try await tick()
+        let (data, r) = try await session.data(from: try XCTUnwrap(URL(string: base + "/api/v1/stores")))
+        XCTAssertEqual((r as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertNotNil(JSONValue.parse(data)?["stores"])
+        XCTAssertEqual(fake.requests.map(\.kind), [.search, .stores])
+        release()
+        release()
+        let status = try await held.value
+        XCTAssertEqual(status, 200)
+    }
+
+    /// When the fake goes away, a held request is let go (it fails) instead of
+    /// waiting for ever.
+    @MainActor
+    func testDroppingTheFakeReleasesItsHolds() async throws {
+        var fake: FakeMealio? = FakeMealio(script: script())
+        _ = fake?.hold(.prepare)
+        let client = try XCTUnwrap(fake).client()
+        let recipe = self.recipe
+        let p = Task { await fakeCodeOf { try await client.prepareCart(recipe: recipe) } }
+        try await tick()
+        XCTAssertEqual(fake?.requests.map(\.kind), [.prepare])
+        fake = nil
+        let got = await p.value
+        XCTAssertNotEqual(got, "ok")
+    }
 }

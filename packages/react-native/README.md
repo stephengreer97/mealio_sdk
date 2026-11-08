@@ -7,6 +7,8 @@ npm install @mealio/react-native-cart react-native-webview
 # optional, for "sign out of stores" (New Architecture):
 npm install @preeternal/react-native-cookie-manager
 # apps still on the old architecture can use @react-native-cookies/cookies instead
+# recommended, for the sign-in sheet's insets (most apps have it already):
+npm install react-native-safe-area-context
 ```
 
 ```tsx
@@ -30,9 +32,10 @@ jest.mock('@mealio/react-native-cart', () => require('@mealio/react-native-cart/
 ```
 
 `mockCart()` gives a cart with every CartSession member. To test a guest, call `setMockUser(null)` from `@mealio/react-native-cart/jest`: `hasUser` is false and the button calls `onSignInRequired`.
-The mock resets itself after every test (`resetMealioMock()`), so `setMockUser` and scripted answers never leak into the next one.
+The mock resets itself after every test (`resetMealioMock()`), so `setMockUser` and scripted answers never leak into the next one. Its functions are `jest.fn()`s, typed so `useMealio().prepareCart.mockResolvedValue(mockCart())` type-checks.
+If the mock first loads inside a test (a lazy `require`, `jest.isolateModules`), Jest allows no new hooks there, so add `require('@mealio/react-native-cart/jest').setupMealioMock();` to a `setupFilesAfterEnv` file to keep the reset.
 
-To test your own screens built on `useMealio()` against the real client, use the testing kit. No network, no WebView, no `transformIgnorePatterns`:
+To test your own screens built on `useMealio()` against the real client, use the testing kit. No network, no WebView, no `transformIgnorePatterns`, and no `react-native-webview` mock: with `testing` set the provider never loads it:
 
 ```tsx
 import { createFakeMealio } from '@mealio/react-native-cart/testing';

@@ -270,9 +270,11 @@ final RegExp _opsRe = RegExp(blockedGraphqlOperation, caseSensitive: false);
 /// boundaries in it, not form data). Group 1 is the field's name, group 2 its
 /// value: everything after the part's blank line up to the next boundary line
 /// or the end. Parts named operationName, query and operations are judged as
-/// the form fields of the same names. MULTIPART_FIELD in allowlist.ts.
+/// the form fields of the same names. The name may be double-quoted,
+/// single-quoted or bare (`name=operations`), as servers accept all three; a
+/// longer name (`operationsX`) is a different field. MULTIPART_FIELD in allowlist.ts.
 const String multipartField =
-    r'name="(operationName|query|operations)"[^\r\n]*\r?\n(?:[^\r\n]+\r?\n)*\r?\n([\s\S]*?)(?=\r?\n--|$)';
+    r'''name=["']?(operationName|query|operations)(?=["';\s]|$)[^\r\n]*\r?\n(?:[^\r\n]+\r?\n)*\r?\n([\s\S]*?)(?=\r?\n--|$)''';
 
 final RegExp _rawOperationRe = RegExp(r'"operationName"\s*:\s*"([^"]*)"');
 final RegExp _ignoredRe = RegExp(r'"""(?:\\"""|[\s\S])*?"""|"(?:[^"\\]|\\.)*"|#[^\n\r]*');

@@ -78,14 +78,18 @@ extension JSONValue: ExpressibleByNilLiteral, ExpressibleByBooleanLiteral, Expre
 }
 
 public extension JSONValue {
-    /// Parse JSON text. Nil when it is not valid JSON.
+    /// Parse JSON text exactly as JavaScript's JSON.parse does (see
+    /// StrictJSON). Nil when JSON.parse would throw.
     static func parse(_ text: String) -> JSONValue? {
-        parse(Data(text.utf8))
+        StrictJSON.parse(text)
     }
 
-    /// Parse JSON bytes. Nil when they are not valid JSON.
+    /// Parse JSON bytes as a fetch Response's json() does: UTF-8, a leading
+    /// byte order mark dropped, bad bytes read as U+FFFD, then JSON.parse.
     static func parse(_ data: Data) -> JSONValue? {
-        try? JSONDecoder().decode(JSONValue.self, from: data)
+        var bytes = data[...]
+        if bytes.starts(with: [0xEF, 0xBB, 0xBF]) { bytes = bytes.dropFirst(3) }
+        return StrictJSON.parse(String(decoding: bytes, as: UTF8.self))
     }
 
     /// Build a JSONValue from any Encodable value.

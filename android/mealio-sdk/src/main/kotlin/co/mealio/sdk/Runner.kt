@@ -109,6 +109,9 @@ class Runner @JvmOverloads constructor(
      */
     val pageOpens: Int get() = opens + host.pagesLost
 
+    /** The hidden page was reset outside a job (a dirty queue): a warm-up on it is gone. */
+    internal fun pageReset() { opens += 1 }
+
     /**
      * Verify and run one envelope. Throws EnvelopeException when it must be refused.
      * `onStep` is called before each instruction that is executed (not for

@@ -98,7 +98,7 @@ object MealioCart {
     }
 
     /**
-     * Make `client` the configured one (configure, and co.mealio.sdk.testing).
+     * Make `client` the configured one (configure, and MealioTesting).
      * Whatever the old client had loading is cancelled; its add runs on and
      * its page is released after it, in the shared queue.
      */
@@ -116,7 +116,7 @@ object MealioCart {
         return client
     }
 
-    /** Forget the configuration and the user (co.mealio.sdk.testing, between tests). */
+    /** Forget the configuration and the user (MealioTesting, between tests). */
     internal fun uninstall() {
         val old = state
         state = null

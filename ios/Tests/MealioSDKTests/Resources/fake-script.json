@@ -1,0 +1,81 @@
+{
+  "note": "One testing-kit script for every platform. Each kit loads `script` with its fromJson loader (TS createFakeMealio(JSON.parse(text).cases[i].script), Swift FakeMealio(json:), Kotlin and Dart fromJson), then runs `steps` in order on a real client and checks each `expect`. Field names are the TypeScript kit's. Steps: prepare (makes cart `cart`, default \"a\"), search, select, add, restorePicks (onto `cart` from `from`), setScript (sets each key of `set` on the live script; null removes it), requests (the kinds of every request sent so far, in order), searches (the query of every search request so far, as sent). An `expect.error` is the MealioError code the step fails with. Prices are compared to the cent.",
+  "recipe": { "id": "r1", "title": "Pancakes", "ingredients": [{ "name": "milk" }, { "name": "garlic" }, { "name": "eggs" }, { "name": "saffron" }] },
+  "cases": [
+    {
+      "name": "list_search_add",
+      "script": {
+        "store": "heb",
+        "storeName": "H-E-B",
+        "items": [
+          { "key": "milk", "quantity": 2, "options": [{ "id": "m1", "name": "Whole milk", "unitPrice": 3.49 }, { "id": "m2", "name": "2% milk", "unitPrice": 3.29 }], "remembered": "m1" },
+          { "key": "garlic", "options": [{ "id": "g1", "name": "Garlic bulb", "unitPrice": 0.5 }] },
+          { "key": "eggs", "options": [{ "id": "e1", "name": "Large eggs", "unitPrice": 4.19 }], "remembered": "e1", "startUnchecked": true },
+          { "key": "saffron", "unavailable": "not_found" }
+        ],
+        "search": { "minced garlic": [{ "id": "jar", "name": "Minced garlic jar", "unitPrice": 2.99 }] }
+      },
+      "steps": [
+        { "do": "prepare", "expect": {
+          "store": "heb", "storeName": "H-E-B",
+          "recipes": [{ "id": "r1", "title": "Pancakes" }],
+          "items": {
+            "milk": { "status": "remembered", "selectedId": "m1", "quantity": 2 },
+            "garlic": { "status": "choose", "selectedId": null, "quantity": 1 },
+            "eggs": { "status": "remembered", "selectedId": null, "quantity": 1 },
+            "saffron": { "status": "unavailable", "selectedId": null, "quantity": 1 }
+          }
+        } },
+        { "do": "search", "key": "garlic", "query": "MINCED garlic", "expect": { "options": ["jar"] } },
+        { "do": "select", "key": "garlic", "productId": "jar", "expect": { "selectedId": "jar" } },
+        { "do": "select", "key": "garlic", "productId": "nope", "expect": { "error": "unknown_product" } },
+        { "do": "add", "expect": { "added": ["milk", "garlic"], "skipped": ["eggs", "saffron"], "failed": [], "addedTotal": 9.97 } },
+        { "do": "requests", "expect": ["prepare", "search", "add"] }
+      ]
+    },
+    {
+      "name": "restore_picks_reruns_the_search_that_found_the_pick",
+      "script": {
+        "store": "heb",
+        "items": [
+          { "key": "milk", "options": [{ "id": "m1", "name": "Whole milk", "unitPrice": 3.49 }], "remembered": "m1" },
+          { "key": "garlic", "options": [{ "id": "g1", "name": "Garlic bulb", "unitPrice": 0.5 }], "remembered": "g1" }
+        ],
+        "search": {
+          "minced garlic": [{ "id": "jar", "name": "Minced garlic jar", "unitPrice": 2.99 }],
+          "peeled garlic": [{ "id": "peeled", "name": "Peeled garlic", "unitPrice": 3.49 }]
+        },
+        "add": { "fail": "store_unavailable" }
+      },
+      "steps": [
+        { "do": "prepare", "cart": "a" },
+        { "do": "search", "cart": "a", "key": "garlic", "query": "minced garlic", "expect": { "options": ["jar"] } },
+        { "do": "select", "cart": "a", "key": "garlic", "productId": "jar" },
+        { "do": "search", "cart": "a", "key": "garlic", "query": "peeled garlic", "expect": { "options": ["peeled"] } },
+        { "do": "add", "cart": "a", "expect": { "error": "store_unavailable" } },
+        { "do": "setScript", "set": { "add": null } },
+        { "do": "prepare", "cart": "b", "expect": { "items": { "garlic": { "status": "remembered", "selectedId": "g1", "quantity": 1 } } } },
+        { "do": "restorePicks", "cart": "b", "from": "a", "expect": { "items": { "milk": { "selectedId": "m1" }, "garlic": { "selectedId": "jar" } } } },
+        { "do": "add", "cart": "b", "expect": { "added": ["milk", "garlic"], "skipped": [], "failed": [], "addedTotal": 6.48 } },
+        { "do": "requests", "expect": ["prepare", "search", "search", "add", "prepare", "search", "add"] },
+        { "do": "searches", "expect": ["minced garlic", "peeled garlic", "minced garlic"] }
+      ]
+    },
+    {
+      "name": "sign_in_closed",
+      "script": { "store": "heb", "items": [{ "key": "milk", "options": [{ "id": "m1", "name": "Whole milk" }], "remembered": "m1" }], "signIn": "cancelled" },
+      "steps": [
+        { "do": "prepare", "expect": { "error": "login_cancelled" } },
+        { "do": "requests", "expect": ["prepare", "step"] }
+      ]
+    },
+    {
+      "name": "sign_in_then_list",
+      "script": { "store": "heb", "items": [{ "key": "milk", "options": [{ "id": "m1", "name": "Whole milk" }], "remembered": "m1" }], "signIn": "signed_in" },
+      "steps": [
+        { "do": "prepare", "expect": { "items": { "milk": { "status": "remembered", "selectedId": "m1", "quantity": 1 } } } },
+        { "do": "requests", "expect": ["prepare", "step"] }
+      ]
+    }
+  ]
+}

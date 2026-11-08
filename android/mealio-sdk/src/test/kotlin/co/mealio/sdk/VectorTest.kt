@@ -76,6 +76,17 @@ class VectorTest {
     }
 
     @Test
+    fun jsonBodyCases() {
+        // 0.6 round 4: StrictJson reads exactly what JSON.parse reads (depth, \\u hex digits, lone surrogates).
+        val cases = Vectors.json.getJSONArray("jsonBodies").objects()
+        assertTrue(cases.isNotEmpty())
+        for (c in cases) {
+            val body = c.getString("body")
+            assertEquals("${c.optString("rule")}: ${body.take(80)}", c.getBoolean("blocked"), bodyBlocked(body))
+        }
+    }
+
+    @Test
     fun matcherCases() {
         val cases = Vectors.json.getJSONArray("matchers").objects()
         assertTrue(cases.isNotEmpty())

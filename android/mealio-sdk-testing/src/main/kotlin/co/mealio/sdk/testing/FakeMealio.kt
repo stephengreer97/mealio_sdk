@@ -17,16 +17,18 @@ import co.mealio.sdk.Matcher
 import co.mealio.sdk.MealioCart
 import co.mealio.sdk.MealioClient
 import co.mealio.sdk.MealioConfig
+import co.mealio.sdk.MealioTesting
+import co.mealio.sdk.MealioTestingHook
 import co.mealio.sdk.PageLoad
 import co.mealio.sdk.Product
 import co.mealio.sdk.STORES
 import co.mealio.sdk.ScriptRun
 import co.mealio.sdk.Selection
-import co.mealio.sdk.SessionStore
 import co.mealio.sdk.StoreHosts
 import co.mealio.sdk.StoreInfo
 import co.mealio.sdk.StoreLocation
 import co.mealio.sdk.StorePreferences
+import co.mealio.sdk.TestSessions
 import kotlinx.coroutines.CompletableDeferred
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters
 import org.bouncycastle.crypto.signers.Ed25519Signer
@@ -35,7 +37,9 @@ import org.json.JSONObject
 import java.net.URLDecoder
 import java.util.Base64
 
-// co.mealio.sdk.testing: run the REAL MealioClient, CartSession, MealioCart
+// co.mealio:mealio-sdk-testing (package co.mealio.sdk.testing), a separate
+// artifact for `testImplementation` only, so none of this can ship in a
+// release app. Run the REAL MealioClient, CartSession, MealioCart
 // and drop-in sheet in JVM or Robolectric tests with no network. Port of
 // @mealio/sdk-core/testing (packages/core/src/testing.ts); the scripts are the
 // same plain data. It signs with the protocol TEST key, which no production
@@ -123,7 +127,13 @@ class FakeScript @JvmOverloads constructor(
     var locations: List<StoreLocation> = emptyList(),
     /** What a warm-up finds: true signed in (default), false not, null no store to warm. */
     var warmSignedIn: Boolean? = true,
-)
+) {
+    companion object {
+        /** A script from JSON with TypeScript's FakeScript field names (see fakeScriptFromJson). */
+        @JvmStatic
+        fun fromJson(json: String): FakeScript = fakeScriptFromJson(json)
+    }
+}
 
 /** One request the client sent. `body` is null for a GET. */
 data class FakeRequest(val kind: FakeKind, val path: String, val body: JSONObject?, val token: String?)
@@ -248,15 +258,21 @@ class FakeMealio @JvmOverloads constructor(
      * instead of touching cookies. Call [uninstall] after the test.
      */
     @JvmOverloads
+    @OptIn(MealioTestingHook::class)
     fun install(sessionTokenProvider: suspend () -> String = this.sessionTokenProvider): MealioClient {
         val cfg = config(sessionTokenProvider, epochProvider = { memory.epoch() }, platform = "android")
-        return MealioCart.install(host, memory, release = {}) { q -> MealioClient(cfg, host, transport, q) }
+        return MealioTesting.install(host, memory) { q -> MealioClient(cfg, host, transport, q) }
     }
 
     companion object {
+        /** A fake from a JSON script, the same text TypeScript's createFakeMealio and Swift's FakeMealio(json:) take. */
+        @JvmStatic
+        fun fromJson(json: String): FakeMealio = FakeMealio(fakeScriptFromJson(json))
+
         /** Undo [install]: MealioCart is unconfigured again and forgets the user. */
         @JvmStatic
-        fun uninstall() = MealioCart.uninstall()
+        @OptIn(MealioTestingHook::class)
+        fun uninstall() = MealioTesting.uninstall()
     }
 
     // ── the scripted server ───────────────────────────────────────────
@@ -424,12 +440,11 @@ class FakeMealio @JvmOverloads constructor(
 }
 
 /** In memory, for [FakeMealio.install]: a sign-out bumps the epoch and clears nothing. */
-private class MemorySessions : SessionStore {
+@OptIn(MealioTestingHook::class)
+private class MemorySessions : TestSessions {
     @Volatile private var n = 0
     override fun epoch(): Int = n
     @Synchronized override fun bumpEpoch(): Int = ++n
-    override suspend fun clearStore(hosts: StoreHosts) = Unit
-    override suspend fun clearAll() = Unit
 }
 
 // ── JSON as the server sends it ─────────────────────────────────────

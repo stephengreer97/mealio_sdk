@@ -617,6 +617,74 @@ class CartFlowModelTest {
         assertEquals(before, FlowModels.size())
     }
 
+    // ── 0.6 round 4 ─────────────────────────────────────────────────
+
+    @Test
+    fun anAddThatEndsInsideTheReclaimWindowWithNoScreenStillReportsOnAdded() = runTest {
+        val h = Harness(this)
+        h.answer = { p, _ -> if (p.endsWith("/add")) h.start(p, open(), done(added)) else h.start(p, done(cart())) }
+        val before = FlowModels.size()
+        val m = FlowModels.obtain("orphan-early-${System.nanoTime()}", openedNow = true) { h.model() }!!
+        advanceUntilIdle()
+        h.openGate = CompletableDeferred()
+        m.add()
+        runCurrent()
+        // Recreated; the add ends a moment later, well inside RECLAIM_MS.
+        m.detach()
+        h.openGate!!.complete(Unit)
+        runCurrent()
+        assertEquals(Phase.DONE, m.phase)
+        assertTrue("queued for a screen that may come back", h.addedResults.isEmpty())
+        // No screen takes it back.
+        testScheduler.advanceTimeBy(RECLAIM_MS + 1)
+        runCurrent()
+        assertEquals(1, h.addedResults.size)
+        assertTrue(m.finished)
+        assertEquals(before, FlowModels.size())
+    }
+
+    @Test
+    fun anOutsideCancelDuringRestorePicksLoadsAgain() = runTest {
+        val h = Harness(this)
+        var searches = 0
+        h.answer = { p, _ ->
+            when {
+                p.endsWith("/add") -> HttpResponse(500, JSONObject().put("error", JSONObject().put("code", "store_unavailable").put("message", "down")).toString())
+                p.endsWith("/search") -> {
+                    searches += 1
+                    val r = done(JSONObject().put("key", "milk").put("options", JSONArray().put(JSONObject().put("id", "p9").put("name", "Goat milk").put("unitPrice", 6))))
+                    // The first search on a new cart waits at the page.
+                    if (searches == 2) h.start(p, open("s"), r) else h.start(p, r)
+                }
+                else -> h.start(p, done(cart()))
+            }
+        }
+        val m = h.model()
+        advanceUntilIdle()
+        m.cart!!.search("milk", "goat milk")
+        m.cart!!.select("milk", "p9")
+        m.add()
+        advanceUntilIdle()
+        val first = m.cart
+        h.openGate = CompletableDeferred()
+        m.retry()
+        runCurrent()
+        assertEquals(2, searches)
+        // A store sign-out, cancelJobs: not this sheet.
+        val gate = h.openGate!!
+        h.openGate = null
+        h.client.cancelJobs()
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(Phase.LIST, m.phase)
+        assertTrue("loaded again", h.sent.count { it.endsWith("/carts") } == 3)
+        assertEquals(3, searches)
+        assertEquals("p9", m.cart!!.selectedId("milk"))
+        assertTrue(m.cart !== first)
+        // Only the failed add reported an error; the cancel did not.
+        assertEquals(listOf("store_unavailable"), h.errors.map { (it as co.mealio.sdk.MealioException).code })
+    }
+
     /** A prepare that waits at the page, and a cancel from outside for each one. */
     private fun TestScope.cancelFromOutside(h: Harness) {
         runCurrent()
@@ -637,6 +705,7 @@ class CartFlowModelTest {
         assertEquals(Phase.LOADING, m.phase)
         cancelFromOutside(h)
         assertEquals(Phase.ERROR, m.phase)
+        assertEquals("Something went wrong.", m.error!!.message)
         assertFalse(m.finished)
         assertTrue(h.closed.isEmpty())
         assertEquals(4, h.sent.count { it.endsWith("/carts") })

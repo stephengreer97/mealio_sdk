@@ -167,6 +167,42 @@ const vectors = {
     { body: '--b\r\nContent-Disposition: form-data; name="operationName"\r\n\r\nPlaceOrder\r\n--b--', blocked: true },
     { body: '--b\r\nContent-Disposition: form-data; name="operations"\r\n\r\n' + JSON.stringify({ query: 'mutation Upload($f: Upload!) { uploadPhoto(file: $f) { id } }', variables: { f: null } }) + '\r\n--b\r\nContent-Disposition: form-data; name="map"\r\n\r\n{"0":["variables.f"]}\r\n--b\r\nContent-Disposition: form-data; name="0"; filename="a.jpg"\r\nContent-Type: image/jpeg\r\n\r\nplaceOrder checkout\r\n--b--\r\n', blocked: false },
     { body: '--b\r\nContent-Disposition: form-data; name="note"\r\n\r\n' + JSON.stringify({ query: 'mutation { placeOrder { id } }' }) + '\r\n--b--', blocked: false },
+    // 0.6 round 4. A part's name may be double-quoted, single-quoted or bare.
+    { body: '--b\r\nContent-Disposition: form-data; name=operations\r\n\r\n' + JSON.stringify({ query: 'mutation { placeOrder { id } }' }) + '\r\n--b--', blocked: true },
+    { body: "--b\r\nContent-Disposition: form-data; name='operations'\r\n\r\n" + JSON.stringify({ query: 'mutation { placeOrder { id } }' }) + '\r\n--b--', blocked: true },
+    { body: '--b\r\nContent-Disposition: form-data; name=query\r\n\r\nmutation { placeOrder { id } }\r\n--b--', blocked: true },
+    { body: "--b\r\nContent-Disposition: form-data; name='query'\r\n\r\nmutation { placeOrder { id } }\r\n--b--", blocked: true },
+    { body: '--b\r\nContent-Disposition: form-data; name=operationName\r\n\r\nPlaceOrder\r\n--b--', blocked: true },
+    { body: "--b\r\nContent-Disposition: form-data; name='operationName'\r\n\r\nPlaceOrder\r\n--b--", blocked: true },
+    { body: '--b\nContent-Disposition: form-data; name=operations; filename=x\n\n' + JSON.stringify([{ operationName: 'submit_order' }]) + '\n--b--', blocked: true },
+    { body: '--b\r\nContent-Disposition: form-data; name=operationsX\r\n\r\n' + JSON.stringify({ query: 'mutation { placeOrder { id } }' }) + '\r\n--b--', blocked: false },
+    { body: "--b\r\nContent-Disposition: form-data; name='operationNameX'\r\n\r\nPlaceOrder\r\n--b--", blocked: false },
+    { body: '--b\r\nContent-Disposition: form-data; name=operations\r\n\r\n' + JSON.stringify({ query: 'mutation Upload($f: Upload!) { uploadPhoto(file: $f) { id } }' }) + '\r\n--b--', blocked: false },
+  ],
+  // 0.6 round 4. Every SDK's JSON reader accepts exactly what JSON.parse does,
+  // because a body is judged as JSON only when it parses. Kept apart from
+  // blockedBodies so each platform's test can name the rule that failed.
+  //   depth: nesting JSON.parse reads, so a deep array cannot make a body "not JSON"
+  //   hex: a \u escape takes ASCII hex digits only; anything else is not JSON
+  //   surrogate: a lone or reversed surrogate escape is still JSON
+  // A body that is not JSON is then read as text, where strings are not names.
+  jsonBodies: [
+    { rule: 'depth', body: '{"x":' + '['.repeat(600) + ']'.repeat(600) + ',"query":"mutation { placeOrder { id } }"}', blocked: true },
+    { rule: 'depth', body: '{"x":' + '['.repeat(2000) + ']'.repeat(2000) + ',"query":"mutation { placeOrder { id } }"}', blocked: true },
+    { rule: 'depth', body: '[' + '{"a":'.repeat(700) + '1' + '}'.repeat(700) + ',{"query":"mutation { submitOrder { id } }"}]', blocked: true },
+    { rule: 'depth', body: '{"x":' + '['.repeat(2000) + ']'.repeat(2000) + ',"query":"query { placeOrder { id } }"}', blocked: false },
+    { rule: 'hex', body: '{"operationName":"Search","query":"mutation { \\u0070laceOrder { id } }"}', blocked: true },
+    { rule: 'hex', body: '{"operationName":"place\\u٠٠٤Frder"}', blocked: false },
+    { rule: 'hex', body: '{"operationName":"place\\u００４Frder"}', blocked: false },
+    { rule: 'hex', body: '{"query":"mutation { place\\u٠٠٤Frder { id } }"}', blocked: false },
+    { rule: 'hex', body: '{"query":"mutation { place\\u004frder { id } }"}', blocked: true },
+    { rule: 'hex', body: '{"query":"mutation { place\\u004Frder { id } }"}', blocked: true },
+    { rule: 'surrogate', body: '{"query":"mutation { placeOrder { id } }","x":"\\ud800"}', blocked: true },
+    { rule: 'surrogate', body: '{"query":"mutation { placeOrder { id } }","x":"\\udfff"}', blocked: true },
+    { rule: 'surrogate', body: '{"query":"mutation { placeOrder { id } }","x":"\\udc00\\ud800"}', blocked: true },
+    { rule: 'surrogate', body: '{"query":"mutation { placeOrder { id } }","x":"a\\ud83dz"}', blocked: true },
+    { rule: 'surrogate', body: '{"query":"query { a }","x":"\\ud800"}', blocked: false },
+    { rule: 'surrogate', body: '{"query":"mutation { placeOrder { id } }","x":"\\ud83d\\ude00"}', blocked: true },
   ],
   matchers: [
     { msg: { type: 'ALB_SESSION', loggedIn: true, early: true }, m: { type: 'ALB_SESSION', ne: { early: true } }, ok: false },

@@ -271,9 +271,11 @@ export function mutationNames(doc: string): string[] {
  * boundaries in it, not a FormData). Group 1 is the field's name, group 2 its
  * value: everything after the part's blank line up to the next boundary line
  * or the end. Parts named operationName, query and operations are judged as
- * the form fields of the same names. Copy it exactly (flags: g).
+ * the form fields of the same names. The name may be double-quoted,
+ * single-quoted or bare (`name=operations`), as servers accept all three; a
+ * longer name (`operationsX`) is a different field. Copy it exactly (flags: g).
  */
-export const MULTIPART_FIELD = String.raw`name="(operationName|query|operations)"[^\r\n]*\r?\n(?:[^\r\n]+\r?\n)*\r?\n([\s\S]*?)(?=\r?\n--|$)`;
+export const MULTIPART_FIELD = String.raw`name=["']?(operationName|query|operations)(?=["';\s]|$)[^\r\n]*\r?\n(?:[^\r\n]+\r?\n)*\r?\n([\s\S]*?)(?=\r?\n--|$)`;
 
 /**
  * Does a request body name a blocked operation? Reads `operationName` the way

@@ -73,4 +73,18 @@ class ConfigureTest {
         assertEquals(listOf("A /api/v1/sdk/carts/c/add", "B /api/v1/sdk/carts"), sent)
         assertEquals("the old page is let go after its add", listOf("old"), released)
     }
+
+    @Test
+    fun theTestKitIsNotPartOfTheSdkArtifact() {
+        // 0.6 round 4: FakeMealio and its test key live in co.mealio:mealio-sdk-testing,
+        // a testImplementation dependency, so a release app cannot carry them.
+        for (name in listOf("co.mealio.sdk.testing.FakeMealio", "co.mealio.sdk.testing.FakeMealioKt", "co.mealio.sdk.testing.FakeScript")) {
+            try {
+                Class.forName(name)
+                org.junit.Assert.fail("$name is in mealio-sdk")
+            } catch (e: ClassNotFoundException) {
+                // expected
+            }
+        }
+    }
 }

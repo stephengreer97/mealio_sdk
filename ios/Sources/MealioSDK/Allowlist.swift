@@ -151,7 +151,9 @@ public final class Allowlist {
     /// MULTIPART_FIELD in allowlist.ts: a field of a multipart/form-data body
     /// sent as raw text. Group 1 is the field's name, group 2 its value. JS's
     /// `$` (no m flag) is the very end of the text, which ICU spells `\z`.
-    public static let multipartField = #"name="(operationName|query|operations)"[^\r\n]*\r?\n(?:[^\r\n]+\r?\n)*\r?\n([\s\S]*?)(?=\r?\n--|$)"#
+    /// The name may be double-quoted, single-quoted or bare; a longer name
+    /// (`operationsX`) is a different field.
+    public static let multipartField = #"name=["']?(operationName|query|operations)(?=["';\s]|$)[^\r\n]*\r?\n(?:[^\r\n]+\r?\n)*\r?\n([\s\S]*?)(?=\r?\n--|$)"#
     private static let multipartFieldRegex: NSRegularExpression = {
         try! NSRegularExpression(pattern: multipartField.replacingOccurrences(of: "|$)", with: "|\\z)"), options: [])
     }()
@@ -338,13 +340,14 @@ public final class Allowlist {
         for m in operationNameRegex.matches(in: body, options: [], range: NSRange(location: 0, length: ns.length)) {
             names.append(ns.substring(with: m.range(at: 1)))
         }
-        if let data = body.data(using: .utf8),
-           let j = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
-            let list: [Any] = (j as? [Any]) ?? [j]
+        // Read as JSON.parse reads it (any depth, lone surrogates), keeping
+        // only the two levels this rule looks at.
+        if let j = StrictJSON.parse(body, keep: 2) {
+            let list: [JSONValue] = j.arrayValue ?? [j]
             for item in list {
-                guard let o = item as? [String: Any] else { continue }
-                if let n = o["operationName"] as? String { names.append(n) }
-                if let q = o["query"] as? String { docs.append(q) }
+                guard case .object(let o) = item else { continue }
+                if case .string(let n)? = o["operationName"] { names.append(n) }
+                if case .string(let q)? = o["query"] { docs.append(q) }
             }
         } else {
             // Not JSON: form-encoded, raw multipart, or a bare GraphQL document.

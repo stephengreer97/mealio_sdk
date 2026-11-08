@@ -2,7 +2,7 @@ name: release
 
 # Push a tag `vX.Y.Z` to publish every SDK at that version:
 #   npm         @mealio/sdk-core, @mealio/react-native-cart
-#   Maven       co.mealio:mealio-sdk, co.mealio:mealio-sdk-compose (Central Portal)
+#   Maven       co.mealio:mealio-sdk, co.mealio:mealio-sdk-compose, co.mealio:mealio-sdk-testing (Central Portal)
 #   SwiftPM     MealioSDK reads the tag itself, as does CocoaPods from git:
 #               pod 'MealioSDK', :git => '<repo>', :tag => 'vX.Y.Z'
 #               (CocoaPods Trunk goes read-only for good on 2026-12-02, so

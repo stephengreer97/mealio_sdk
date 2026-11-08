@@ -17,7 +17,7 @@ import 'runner.dart';
 import 'verify.dart';
 
 /// The core protocol version this port follows (packages/core 0.2.0).
-const String sdkCoreVersion = '0.2.0';
+const String sdkCoreVersion = '0.6.0';
 
 /// This package's version, sent as `X-Mealio-SDK: flutter/<version>`.
 const String mealioSdkVersion = '0.6.0';
@@ -101,6 +101,13 @@ class ClientConfig {
 
 /// Every HTTP request, and your session function, gets this long.
 const Duration requestTimeout = Duration(seconds: 30);
+
+/// An `http.Client` that holds requests on purpose (the testing kit's
+/// `MealioFake.hold`). While [holding] is above zero no request times out.
+abstract class MealioHoldingClient {
+  /// Requests being held right now.
+  int get holding;
+}
 
 /// A [CancelToken] for calls made inside [runCancellable], for prepare
 /// functions that do not take one (`MealioCartFlow.prepareCarts`).
@@ -415,16 +422,19 @@ class MealioClient {
 
   /// Run `fn` with the hidden page to itself, in the queue with the jobs. For
   /// work that must not land in the middle of one, like clearing store sessions.
-  /// After [requestTimeout] the caller gets `network`. The queue stays held
+  /// After [requestTimeout] the caller gets `network` and `fn`'s `cancel`
+  /// fires. The queue stays held
   /// until `fn` ends or [exclusiveCap] (60 seconds) passes, whichever is
-  /// first. At the cap `fn`'s `cancel` fires, the queue moves on, and the
-  /// next job loads a blank page before it starts.
+  /// first. At the cap the queue moves on, and the next job loads a blank
+  /// page before it starts.
   Future<T> runExclusive<T>(Future<T> Function(CancelToken cancel) fn) {
     final result = Completer<T>();
     unawaited(_queue.run(() async {
       await _cleanPage();
       final stop = CancelToken();
       final timer = Timer(requestTimeout, () {
+        // As the reference: the caller hears `network` and `fn` is told to stop.
+        stop.cancel();
         if (!result.isCompleted) {
           result.completeError(const MealioException(MealioErrorCode.network, 'That took too long'));
         }
@@ -691,13 +701,32 @@ class MealioClient {
   }
 
   /// One HTTP call, bounded: headers and body both inside [requestTimeout].
-  /// `json` is null if it was not JSON.
-  Future<({int status, Object? json})> _request(Future<http.Response> Function() send) async {
+  /// `json` is null if it was not JSON. When `cancel` fires the call settles
+  /// at once with `cancelled`, so the queue moves on without waiting for the
+  /// answer (package:http before 1.5 cannot close the socket; the answer is
+  /// dropped when it comes).
+  Future<({int status, Object? json})> _request(Future<http.Response> Function() send, {CancelToken? cancel}) async {
+    _stopIf(cancel);
     http.Response res;
+    void Function()? unlisten;
     try {
-      res = await send().timeout(requestTimeout);
+      final sending = send();
+      var answer = sending;
+      if (cancel != null) {
+        sending.ignore();
+        final stopped = Completer<http.Response>();
+        unlisten = cancel.onCancel(() {
+          if (!stopped.isCompleted) stopped.completeError(_cancelledError(cancel));
+        });
+        answer = Future.any(<Future<http.Response>>[sending, stopped.future]);
+      }
+      res = await _bounded(answer);
+    } on MealioException {
+      rethrow;
     } catch (_) {
       throw const MealioException(MealioErrorCode.network, 'Could not reach Mealio');
+    } finally {
+      unlisten?.call();
     }
     Object? json;
     try {
@@ -708,6 +737,26 @@ class MealioClient {
       json = null;
     }
     return (status: res.statusCode, json: json);
+  }
+
+  /// `f` within [requestTimeout]. Time a [MealioHoldingClient] spends holding
+  /// a request on purpose does not count.
+  Future<http.Response> _bounded(Future<http.Response> f) {
+    final h = _http;
+    if (h is! MealioHoldingClient) return f.timeout(requestTimeout);
+    final out = Completer<http.Response>();
+    Timer? timer;
+    void arm() {
+      timer = Timer(requestTimeout, () {
+        if (out.isCompleted) return;
+        if ((h as MealioHoldingClient).holding > 0) return arm();
+        out.completeError(TimeoutException('Mealio did not answer in time'));
+      });
+    }
+
+    arm();
+    f.then(out.complete, onError: out.completeError).whenComplete(() => timer?.cancel()).ignore();
+    return out.future;
   }
 
   /// `cancel` belongs to a prepare, search or warm-up; `pin` to an add.
@@ -737,7 +786,7 @@ class MealioClient {
     }
     // Bytes, not a String body: a String body makes package:http append
     // "; charset=utf-8" to Content-Type.
-    final res = await _request(() => _http.post(Uri.parse(_base + path), headers: headers, body: utf8.encode(jsonEncode(body))));
+    final res = await _request(() => _http.post(Uri.parse(_base + path), headers: headers, body: utf8.encode(jsonEncode(body))), cancel: cancel);
     if (res.status == 401 && !retried) {
       if (_token == bearer) _token = null;
       if (pin != null) {

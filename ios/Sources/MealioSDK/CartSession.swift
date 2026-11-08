@@ -148,8 +148,9 @@ public final class CartSession: ObservableObject {
     @Published private var picks: [String: Pick] = [:]
     /// Options found with `search`, by item key, newest first.
     @Published private var extra: [String: [Product]] = [:]
-    /// Each item's last search query, so a retry on a new cart can search again.
-    private var lastQuery: [String: String] = [:]
+    /// Per item, the search that found each product (product id -> query),
+    /// so a retry on a new cart can run the search that found the user's pick.
+    private var foundBy: [String: [String: String]] = [:]
     /// Quantities the user changed, by item key.
     @Published private var qty: [String: Int] = [:]
     /// Weights (lb) the user changed, by item key.
@@ -350,13 +351,18 @@ public final class CartSession: ObservableObject {
     ///
     /// The server only knows a searched product on the cart it was found in,
     /// so a pick the user found with `search` is never sent here as it was:
-    /// the item's last search runs again on this cart (it counts toward the
-    /// search cap), and the same product is picked if it comes back. If it
-    /// does not, or the search fails, the item keeps this cart's own pick.
-    /// Pass `cancel` to stop the searches; `cancelSearches` stops them too.
+    /// the search that found that product runs again on this cart (it counts
+    /// toward the search cap), and the same product is picked if it comes
+    /// back. If it does not, or the search fails, the item keeps this cart's
+    /// own pick.
+    ///
+    /// It never throws: it ends with whatever it could restore. Pass `cancel`
+    /// to stop the searches (no more run once it fires); `cancelSearches`
+    /// stops them too. Check `cancel.cancelled` afterwards to tell a stop
+    /// from the end.
     public func restorePicks(from old: CartSession, cancel: CancelToken? = nil, onStep: StepListener? = nil) async {
         guard old.store == store else { return }
-        var again: [(key: String, query: String)] = []
+        var again: [(key: String, productId: String, query: String)] = []
         for it in items {
             guard old.find(it.key) != nil else { continue }
             guard let productId = old.selectedId(for: it.key) else {
@@ -364,13 +370,11 @@ public final class CartSession: ObservableObject {
                 continue
             }
             if restore(it.key, productId, from: old) { continue }
-            // Not offered here. Found with search there: search again here.
-            let searched = (old.extra[it.key] ?? []).contains { $0.id == productId }
-            if searched, let q = old.lastQuery[it.key] { again.append((key: it.key, query: q)) }
+            // Not offered here. Found with search there: run that search here.
+            if let q = old.foundBy[it.key]?[productId] { again.append((key: it.key, productId: productId, query: q)) }
         }
-        for (key, query) in again {
+        for (key, productId, query) in again {
             if cancel?.cancelled == true { return }
-            guard let productId = old.selectedId(for: key) else { continue }
             do {
                 _ = try await search(key: key, query: query, cancel: cancel, onStep: onStep)
             } catch {
@@ -410,7 +414,10 @@ public final class CartSession: ObservableObject {
         searches[id] = token
         defer { searches[id] = nil }
         let r = try await client.search(cartId: cart.cartId, key: key, query: query, cancel: token, onStep: onStep)
-        lastQuery[key] = query
+        var found = foundBy[key] ?? [:]
+        // The first search that found a product is the one restorePicks reruns.
+        for p in r.options where found[p.id] == nil { found[p.id] = query }
+        foundBy[key] = found
         let prev = extra[key] ?? []
         let seen = Set(prev.map(\.id))
         extra[key] = r.options.filter { !seen.contains($0.id) } + prev

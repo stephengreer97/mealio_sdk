@@ -103,6 +103,11 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
         let content = WKUserContentController()
         content.addUserScript(WKUserScript(source: Bridge.nativePostScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         content.addUserScript(WKUserScript(source: MealioScripts.bridgeShim, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        // The guard in EVERY frame, before any of the frame's own scripts run.
+        // The guard's in-page hooks stay as a second layer (a frame a script
+        // adds and uses in the same tick), and it is still injected before
+        // each server script; it skips itself where it is already installed.
+        content.addUserScript(WKUserScript(source: MealioScripts.guardScript, injectionTime: .atDocumentStart, forMainFrameOnly: false))
         content.add(handler, name: Bridge.messageHandlerName)
         config.userContentController = content
         return config

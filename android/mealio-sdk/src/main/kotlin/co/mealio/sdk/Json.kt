@@ -110,21 +110,20 @@ internal fun jsonEquals(a: Any?, b: Any?): Boolean {
  * null; a repeated key keeps its last value, as JSON.parse does. org.json is
  * lenient, and a body it accepts but a server's JSON.parse would not must not
  * be read as JSON.
+ *
+ * Like JSON.parse it has no nesting limit of its own: containers are kept on
+ * a heap stack, not the call stack, so a body nested a few thousand deep is
+ * read as JSON and judged as JSON. A `\u` escape takes ASCII hex digits only,
+ * and a lone surrogate (escaped or raw) is kept as it is.
  */
 internal object StrictJson {
     /** What [parse] returns for text that is not JSON. */
     val INVALID = Any()
 
-    private const val MAX_DEPTH = 1000
-
     private class Bad : RuntimeException(null, null, false, false)
 
     fun parse(text: String): Any? = try {
-        val p = P(text)
-        p.ws()
-        val v = p.value(0)
-        p.ws()
-        if (p.i != text.length) INVALID else v
+        P(text).run()
     } catch (e: Bad) {
         INVALID
     }
@@ -136,63 +135,78 @@ internal object StrictJson {
             while (i < s.length && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) i++
         }
 
-        fun value(depth: Int): Any? {
-            if (depth > MAX_DEPTH || i >= s.length) throw Bad()
-            return when (s[i]) {
-                '{' -> obj(depth)
-                '[' -> arr(depth)
-                '"' -> str()
-                't' -> word("true", true)
-                'f' -> word("false", false)
-                'n' -> word("null", null)
-                else -> num()
-            }
-        }
-
         fun word(w: String, v: Any?): Any? {
             if (!s.startsWith(w, i)) throw Bad()
             i += w.length
             return v
         }
 
-        fun obj(depth: Int): Map<String, Any?> {
-            val out = LinkedHashMap<String, Any?>()
+        /** At a key: the key, the colon, and the space before its value. */
+        fun key(): String {
+            if (i >= s.length || s[i] != '"') throw Bad()
+            val k = str()
+            ws()
+            if (i >= s.length || s[i] != ':') throw Bad()
             i++
             ws()
-            if (i < s.length && s[i] == '}') { i++; return out }
-            while (true) {
-                ws()
-                if (i >= s.length || s[i] != '"') throw Bad()
-                val k = str()
-                ws()
-                if (i >= s.length || s[i] != ':') throw Bad()
-                i++
-                ws()
-                out[k] = value(depth + 1)
-                ws()
-                if (i >= s.length) throw Bad()
-                when (s[i++]) {
-                    ',' -> continue
-                    '}' -> return out
-                    else -> throw Bad()
-                }
-            }
+            return k
         }
 
-        fun arr(depth: Int): List<Any?> {
-            val out = ArrayList<Any?>()
-            i++
+        fun run(): Any? {
+            // Open containers, innermost last, and for an object the key its next value goes under.
+            val open = ArrayList<Any>()
+            val keys = ArrayList<String?>()
             ws()
-            if (i < s.length && s[i] == ']') { i++; return out }
-            while (true) {
-                ws()
-                out.add(value(depth + 1))
-                ws()
+            value@ while (true) {
                 if (i >= s.length) throw Bad()
-                when (s[i++]) {
-                    ',' -> continue
-                    ']' -> return out
-                    else -> throw Bad()
+                var v: Any? = when (s[i]) {
+                    '{' -> {
+                        i++
+                        ws()
+                        if (i < s.length && s[i] == '}') { i++; LinkedHashMap<String, Any?>() } else {
+                            open.add(LinkedHashMap<String, Any?>())
+                            keys.add(key())
+                            continue@value
+                        }
+                    }
+                    '[' -> {
+                        i++
+                        ws()
+                        if (i < s.length && s[i] == ']') { i++; ArrayList<Any?>() } else {
+                            open.add(ArrayList<Any?>())
+                            keys.add(null)
+                            continue@value
+                        }
+                    }
+                    '"' -> str()
+                    't' -> word("true", true)
+                    'f' -> word("false", false)
+                    'n' -> word("null", null)
+                    else -> num()
+                }
+                // A whole value: put it in its container, then close what ends here.
+                while (true) {
+                    if (open.isEmpty()) {
+                        ws()
+                        if (i != s.length) throw Bad()
+                        return v
+                    }
+                    val top = open[open.size - 1]
+                    @Suppress("UNCHECKED_CAST")
+                    if (top is LinkedHashMap<*, *>) (top as MutableMap<String, Any?>)[keys[keys.size - 1]!!] = v
+                    else (top as MutableList<Any?>).add(v)
+                    ws()
+                    if (i >= s.length) throw Bad()
+                    val c = s[i++]
+                    if (c == ',') {
+                        ws()
+                        if (top is LinkedHashMap<*, *>) keys[keys.size - 1] = key()
+                        continue@value
+                    }
+                    if (c != (if (top is LinkedHashMap<*, *>) '}' else ']')) throw Bad()
+                    open.removeAt(open.size - 1)
+                    keys.removeAt(keys.size - 1)
+                    v = top
                 }
             }
         }
@@ -221,11 +235,12 @@ internal object StrictJson {
                                 if (i + 4 > s.length) throw Bad()
                                 var n = 0
                                 for (k in 0 until 4) {
-                                    val d = Character.digit(s[i + k], 16)
+                                    val d = hex(s[i + k])
                                     if (d < 0) throw Bad()
                                     n = n * 16 + d
                                 }
                                 i += 4
+                                // A lone surrogate stays, as JSON.parse keeps it.
                                 sb.append(n.toChar())
                             }
                             else -> throw Bad()
@@ -234,6 +249,14 @@ internal object StrictJson {
                     else -> sb.append(c)
                 }
             }
+        }
+
+        /** ASCII hex only: Character.digit also takes fullwidth and other Unicode digits. */
+        fun hex(c: Char): Int = when (c) {
+            in '0'..'9' -> c - '0'
+            in 'a'..'f' -> c - 'a' + 10
+            in 'A'..'F' -> c - 'A' + 10
+            else -> -1
         }
 
         fun num(): Double {

@@ -55,7 +55,10 @@ public final class FakeMealio: @unchecked Sendable {
     private var carts: [String: (store: String, offered: [JSONValue])] = [:]
     /// Jobs waiting on their sign-in step: what to send for each outcome.
     private var jobs: [String: (store: String, cart: JSONValue)] = [:]
-    private var holds: [Kind: [DispatchSemaphore]] = [:]
+    /// Holds not yet taken by a request, by kind.
+    private var holds: [Kind: [FakeHold]] = [:]
+    /// Every hold made, so deinit can release them all.
+    private var allHolds: [FakeHold] = []
     private var nJob = 0
     private var nCart = 0
     private var _searchHandler: ((String, String) -> [JSONValue])?
@@ -105,6 +108,9 @@ public final class FakeMealio: @unchecked Sendable {
 
     deinit {
         FakeMealioURLProtocol.unregister(host: baseURL.host ?? "")
+        // A request still held is let go: it finds no fake and fails, instead
+        // of waiting for ever.
+        for h in allHolds { h.release() }
     }
 
     /// The script in force. Change it between calls.
@@ -185,18 +191,18 @@ public final class FakeMealio: @unchecked Sendable {
         return (carts[cartId]?.offered ?? []).compactMap { try? $0.decode(Product.self) }
     }
 
-    /// Hold the next request of this kind until the returned function is called.
+    /// Hold the next request of this kind until the returned function is
+    /// called. No thread waits meanwhile: the request is answered when it is
+    /// released. Releasing twice does nothing. Releasing before the request
+    /// comes lets it through at once. When the fake goes away, every hold is
+    /// released.
     public func hold(_ kind: Kind) -> () -> Void {
-        let gate = DispatchSemaphore(value: 0)
-        lock.lock(); holds[kind, default: []].append(gate); lock.unlock()
-        var released = false
-        let once = NSLock()
-        return {
-            once.lock(); defer { once.unlock() }
-            if released { return }
-            released = true
-            gate.signal()
-        }
+        let h = FakeHold()
+        lock.lock()
+        holds[kind, default: []].append(h)
+        allHolds.append(h)
+        lock.unlock()
+        return { h.release() }
     }
 
     // MARK: - the server
@@ -219,20 +225,39 @@ public final class FakeMealio: @unchecked Sendable {
         return .other
     }
 
-    /// Answer one request: (status, JSON body). Called on URLSession's thread.
-    func answer(path: String, body: JSONValue?, auth: String?) -> (Int, JSONValue) {
+    static let noFake: (Int, JSONValue) = (404, ["error": ["code": "server", "message": "No fake Mealio at this address"]])
+
+    /// Record one request and answer it through `reply`: at once, or when its
+    /// hold is released. Never blocks the calling thread.
+    func receive(path: String, body: JSONValue?, auth: String?, reply: @escaping (Int, JSONValue) -> Void) {
         let kind = FakeMealio.kind(of: path)
         var token: String?
         if let a = auth { token = a.hasPrefix("Bearer ") ? String(a.dropFirst(7)) : a }
         lock.lock()
         _requests.append(Request(kind: kind, path: path, body: body, token: token))
-        var gate: DispatchSemaphore?
+        var gate: FakeHold?
         if kind != .other, var list = holds[kind], !list.isEmpty {
             gate = list.removeFirst()
             holds[kind] = list
         }
         lock.unlock()
-        gate?.wait()
+        guard let gate = gate else {
+            let (status, json) = answer(kind: kind, path: path, body: body)
+            reply(status, json)
+            return
+        }
+        gate.then { [weak self] in
+            guard let self = self else {
+                reply(FakeMealio.noFake.0, FakeMealio.noFake.1)
+                return
+            }
+            let (status, json) = self.answer(kind: kind, path: path, body: body)
+            reply(status, json)
+        }
+    }
+
+    /// The answer to one request: (status, JSON body).
+    private func answer(kind: Kind, path: String, body: JSONValue?) -> (Int, JSONValue) {
         let s = script
         let segment = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
         let id = segment.count > 4 ? (segment[4].removingPercentEncoding ?? segment[4]) : ""
@@ -480,6 +505,38 @@ public final class FakeMealio: @unchecked Sendable {
     }
 }
 
+/// One `hold`: the work it keeps back runs when it is released.
+final class FakeHold: @unchecked Sendable {
+    private let lock = NSLock()
+    private var released = false
+    private var waiting: (() -> Void)?
+
+    /// Run `work` now if released, else on release.
+    func then(_ work: @escaping () -> Void) {
+        lock.lock()
+        if released {
+            lock.unlock()
+            work()
+            return
+        }
+        waiting = work
+        lock.unlock()
+    }
+
+    func release() {
+        lock.lock()
+        if released {
+            lock.unlock()
+            return
+        }
+        released = true
+        let work = waiting
+        waiting = nil
+        lock.unlock()
+        if let work = work { DispatchQueue.global().async { work() } }
+    }
+}
+
 /// Answers each fake's requests. Fakes are found by host name.
 final class FakeMealioURLProtocol: URLProtocol {
     private static let lock = NSLock()
@@ -506,18 +563,29 @@ final class FakeMealioURLProtocol: URLProtocol {
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
+    /// Set by stopLoading: a held answer that comes later is dropped.
+    private let stateLock = NSLock()
+    private var stopped = false
+
     override func startLoading() {
         let url = request.url
         let data = request.httpBody ?? FakeMealioURLProtocol.read(request.httpBodyStream)
         let json = data.flatMap { JSONValue.parse($0) }
-        let result: (Int, JSONValue)
-        if let host = url?.host, let fake = FakeMealioURLProtocol.fake(for: host) {
-            result = fake.answer(path: url?.path ?? "", body: json,
-                                 auth: request.value(forHTTPHeaderField: "Authorization"))
-        } else {
-            result = (404, ["error": ["code": "server", "message": "No fake Mealio at this address"]])
+        guard let host = url?.host, let fake = FakeMealioURLProtocol.fake(for: host) else {
+            finish(url, FakeMealio.noFake.0, FakeMealio.noFake.1)
+            return
         }
-        let (status, answer) = result
+        fake.receive(path: url?.path ?? "", body: json, auth: request.value(forHTTPHeaderField: "Authorization")) { status, answer in
+            // Kept until answered; stopLoading makes this a no-op.
+            self.finish(url, status, answer)
+        }
+    }
+
+    private func finish(_ url: URL?, _ status: Int, _ answer: JSONValue) {
+        stateLock.lock()
+        let gone = stopped
+        stateLock.unlock()
+        if gone { return }
         let out = (try? JSONEncoder().encode(answer)) ?? Data("{}".utf8)
         if let url = url, let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1",
                                                          headerFields: ["Content-Type": "application/json"]) {
@@ -527,7 +595,11 @@ final class FakeMealioURLProtocol: URLProtocol {
         client?.urlProtocolDidFinishLoading(self)
     }
 
-    override func stopLoading() {}
+    override func stopLoading() {
+        stateLock.lock()
+        stopped = true
+        stateLock.unlock()
+    }
 
     private static func read(_ stream: InputStream?) -> Data? {
         guard let stream = stream else { return nil }

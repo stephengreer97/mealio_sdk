@@ -80,6 +80,54 @@ describe.skipIf(!browser)('guard in Chromium', () => {
     });
   });
 
+  it('guards a same-origin frame used in the same tick, whichever DOM call added it', async () => {
+    const out = await run(`
+      // Each frame lands last in the page, so it is window[window.length - 1],
+      // reached without touching the element (whose getters are hooked).
+      const last = () => window[window.length - 1];
+      const box = () => { const b = document.createElement('div'); document.body.appendChild(b); return b; };
+      const frame = () => document.createElement('iframe');
+      const send = () => t(() => last().fetch('/checkout/same-tick', { method: 'POST' }));
+      const r = {};
+      document.body.append(frame()); r.append = await send();
+      box().prepend(frame()); r.prepend = await send();
+      { const b = box(), s = document.createElement('span'); b.appendChild(s); s.before(frame()); } r.before = await send();
+      { const b = box(), s = document.createElement('span'); b.appendChild(s); s.after(frame()); } r.after = await send();
+      { const b = box(), s = document.createElement('span'); b.appendChild(s); s.replaceWith(frame()); } r.replaceWith = await send();
+      { const b = box(), s = document.createTextNode('x'); b.appendChild(s); s.after(frame()); } r.textAfter = await send();
+      box().replaceChildren(frame()); r.replaceChildren = await send();
+      document.body.insertAdjacentElement('beforeend', frame()); r.insertAdjacentElement = await send();
+      box().insertAdjacentHTML('beforeend', '<iframe></iframe>'); r.insertAdjacentHTML = await send();
+      { const b = box(), s = document.createElement('span'); b.appendChild(s); s.insertAdjacentHTML('afterend', '<iframe></iframe>'); } r.adjacentAfterEnd = await send();
+      box().innerHTML = '<p><iframe></iframe></p>'; r.innerHTML = await send();
+      { const b = box(), s = document.createElement('span'); b.appendChild(s); s.outerHTML = '<iframe></iframe>'; } r.outerHTML = await send();
+      { const f = document.createDocumentFragment(); f.appendChild(document.createElement('p')).appendChild(frame()); box().append(f); } r.fragment = await send();
+      { const f = document.createDocumentFragment(); f.appendChild(frame()); document.body.appendChild(f); } r.fragmentAppendChild = await send();
+      return r;
+    `);
+    const want = Object.fromEntries(Object.keys(out).map((k) => [k, 'blocked_path']));
+    expect(Object.keys(out)).toHaveLength(14);
+    expect(out).toEqual(want);
+    expect(reached.filter((p) => p.includes('same-tick'))).toEqual([]);
+  });
+
+  it('Worker.prototype.constructor is the guarded constructor', async () => {
+    const out = await run(`
+      const src = 'fetch("https://www.heb.com/checkout/ctor", { method: "POST" })';
+      const blob = () => URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+      const r = {
+        worker: await t(() => new Worker.prototype.constructor(blob())),
+        shared: await t(() => new SharedWorker.prototype.constructor(blob())),
+        viaProto: await t(() => new (Object.getPrototypeOf(new Worker('/w.js')).constructor)(blob())),
+        same: Worker.prototype.constructor === Worker && SharedWorker.prototype.constructor === SharedWorker,
+      };
+      await new Promise((res) => setTimeout(res, 300));
+      return r;
+    `);
+    expect(out).toEqual({ worker: 'blocked_worker', shared: 'blocked_worker', viaProto: 'blocked_worker', same: true });
+    expect(reached.filter((p) => p.includes('ctor'))).toEqual([]);
+  });
+
   it('refuses blob: and data: workers, in the page and in a frame, and allows the store\'s own', async () => {
     const out = await run(`
       const src = 'fetch("https://www.heb.com/checkout/w", { method: "POST" })';
@@ -95,6 +143,35 @@ describe.skipIf(!browser)('guard in Chromium', () => {
       };
     `);
     expect(out).toEqual({ blob: 'blocked_worker', data: 'blocked_worker', shared: 'blocked_worker', frame: 'blocked_worker', own: 'store worker', isWorker: true });
+  });
+
+  // The DOM hooks reach a frame only once the page touches it; a frame's own
+  // first script runs before that. So every SDK also injects the guard into
+  // every frame at document start (here: Playwright's init script, which runs
+  // in every frame like the platforms' all-frames user scripts).
+  it('needs the document-start injection in every frame for a frame\'s own first script', async () => {
+    const hits = async (allFrames: boolean) => {
+      const ctx = await browser.newContext();
+      const got: string[] = [];
+      if (allFrames) await ctx.addInitScript(GUARD_SCRIPT);
+      const top = allFrames ? '' : `<script>${GUARD_SCRIPT}</script>`; // main frame only
+      await ctx.route('https://www.heb.com/**', async (r: any) => {
+        const u = new URL(r.request().url());
+        if (u.pathname === '/') return r.fulfill({ status: 200, contentType: 'text/html', body: `<html><head>${top}</head><body><iframe src="/hop"></iframe></body></html>` });
+        // A second navigation: the first one reuses the frame's about:blank window.
+        if (u.pathname === '/hop') return r.fulfill({ status: 200, contentType: 'text/html', body: '<script>location.replace("/inner")</script>' });
+        if (u.pathname === '/inner') return r.fulfill({ status: 200, contentType: 'text/html', body: '<script>fetch("/checkout/first", { method: "POST" }).catch(function () {});</script>' });
+        got.push(u.pathname);
+        return r.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
+      });
+      const p = await ctx.newPage();
+      await p.goto('https://www.heb.com/');
+      await p.waitForTimeout(800);
+      await ctx.close();
+      return got;
+    };
+    expect(await hits(false)).toEqual(['/checkout/first']);
+    expect(await hits(true)).toEqual([]);
   });
 
   it('reads BOM JSON and raw multipart text', async () => {

@@ -15,5 +15,5 @@ export default defineConfig({
       { find: /^react-native-webview$/, replacement: path.join(here, 'test/stubs/webview.tsx') },
     ],
   },
-  test: { include: ['test/**/*.test.{ts,tsx}'], testTimeout: 15000, server: { deps: { inline: [/react-test-renderer/] } } },
+  test: { include: ['test/**/*.test.{ts,tsx}'], setupFiles: ['test/setup.ts'], testTimeout: 15000, server: { deps: { inline: [/react-test-renderer/] } } },
 });

@@ -44,7 +44,7 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: gradle/actions/setup-gradle@v3
-      - run: ./gradlew :mealio-sdk:testDebugUnitTest :mealio-sdk:assembleRelease :mealio-sdk-compose:assembleRelease
+      - run: ./gradlew testDebugUnitTest assembleRelease
       # The Maven Central artifacts (AAR, sources, javadoc, POM), unsigned, to the local repo.
       - run: ./gradlew publishToMavenLocal
 

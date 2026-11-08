@@ -1,5 +1,24 @@
 ## Unreleased
 
+- `restorePicks` re-runs the search that found the picked product, not the
+  item's last search, and never throws: it ends with what it could restore.
+  A cancel from outside the sheet during it still starts the sheet again.
+- A cancelled prepare, search or warm-up settles at once, without waiting for
+  its HTTP request to answer, and the queue moves on.
+- `runExclusive`'s `CancelToken` fires at 30 seconds, when the caller gets
+  `network`, as in the TypeScript core.
+- `sdkCoreVersion` is 0.6.0.
+- Guard: multipart field names match quoted, single-quoted or bare
+  (`name=operations`). `Worker.prototype.constructor` and
+  `SharedWorker.prototype.constructor` are the guarded constructors. Frames
+  added with `append`, `prepend`, `before`, `after`, `replaceWith`,
+  `replaceChildren`, `insertAdjacentElement`, `insertAdjacentHTML`,
+  `innerHTML` and `outerHTML` get the guard at once. webview_flutter cannot
+  inject a script into subframes at document start (see the README).
+- Testing kit: `MealioFakeScript.fromJson` reads the TypeScript kit's script
+  JSON; protocol/fake-script.json runs in the tests. A request held with
+  `fake.hold` never times out.
+
 - `restorePicks` is async: a pick the user found with search is searched again
   on the new cart and kept only if it comes back. A product the new cart was
   not offered is never sent.

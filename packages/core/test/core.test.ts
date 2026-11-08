@@ -594,6 +594,23 @@ describe('security: request bodies and the runner fetch op', () => {
     for (const v of (vectors as any).blockedBodies) expect(bodyBlocked(v.body)).toBe(v.blocked);
   });
 
+  it('judges the JSON strictness vectors as JSON.parse reads them', () => {
+    const list = (vectors as any).jsonBodies as { rule: string; body: string; blocked: boolean }[];
+    expect(new Set(list.map((v) => v.rule))).toEqual(new Set(['depth', 'hex', 'surrogate']));
+    for (const v of list) expect(bodyBlocked(v.body), `${v.rule}: ${v.body.slice(0, 60)}`).toBe(v.blocked);
+  });
+
+  it('reads a multipart part whatever quotes its name has (round 4)', () => {
+    const part = (name: string, value: string) => `--b\r\nContent-Disposition: form-data; name=${name}\r\n\r\n${value}\r\n--b--`;
+    const m = JSON.stringify({ query: 'mutation { placeOrder { id } }' });
+    for (const q of ['"', "'", '']) {
+      expect(bodyBlocked(part(`${q}operations${q}`, m))).toBe(true);
+      expect(bodyBlocked(part(`${q}query${q}`, 'mutation { placeOrder { id } }'))).toBe(true);
+      expect(bodyBlocked(part(`${q}operationName${q}`, 'PlaceOrder'))).toBe(true);
+      expect(bodyBlocked(part(`${q}operationsX${q}`, m))).toBe(false);
+    }
+  });
+
   it('refuses a signed fetch whose body names an order, before it leaves the device', async () => {
     const host = fakeHost();
     const runner = new Runner(host, new Allowlist(), KEYS);

@@ -86,7 +86,7 @@ class MealioNativeBridge internal constructor(private val onPost: (String) -> Un
  * dropped. Older WebViews fall back to the JavascriptInterface.
  */
 @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface", "RequiresFeature")
-internal fun configureMealioWebView(wv: WebView, bridge: MealioNativeBridge): MealioWebViewSetup {
+internal fun configureMealioWebView(wv: WebView, bridge: MealioNativeBridge, allowlist: Allowlist = Allowlist()): MealioWebViewSetup {
     val s = wv.settings
     s.javaScriptEnabled = true
     s.domStorageEnabled = true
@@ -115,14 +115,51 @@ internal fun configureMealioWebView(wv: WebView, bridge: MealioNativeBridge): Me
     }
     val docStart = if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
         // VERIFY: "*" is accepted as an allowed-origin rule meaning every origin
-        // (androidx.webkit docs say so); the returned ScriptHandler is not kept
-        // because the script lives as long as the WebView.
-        WebViewCompat.addDocumentStartJavaScript(wv, bootstrap, setOf("*"))
+        // (androidx.webkit docs say so); the returned ScriptHandlers are not kept
+        // because the scripts live as long as the WebView. They run in every
+        // frame whose origin matches, iframes included, before the page's own
+        // scripts, in the order added.
+        for ((script, rules) in documentStartScripts(bootstrap, allowlist)) {
+            WebViewCompat.addDocumentStartJavaScript(wv, script, rules)
+        }
         true
     } else {
+        // An older WebView: the bootstrap goes in from onPageStarted, and the
+        // guard only with each script (runScript, the sign-in check), in the
+        // main frame; its DOM hooks reach same-origin frames from there.
         false
     }
     return MealioWebViewSetup(docStart, bootstrap)
+}
+
+/**
+ * What goes into every frame at document start, with its allowed-origin rules:
+ * the bridge bootstrap everywhere, then GUARD_SCRIPT on the stores' own hosts
+ * (and their sign-in hosts) so it is in place in each store frame, iframes
+ * included, before any of the store's scripts run. The in-page hooks in the
+ * guard stay as a second layer.
+ */
+internal fun documentStartScripts(bootstrap: String, allowlist: Allowlist = Allowlist()): List<Pair<String, Set<String>>> =
+    listOf(bootstrap to setOf("*"), GUARD_SCRIPT to guardOriginRules(allowlist))
+
+/**
+ * Allowed-origin rules (androidx.webkit form `scheme://[*.]host`) for every
+ * store's hosts and sign-in hosts. By registrable domain, so a host a signed
+ * widening adds later (same registrable domain, see Allowlist.widen) is
+ * covered too. Both the bare domain and its subdomains.
+ */
+internal fun guardOriginRules(allowlist: Allowlist = Allowlist()): Set<String> {
+    val domains = sortedSetOf<String>()
+    for (store in STORES.keys) {
+        val h = allowlist.hostsFor(store) ?: continue
+        for (host in h.hosts + h.authHosts) domains.add(registrableDomain(host))
+    }
+    val out = LinkedHashSet<String>()
+    for (d in domains) {
+        out.add("https://$d")
+        out.add("https://*.$d")
+    }
+    return out
 }
 
 private suspend fun <T> onMain(block: () -> T): T = withContext(Dispatchers.Main) { block() }
@@ -169,7 +206,7 @@ class WebViewHost(context: Context) : Host {
     private fun ensureWebView(): WebView {
         webView?.let { return it }
         val wv = WebView(appContext)
-        val setup = configureMealioWebView(wv, MealioNativeBridge { raw -> sink?.trySend(raw) })
+        val setup = configureMealioWebView(wv, MealioNativeBridge { raw -> sink?.trySend(raw) }, allowlist)
         docStartScript = setup.docStartScript
         bootstrap = setup.bootstrap
         wv.webViewClient = HiddenClient()

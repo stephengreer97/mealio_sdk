@@ -317,7 +317,7 @@ describe('blocked mutations', () => {
 
   it('the guard refuses every shared blocked body, and passes the rest', async () => {
     const { win } = guard();
-    for (const v of (vectors as any).blockedBodies) {
+    for (const v of [...(vectors as any).blockedBodies, ...(vectors as any).jsonBodies]) {
       if (!v.body) continue;
       expect(await outcome(win.fetch('/graphql', { method: 'POST', body: v.body })), v.body).toBe(v.blocked ? 'refused' : 'sent');
     }

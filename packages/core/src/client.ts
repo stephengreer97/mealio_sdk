@@ -9,7 +9,7 @@ import type {
   AddedItem, AddResult, AllowlistPayload, CartItem, CartWarning, Envelope, Instruction, ItemRecipe, PreparedCart, PrepareCartInput, Product, SearchResult, Selection, StepRequest, StoreInfo, StoreLocation, StorePreferences,
 } from './protocol';
 
-export const SDK_CORE_VERSION = '0.2.0';
+export const SDK_CORE_VERSION = '0.6.0';
 export const DEFAULT_BASE_URL = 'https://mealio.co';
 
 export type MealioErrorCode =
@@ -617,8 +617,8 @@ export class CartSession {
   private lb = new Map<string, number>();
   private adding: Promise<AddResult> | null = null;
   private searches = new Set<CancelToken>();
-  /** Each item's last search that answered, for restorePicks on a new cart. */
-  private queries = new Map<string, string>();
+  /** Per item, per product found with search(): the query that found it, for restorePicks on a new cart. */
+  private foundBy = new Map<string, Map<string, string>>();
 
   constructor(private client: MealioClient, public readonly cart: PreparedCart) {
     for (const it of this.items) {
@@ -775,13 +775,17 @@ export class CartSession {
    *
    * A product the user found with search() is known to the server only on the
    * cart it was found in, so it is never sent to this cart directly. Instead
-   * that item's last search runs again on this cart (it counts toward the
-   * search cap), and the product is picked if it comes back. If it does not,
-   * or the search fails, the item keeps this cart's own pick.
+   * the search that found the picked product (not merely the item's last
+   * search) runs again on this cart (it counts toward the search cap), and the
+   * product is picked if it comes back. If it does not, or the search fails,
+   * the item keeps this cart's own pick.
    *
    * Everything except those searches is done before this returns; the promise
-   * resolves when the searches end. It never rejects. Pass `cancel` to stop
-   * the searches (closing the screen).
+   * resolves when the searches end. It never rejects: it ends with whatever it
+   * could restore. Pass `cancel` to stop the searches (closing the screen).
+   * cancelJobs and setUser cancel that same token, so check
+   * `cancel.cancelled` afterwards: a cancel from outside is not a finished
+   * restore, and the caller handles it like any other cancelled job.
    */
   async restorePicks(from: CartSession, opts: { cancel?: CancelToken } = {}): Promise<void> {
     if (from.store !== this.store) return;
@@ -791,8 +795,8 @@ export class CartSession {
       const productId = from.selectedId(it.key);
       if (!productId) { this.deselect(it.key); continue; }
       if (this.options(it.key).some((p) => p.id === productId)) { this.takePick(from, it.key, productId); continue; }
-      const query = from.queries.get(it.key);
-      if (query && (from.extra.get(it.key) || []).some((p) => p.id === productId)) again.push({ key: it.key, productId, query });
+      const query = from.foundBy.get(it.key)?.get(productId);
+      if (query) again.push({ key: it.key, productId, query });
     }
     for (const a of again) {
       if (opts.cancel?.cancelled) return;
@@ -804,7 +808,7 @@ export class CartSession {
   /** Select `productId` (offered on this cart) with `from`'s preference, quantity and weight for it. */
   private takePick(from: CartSession, key: string, productId: string): void {
     const product = this.options(key).find((p) => p.id === productId);
-    if (!product) return;
+    if (!product || !this.find(key)) return;
     const pref = from.preferenceId(key);
     this.select(key, productId, { preferenceId: product.preferences?.some((p) => p.id === pref) ? pref : null });
     if (from.qty.has(key)) this.setQuantity(key, from.qty.get(key) as number);
@@ -828,7 +832,9 @@ export class CartSession {
       const prev = this.extra.get(key) || [];
       const seen = new Set(prev.map((p) => p.id));
       this.extra.set(key, [...r.options.filter((p) => !seen.has(p.id)), ...prev]);
-      this.queries.set(key, query);
+      const by = this.foundBy.get(key) ?? new Map<string, string>();
+      for (const p of r.options) if (!by.has(p.id)) by.set(p.id, query);
+      this.foundBy.set(key, by);
       return r.options;
     } finally {
       this.searches.delete(cancel);

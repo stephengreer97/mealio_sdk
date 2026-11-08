@@ -45,10 +45,34 @@ Future<Envelope> signMealioTestEnvelope(String job, int seq, String store, List<
 /// without, the job starts and then fails with it.
 class MealioFakeError {
   const MealioFakeError(this.code, {this.message, this.status});
+
+  /// From the TypeScript kit's JSON: a code, or `{code, message?, status?}`.
+  factory MealioFakeError.fromJson(Object? json) {
+    if (json is String) return MealioFakeError(json);
+    final m = _map(json, 'error');
+    return MealioFakeError(
+      m['code']! as String,
+      message: m['message'] as String?,
+      status: (m['status'] as num?)?.toInt(),
+    );
+  }
+
   final String code;
   final String? message;
   final int? status;
 }
+
+Map<String, Object?> _map(Object? json, String what) {
+  if (json is Map) return json.cast<String, Object?>();
+  throw FormatException('MealioFakeScript: $what must be an object');
+}
+
+List<Object?> _listOf(Object? json, String what) {
+  if (json is List) return json;
+  throw FormatException('MealioFakeScript: $what must be a list');
+}
+
+List<Product> _products(Object? json, String what) => _listOf(json, what).map(Product.fromJson).toList();
 
 /// One line of a cart script.
 class MealioFakeItem {
@@ -65,6 +89,24 @@ class MealioFakeItem {
     this.recipes,
     this.unavailable,
   });
+
+  /// From the TypeScript kit's JSON (`FakeItem`), with its field names.
+  factory MealioFakeItem.fromJson(Object? json) {
+    final m = _map(json, 'item');
+    return MealioFakeItem(
+      key: m['key']! as String,
+      ingredient: m['ingredient'] as String?,
+      quantity: (m['quantity'] as num?)?.toInt(),
+      options: m['options'] == null ? const <Product>[] : _products(m['options'], 'options'),
+      remembered: m['remembered'] as String?,
+      rememberedPreferenceId: m['rememberedPreferenceId'] as String?,
+      rememberedUnavailable: m['rememberedUnavailable'] == true,
+      startUnchecked: m['startUnchecked'] == true,
+      weightLb: (m['weightLb'] as num?)?.toDouble(),
+      recipes: m['recipes'] == null ? null : _listOf(m['recipes'], 'recipes').map(ItemRecipe.fromJson).toList(),
+      unavailable: m['unavailable'] as String?,
+    );
+  }
 
   final String key;
   final String? ingredient;
@@ -116,6 +158,47 @@ class MealioFakeScript {
     this.locations = const <StoreLocation>[],
     this.warm = const MealioFakeWarm(signedIn: true),
   });
+
+  /// The script format of `createFakeMealio` (`@mealio/sdk-core/testing`)
+  /// and Swift's `FakeMealio(json:)`, with the same field names, as decoded
+  /// JSON (`jsonDecode(text)`). `add` is `{"fail": error}`; an error is a code
+  /// or `{"code", "message", "status"}`; `"warm": null` means nothing to warm.
+  /// `onSearch` and `onAdd` are functions and have no JSON form. Loads
+  /// protocol/fake-script.json, the script every platform's kit runs.
+  factory MealioFakeScript.fromJson(Object? json) {
+    final m = _map(json, 'script');
+    const known = <String>{
+      'store', 'storeName', 'items', 'recipes', 'warnings', 'search', 'add', 'signIn',
+      'errors', 'stores', 'preferences', 'locations', 'warm',
+    };
+    for (final String k in m.keys) {
+      if (!known.contains(k)) throw FormatException('MealioFakeScript: unknown field "$k"');
+    }
+    final add = m['add'];
+    return MealioFakeScript(
+      store: m['store'] as String?,
+      storeName: m['storeName'] as String?,
+      items: m['items'] == null ? const <MealioFakeItem>[] : _listOf(m['items'], 'items').map(MealioFakeItem.fromJson).toList(),
+      recipes: m['recipes'] == null ? null : _listOf(m['recipes'], 'recipes').map(CartRecipe.fromJson).toList(),
+      warnings: m['warnings'] == null ? const <CartWarning>[] : _listOf(m['warnings'], 'warnings').map(CartWarning.fromJson).toList(),
+      search: m['search'] == null
+          ? const <String, List<Product>>{}
+          : _map(m['search'], 'search').map((String q, Object? v) => MapEntry<String, List<Product>>(q, _products(v, 'search'))),
+      addFailure: add == null ? null : MealioFakeError.fromJson(_map(add, 'add')['fail']),
+      signIn: m['signIn'] as String?,
+      errors: m['errors'] == null
+          ? const <String, MealioFakeError>{}
+          : _map(m['errors'], 'errors').map((String k, Object? v) => MapEntry<String, MealioFakeError>(k, MealioFakeError.fromJson(v))),
+      stores: m['stores'] == null ? null : _listOf(m['stores'], 'stores').map(StoreInfo.fromJson).toList(),
+      preferences: m['preferences'] == null ? null : StorePreferences.fromJson(m['preferences']),
+      locations: m['locations'] == null ? const <StoreLocation>[] : _listOf(m['locations'], 'locations').map(StoreLocation.fromJson).toList(),
+      warm: !m.containsKey('warm')
+          ? const MealioFakeWarm(signedIn: true)
+          : m['warm'] == null
+              ? null
+              : MealioFakeWarm(signedIn: _map(m['warm'], 'warm')['signedIn'] == true),
+    );
+  }
 
   String? store;
   String? storeName;
@@ -223,7 +306,7 @@ class _Job {
 class MealioFake {
   MealioFake([MealioFakeScript? script]) : script = script ?? MealioFakeScript() {
     host = _FakeHost(this);
-    httpClient = MockClient(_handle);
+    httpClient = _HoldingHttp(this, MockClient(_handle));
   }
 
   /// The script in force. Change it, or its fields, between calls.
@@ -285,6 +368,13 @@ class MealioFake {
   List<Product> offered(String cartId) => List<Product>.of(_carts[cartId]?.offered ?? const <Product>[]);
 
   /// Hold the next request of this kind until the returned function is called.
+  ///
+  /// While a request is held, no request times out: the client's 30-second
+  /// limit counts only time Mealio would take to answer. A widget test can
+  /// therefore pump for as long as it likes. `pumpAndSettle` still never
+  /// returns while the sheet shows its loading spinner, so pump a few frames
+  /// (`tester.pump(const Duration(milliseconds: 100))`) instead until you
+  /// release it.
   void Function() hold(String kind) {
     final c = Completer<void>();
     (_holds[kind] ??= <Future<void>>[]).add(c.future);
@@ -548,9 +638,34 @@ class MealioFake {
     final kind = _kindOf(path);
     requests.add(MealioFakeRequest(kind, path, body, auth?.replaceFirst('Bearer ', '')));
     final held = _holds[kind];
-    if (held != null && held.isNotEmpty) await held.removeAt(0);
+    if (held != null && held.isNotEmpty) {
+      _holding += 1;
+      try {
+        await held.removeAt(0);
+      } finally {
+        _holding -= 1;
+      }
+    }
     return _answer(kind, path, body);
   }
+
+  int _holding = 0;
+}
+
+/// The fake server's http.Client: tells the client when a request is held.
+class _HoldingHttp extends http.BaseClient implements MealioHoldingClient {
+  _HoldingHttp(this._fake, this._inner);
+  final MealioFake _fake;
+  final http.Client _inner;
+
+  @override
+  int get holding => _fake._holding;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) => _inner.send(request);
+
+  @override
+  void close() => _inner.close();
 }
 
 class _FakeHost implements MealioHost, MealioPageReset {

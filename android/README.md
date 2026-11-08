@@ -47,6 +47,7 @@ MealioStoreSettings(visible = open, onClose = { open = false })
 | --- | --- |
 | `mealio-sdk` | The core: protocol, signature checks, allowlist, guard script, runner, client, cart session, WebView host, login screen. No Compose. |
 | `mealio-sdk-compose` | The drop-in: `MealioCartButton`, `MealioCartFlow`, `MealioCartList`, `MealioStoreSettings`, `MealioTheme`, `MealioThemeProvider`. |
+| `mealio-sdk-testing` | Tests only (`testImplementation`): `FakeMealio`, a scripted Mealio for JVM and Robolectric tests. See Testing your screens. |
 
 minSdk 24, compileSdk 34, Java 17, Kotlin 1.9.
 
@@ -557,9 +558,16 @@ Advanced: `MealioClient(config, host, transport)` lets you supply your own
 `MealioCartFlow` receives the sign-in WebView; a custom sheet can attach to
 it the same way.
 
-## Testing your screens: `co.mealio.sdk.testing`
+## Testing your screens: `co.mealio:mealio-sdk-testing`
 
-The main artifact ships a scripted fake Mealio, so your JVM and Robolectric
+A separate artifact, for tests only, so none of it can ship in a release app:
+
+```kotlin
+testImplementation("co.mealio:mealio-sdk-testing:0.6.0")
+testImplementation("org.json:json:20231013") // android.jar's org.json is a stub on the JVM
+```
+
+It is a scripted fake Mealio (package `co.mealio.sdk.testing`), so your JVM and Robolectric
 tests run the **real** `MealioClient`, `CartSession`, `MealioCart` and drop-in
 sheet with no network and no reflection. Scripts are the same plain data as
 `@mealio/sdk-core/testing` (`createFakeMealio`). It signs with the protocol
@@ -590,6 +598,7 @@ FakeMealio.uninstall()                          // in @After
 
 | | |
 |---|---|
+| `FakeMealio.fromJson(json)`, `FakeScript.fromJson(json)` | a script as JSON with the TypeScript field names, the same text `createFakeMealio` and Swift's `FakeMealio(json:)` take (`signIn: "cancelled"`, `errors: {"search": "network"}`, `add: {"fail": ...}`, `warm: {"signedIn": false}` or `null`). `protocol/fake-script.json` is one every kit runs |
 | `FakeScript` | `store`, `storeName`, `items`, `recipes`, `warnings`, `search` (query to products) or `searchWith`, `add` or `addFail`, `signIn` (a `LoginOutcome`, null = already signed in), `errors` (by `FakeKind`: `PREPARE`, `SEARCH`, `ADD`, `WARM`, `STORES`, `PREFERENCES`, `LOCATIONS`, `SESSION`), `stores`, `preferences`, `locations`, `warmSignedIn` |
 | `FakeItem` | `key`, `options`, `remembered`, `ingredient`, `quantity`, `rememberedPreferenceId`, `rememberedUnavailable`, `startUnchecked`, `weightLb`, `recipes`, `unavailable` |
 | `FakeError(code, message?, status?)` | with `status`: an HTTP error; without: a job that fails with `code` |
@@ -632,12 +641,12 @@ The Gradle wrapper jar is not checked in. In GitHub Actions:
 - uses: android-actions/setup-android@v3
 - uses: gradle/actions/setup-gradle@v3
   with: { gradle-version: "8.7" }
-- run: gradle :mealio-sdk:testDebugUnitTest :mealio-sdk:assembleRelease :mealio-sdk-compose:assembleRelease
+- run: gradle testDebugUnitTest assembleRelease
   working-directory: android
 ```
 
 Locally, run `gradle wrapper --gradle-version 8.7` once in `android/` and then
-`./gradlew :mealio-sdk:testDebugUnitTest :mealio-sdk:assembleRelease :mealio-sdk-compose:assembleRelease`.
+`./gradlew testDebugUnitTest assembleRelease` (every module: mealio-sdk, mealio-sdk-compose, mealio-sdk-testing).
 
 The unit tests run on the JVM (JUnit 4):
 
@@ -664,4 +673,8 @@ The unit tests run on the JVM (JUnit 4):
   against `guard-expected.js` / `bridge-expected.js`, which are the exact
   strings `packages/core/src/guard.ts` produces. If `guard.ts` changes,
   regenerate those two files from it, and copy `protocol/test-vectors.json`
-  again when the vectors change.
+  again when the vectors change. Where the WebView has DOCUMENT_START_SCRIPT, the guard is also
+  added with `addDocumentStartJavaScript` for every frame on the stores' hosts,
+  so it runs in iframes before the store's own scripts. Older WebViews keep
+  the per-script injection only (main frame, its DOM hooks reaching
+  same-origin frames).

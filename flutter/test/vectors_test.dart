@@ -51,6 +51,13 @@ void main() {
       }
     });
 
+    test('JSON bodies: read exactly as JSON.parse reads them (depth, hex, surrogate)', () {
+      for (final Map<String, Object?> c in vectorList('jsonBodies')) {
+        final body = c['body']! as String;
+        expect(bodyBlocked(body), c['blocked'], reason: '${c['rule']}: ${body.length > 120 ? body.substring(body.length - 120) : body}');
+      }
+    });
+
     test('parses only plain host names: no userinfo, backslash or spaces', () {
       expect(parseUrl('https://www.heb.com:x@evil.com/'), isNull);
       expect(parseUrl(r'https://evil.com\.heb.com/'), isNull);

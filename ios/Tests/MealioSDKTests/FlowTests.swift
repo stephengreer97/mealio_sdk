@@ -335,6 +335,55 @@ final class FlowTests: XCTestCase {
         model.close { _ in }
     }
 
+    /// Round 4: restorePicks never throws, so the flow checks its token. A
+    /// cancel from outside the sheet while it ran restarts like any other.
+    @MainActor
+    func testAnOutsideCancelDuringRestorePicksRestartsTheCartAndThePickStillComesBack() async throws {
+        defer { reset() }
+        let server = JobServer()
+        let cart = try newCart()
+        let failed = problem("boom")
+        let found: JSONValue = ["key": "garlic", "query": "jar", "options": [["id": "s1", "name": "Jar"]]]
+        StubURLProtocol.handler = { req, body in
+            server.rec.record(req, body: body)
+            let path = req.url?.path ?? ""
+            if path.hasSuffix("/add") { return failed }
+            if path.hasSuffix("/search") { return server.start([jobsOpen("o"), jobsDone(found)]) }
+            return server.start([jobsDone(cart)])
+        }
+        let host = ScriptedHost()
+        var opens = 0
+        host.open = { url in
+            opens += 1
+            // The second search is restorePicks' own, after Try again: cancel
+            // it from outside, as signOutOfStore does.
+            if opens == 2 { MealioCart.client?.cancelJobs() }
+            return PageOpenOutcome(ok: true, finalUrl: url)
+        }
+        configure(host)
+        var errors = 0
+        let model = MealioFlowModel()
+        model.open(recipes: [recipe], store: "heb", zip: nil, onAdded: nil, onError: { _ in errors += 1 })
+        try await waitFor { model.phase == .list }
+        let first = try XCTUnwrap(model.cart)
+        _ = try await first.search(key: "garlic", query: "jar")
+        try first.select(key: "garlic", productId: "s1")
+        model.add()
+        try await waitFor { model.phase == .error }
+        let errorsBefore = errors
+
+        model.retry()
+        try await waitFor { model.phase == .list && opens >= 3 }
+        // Prepared three times: the first, Try again, and the restart.
+        XCTAssertEqual(server.paths.filter { $0 == "/carts" }.count, 3)
+        XCTAssertEqual(server.paths.filter { $0.hasSuffix("/search") }.count, 3)
+        XCTAssertEqual(model.cart?.selectedId(for: "garlic"), "s1")
+        XCTAssertNil(model.failedAdd)
+        XCTAssertEqual(model.restarts, 0)
+        XCTAssertEqual(errors, errorsBefore)
+        model.close { _ in }
+    }
+
     @MainActor
     func testTheAddFailedNoteIsInTheStrings() {
         XCTAssertEqual(MealioCart.text.tr(.addFailedNote), "Some items may already be in your cart. Check it before adding again.")

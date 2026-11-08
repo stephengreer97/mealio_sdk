@@ -30,7 +30,7 @@ import java.net.URLEncoder
 // drive it through step calls until done or fail, and a single retry with a
 // fresh session token on 401.
 
-const val SDK_CORE_VERSION = "0.2.0"
+const val SDK_CORE_VERSION = "0.6.0"
 const val DEFAULT_BASE_URL = "https://mealio.co"
 
 /** How long a warm-up is offered to the next prepare. The server holds the same line (WARM_TTL_MS). */
@@ -92,6 +92,13 @@ class MealioException @JvmOverloads constructor(
 /** The "cancelled" error for a job stopped by `cancel` (its reason, else "cancelled"). */
 internal fun cancelledError(cancel: CancelToken?): MealioException =
     MealioException("cancelled", "Cancelled", reason = cancel?.reason ?: CancelReason.CANCELLED)
+
+/** A job whose session was reset (resetSession) while its token was on its way. */
+internal fun userChangedError(): MealioException =
+    MealioException("cancelled", "Cancelled", reason = CancelReason.USER_CHANGED)
+
+/** How long the reset of a page left dirty (see [JobQueue]) may take before the next job starts anyway. */
+const val PAGE_RESET_MS = 10_000L
 
 /** How long [MealioClient.runExclusive] may hold the job queue, whatever its work does. */
 const val EXCLUSIVE_CAP_MS = 60_000L
@@ -395,7 +402,7 @@ class MealioClient @JvmOverloads constructor(
             token = null
             warmCancel
         }
-        w?.cancel()
+        w?.cancel(CancelReason.USER_CHANGED)
         clearWarm()
     }
 
@@ -455,6 +462,7 @@ class MealioClient @JvmOverloads constructor(
         // Owned by no caller: the lock is let go when block ends, or at the cap.
         val hold = scope.launch(start = CoroutineStart.UNDISPATCHED) {
             runLock.withLock {
+                cleanPage()
                 started.complete(Unit)
                 val work = scope.async(start = CoroutineStart.UNDISPATCHED) { block() }
                 holder.complete(work)
@@ -507,7 +515,7 @@ class MealioClient @JvmOverloads constructor(
                 // the job was over before the fetch failed.
                 if (cancel != null && cancel.cancelled) throw cancelledError(cancel)
                 if (synchronized(this) { gen != sessionGen }) {
-                    if (cancel != null) throw cancelledError(cancel)
+                    if (cancel != null) throw userChangedError()
                     continue
                 }
                 throw e
@@ -519,7 +527,7 @@ class MealioClient @JvmOverloads constructor(
                     return Pin(fresh, gen)
                 }
             }
-            if (cancel != null) throw cancelledError(cancel)
+            if (cancel != null) throw userChangedError()
         }
     }
 
@@ -635,18 +643,27 @@ class MealioClient @JvmOverloads constructor(
         }
         try {
             if (cancel != null) stopIf(cancel)
-            if (queue.dirty) {
-                queue.dirty = false
-                try {
-                    withTimeoutOrNull(REQUEST_TIMEOUT_MS) { host.resetPage() }
-                } catch (e: Throwable) {
-                    rethrowIfCancelled(e)
-                    if (e is Error) throw e
-                }
-            }
+            cleanPage()
             return block()
         } finally {
             runLock.unlock(owner)
+        }
+    }
+
+    /**
+     * Holding the queue: if exclusive work was cut off by its cap, load
+     * about:blank in the hidden page, bounded by [PAGE_RESET_MS]. A warm-up is
+     * no longer worth anything after that.
+     */
+    private suspend fun cleanPage() {
+        if (!queue.dirty) return
+        queue.dirty = false
+        runner.pageReset()
+        try {
+            withTimeoutOrNull(PAGE_RESET_MS) { host.resetPage() }
+        } catch (e: Throwable) {
+            rethrowIfCancelled(e)
+            if (e is Error) throw e
         }
     }
 

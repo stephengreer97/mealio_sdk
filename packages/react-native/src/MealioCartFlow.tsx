@@ -9,8 +9,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator, Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View,
 } from 'react-native';
-import { CancelToken } from '@mealio/sdk-core';
-import type { AddedItem, AddResult, CartItem, CartSession, MealioError, Product, MealioSheetStep, Recipe, Step, StoreInfo, StoreLocation } from '@mealio/sdk-core';
+import { CancelToken, MealioError } from '@mealio/sdk-core';
+import type { AddedItem, AddResult, CartItem, CartSession, Product, MealioSheetStep, Recipe, Step, StoreInfo, StoreLocation } from '@mealio/sdk-core';
 import { useMealio, useMealioInternal, type MealioUi } from './MealioProvider';
 import type { MealioTheme } from './theme';
 
@@ -131,6 +131,9 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
       // A product found with search is searched for again on this cart.
       if (failedAdd.current) { const from = failedAdd.current; setStep('searching'); await c.restorePicks(from, { cancel }); }
       if (run.current !== id) return;
+      // restorePicks never rejects. A cancel from outside the sheet during it
+      // (cancelJobs, a user change) is still a cancel: the same restart below.
+      if (cancel.cancelled) throw new MealioError('cancelled', 'Cancelled', cancel.reason ?? 'cancelled');
       failedAdd.current = null;
       restarts.current = 0;
       setStore(c.store); setCart(c); setPhase('list');

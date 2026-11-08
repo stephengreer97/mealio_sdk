@@ -410,7 +410,9 @@ back `maxPurchaseQuantity` or `checkoutUrl` is allowed. Strings, block strings
 check_?out|place_?order|submit_?order|confirm_?order|create_?order|purchase|payment
 ```
 
-A GraphQL multipart upload's `operations` field is judged as a JSON body.
+A GraphQL multipart upload's `operations` field is judged as a JSON body, whether the body is FormData or raw multipart text, and whatever the part name's quoting (`name="operations"`, `name='operations'` or bare). A leading byte order mark is ignored. Every SDK reads JSON exactly as `JSON.parse` does: any nesting depth, ASCII hex digits only in `\u` escapes, lone surrogates accepted. The cases are in `protocol/test-vectors.json` (`blockedBodies` and `jsonBodies`).
+
+The guard is injected at document start into every frame where the platform allows it: iOS (`WKUserScript`, all frames), Android (`addDocumentStartJavaScript`, on WebViews that support it) and React Native on iOS. Elsewhere, and as a second layer everywhere, it installs itself into same-origin frames through DOM hooks. It also refuses `blob:` and `data:` workers.
 A body that cannot be read, such as a stream, is allowed, but its path is
 still checked.
 

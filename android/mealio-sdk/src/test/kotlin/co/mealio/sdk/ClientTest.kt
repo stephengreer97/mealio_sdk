@@ -133,6 +133,8 @@ class ClientTest {
             assertEquals("android", sdk.getString("platform"))
             assertEquals(MealioCart.SDK_VERSION, sdk.getString("version"))
             assertEquals(SDK_CORE_VERSION, sdk.getString("core"))
+            // Core and SDK versions move together (scripts/check-versions.mjs).
+            assertEquals(MealioCart.SDK_VERSION, sdk.getString("core"))
             assertEquals(SUPPORTED_OPS, sdk.getJSONArray("ops").strings())
         }
         assertEquals("heb", bodies[0].getString("store"))

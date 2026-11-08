@@ -7,7 +7,7 @@ import Foundation
 /// SDK version, sent as `X-Mealio-SDK: ios/<version>` and in the `sdk` body field.
 public let MEALIO_SDK_VERSION = "0.6.0"
 /// The version of the reference core this SDK ports.
-public let SDK_CORE_VERSION = "0.2.0"
+public let SDK_CORE_VERSION = "0.6.0"
 public let DEFAULT_BASE_URL = URL(string: "https://mealio.co")!
 
 /// An error the SDK raises to the app. `code` is one of `MealioError.Code`, or

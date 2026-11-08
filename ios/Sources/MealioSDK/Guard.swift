@@ -5,7 +5,9 @@
 // from leaving the device, whatever form the body takes (string, Request, Blob,
 // form data, raw multipart text), and caps the page at 240 requests a minute.
 // It goes into every same-origin frame, and refuses workers made from blob: or
-// data: URLs.
+// data: URLs. WebViewHost also injects it into every frame at document start
+// (a WKUserScript with forMainFrameOnly false); the in-page hooks are the
+// second layer.
 //
 // Both scripts are plain ES5 so they run in every WebView. The test suite
 // compares them with text generated from the TS reference.
@@ -23,7 +25,7 @@ public enum MealioScripts {
   if (window.__mealioGuard) return;
   var BLOCK = new RegExp(\#(MealioScripts.jsStringLiteral(Allowlist.blockedPatterns.joined(separator: "|"))), 'i');
   var OPS = new RegExp(\#(MealioScripts.jsStringLiteral(MealioScripts.blockedGraphQLOperation)), 'i');
-  var PART = "name=\"(operationName|query|operations)\"[^\\r\\n]*\\r?\\n(?:[^\\r\\n]+\\r?\\n)*\\r?\\n([\\s\\S]*?)(?=\\r?\\n--|$)";
+  var PART = "name=[\"']?(operationName|query|operations)(?=[\"';\\s]|$)[^\\r\\n]*\\r?\\n(?:[^\\r\\n]+\\r?\\n)*\\r?\\n([\\s\\S]*?)(?=\\r?\\n--|$)";
   var root = window, stamps = [];
   function decoded(s) {
     for (var i = 0; i < 2; i++) s = s.replace(/%([0-9a-f]{2})/gi, function (x, h) { return String.fromCharCode(parseInt(h, 16)); });
@@ -238,6 +240,8 @@ public enum MealioScripts {
         return arguments.length > 1 ? new W(url, opts) : new W(url);
       };
       G.prototype = W.prototype;
+      // Worker.prototype.constructor must not hand back the original.
+      try { Object.defineProperty(W.prototype, 'constructor', { value: G, writable: true, configurable: true, enumerable: false }); } catch (e) {}
       w[name] = G;
     }
     guardWorker('Worker');
@@ -268,7 +272,7 @@ public enum MealioScripts {
       el.addEventListener('load', function () { intoFrame(el.contentWindow); });
     }
     function scan(n) {
-      if (!n || n.nodeType !== 1) return;
+      if (!n || (n.nodeType !== 1 && n.nodeType !== 9)) return;
       if (/^(IFRAME|FRAME|OBJECT)$/i.test(n.nodeName)) watch(n);
       if (!n.getElementsByTagName) return;
       var names = ['iframe', 'frame', 'object'], i, j, l;
@@ -277,14 +281,58 @@ public enum MealioScripts {
         for (j = 0; j < l.length; j++) watch(l[j]);
       }
     }
-    var N = w.Node, ins = ['appendChild', 'insertBefore', 'replaceChild'];
-    if (N && N.prototype) {
-      for (t = 0; t < ins.length; t++) (function (name) {
-        var o = N.prototype[name];
+    // Every way a script adds nodes in one call: a frame added this way has a
+    // window at once, before any MutationObserver runs. The nodes passed in are
+    // searched after the call, and a fragment's children are noted before it
+    // empties into the page.
+    function after(P, names) {
+      if (!P) return;
+      for (var i = 0; i < names.length; i++) (function (name) {
+        var o = P[name];
         if (typeof o !== 'function') return;
-        N.prototype[name] = function (n) { var r = o.apply(this, arguments); scan(n); return r; };
-      })(ins[t]);
+        P[name] = function () {
+          var added = [], k, j, a;
+          for (k = 0; k < arguments.length; k++) {
+            a = arguments[k];
+            if (!a || typeof a !== 'object') continue;
+            if (a.nodeType === 11) for (j = 0; j < a.childNodes.length; j++) added.push(a.childNodes[j]);
+            else added.push(a);
+          }
+          var r = o.apply(this, arguments);
+          for (k = 0; k < added.length; k++) scan(added[k]);
+          return r;
+        };
+      })(names[i]);
     }
+    var N = w.Node, El = w.Element, CD = w.CharacterData, DT = w.DocumentType, D = w.Document, DF = w.DocumentFragment;
+    var kids = ['append', 'prepend', 'replaceChildren'], sibs = ['before', 'after', 'replaceWith'];
+    after(N && N.prototype, ['appendChild', 'insertBefore', 'replaceChild']);
+    after(El && El.prototype, kids.concat(sibs, ['insertAdjacentElement']));
+    after(CD && CD.prototype, sibs);
+    after(DT && DT.prototype, sibs);
+    after(D && D.prototype, kids);
+    after(DF && DF.prototype, kids);
+    // HTML text makes frames at once as well: the element, or its parent for
+    // the text that lands beside it, is searched after.
+    var adj = El && El.prototype.insertAdjacentHTML;
+    if (typeof adj === 'function') {
+      El.prototype.insertAdjacentHTML = function (where) {
+        var up = this.parentNode, r = adj.apply(this, arguments);
+        scan(/^(beforebegin|afterend)$/i.test(String(where)) ? up : this);
+        return r;
+      };
+    }
+    // innerHTML and outerHTML make frames synchronously as well.
+    function setter(P, prop) {
+      var d = P && Object.getOwnPropertyDescriptor(P, prop);
+      if (!d || !d.set || !d.configurable) return;
+      Object.defineProperty(P, prop, {
+        configurable: true, enumerable: d.enumerable, get: d.get,
+        set: function (v) { var up = this.parentNode; d.set.call(this, v); scan(prop === 'outerHTML' ? up : this); },
+      });
+    }
+    setter(El && El.prototype, 'innerHTML');
+    setter(El && El.prototype, 'outerHTML');
     var MO = w.MutationObserver, doc = w.document;
     if (MO && doc) {
       new MO(function (records) {
