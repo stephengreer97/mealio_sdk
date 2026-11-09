@@ -85,6 +85,8 @@ internal class LoginWebController(
     private val handler = Handler(Looper.getMainLooper())
     private var docStartScript = false
     private var bootstrap = BOOTSTRAP_SCRIPT
+    /** Native network blocking for the login page: armed before each check script, off at a new main document. */
+    internal val networkBlock = NetworkBlock()
     // doneWhenUrl is a JavaScript regex source. java.util.regex reads the
     // patterns the server uses (plain URL prefixes and escapes) the same way.
     private val doneUrl: Regex? = session.request.doneWhenUrl?.takeIf { it.isNotEmpty() }
@@ -141,6 +143,7 @@ internal class LoginWebController(
         val c = session.request.check ?: return
         if (session.result.isCompleted) return
         wv.evaluateJavascript(bootstrap, null)
+        networkBlock.arm(session.request.blockHosts ?: blockHostsFor(Allowlist(), session.request.store))
         wv.evaluateJavascript(session.request.armGuard, null)
         wv.evaluateJavascript(c.script, null)
     }
@@ -160,7 +163,7 @@ internal class LoginWebController(
         return session.request.allowNavigation(url)
     }
 
-    private inner class LoginClient : BlockingWebViewClient() {
+    private inner class LoginClient : BlockingWebViewClient(networkBlock) {
         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
             if (request == null) return false
             // A blocked path, in any frame (iframes included), never loads.
@@ -171,6 +174,7 @@ internal class LoginWebController(
         }
 
         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+            newMainDocument()
             if (!docStartScript) view?.evaluateJavascript(bootstrap, null)
             // Backstop for navigations shouldOverrideUrlLoading does not see
             // (POST form submissions).

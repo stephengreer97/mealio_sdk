@@ -585,16 +585,22 @@ their password into the store's page; neither your app nor Mealio sees it.
 - **Signed instructions.** Every instruction is signed by Mealio, and the SDK
   checks every page load and fetch it makes against its own allowlist and
   blocked paths.
-- **Native network blocking.** Both WebViews carry a `WKContentRuleList` that
-  blocks every request the store page makes, in every frame and of every kind
-  (pages, frames, fetch, XHR, form posts), whose path or query names
-  checkout, payment, billing, a wallet, a gift card, placing or confirming an
-  order, or changing the account's password or addresses. A path or query
-  that percent-encodes a letter, `-` or `_` is blocked too, since a server
-  could decode it into one of those. WebKit applies the list outside the
-  page, so page code cannot turn it off. It is compiled once when you call
-  `configure`; pages wait for it (at most 10 seconds), and if it cannot be
-  compiled every job fails with `unsupported` rather than run without it.
+- **Native network blocking: store hosts only, while Mealio drives the
+  page.** A `WKContentRuleList` blocks every request to the store's own hosts
+  (and their subdomains, from the SDK's allowlist with any signed widening),
+  in every frame and of every kind (pages, frames, images, fetch, XHR, form
+  posts), whose path or query names checkout, payment, billing, a wallet, a
+  gift card, placing or confirming an order, or changing the account's
+  password or addresses. A path or query that percent-encodes a letter, `-`
+  or `_` is blocked too, since a server could decode it into one of those.
+  Requests to any other host (a payment or captcha frame) are never blocked
+  by it. It goes on the hidden WebView right before Mealio's first script
+  for a page, and on the sign-in sheet before each sign-in check, and comes
+  off when the page loads a new document; the store page's own loading
+  before that is never blocked. WebKit applies the list outside the page, so
+  page code cannot turn it off. Each store's list is compiled once (pages
+  wait for it, at most 10 seconds), and if WebKit cannot compile it every
+  job fails with `unsupported` rather than run without it.
 - **The in-page guard** is defense in depth only. It also stops requests whose
   body names a checkout or order mutation, and caps the page's request rate,
   but code already running in the store page can defeat any in-page check.

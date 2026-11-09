@@ -1,5 +1,5 @@
-// 0.6 round 6: the native block list's filters, jobs refused without it, and
-// the linear multipart scan. Platform-neutral: runs with `swift test`. The
+// 0.6 round 6: the native block list's filters (round 7: on the store's own
+// hosts only), jobs refused without it, and the linear multipart scan. Platform-neutral: runs with `swift test`. The
 // block list itself, in a real WKWebView, is in GuardBrowserTests.
 
 import Foundation
@@ -49,18 +49,22 @@ final class Round6Tests: XCTestCase {
 
     // MARK: the block list's url-filters
 
+    /// The filters of H-E-B's list (its own host, heb.com).
+    private let hebFilters = NetworkBlock.urlFilters(hosts: ["heb.com"])
+
     /// Blocked by some filter, read as WebKit reads a url-filter (no `|`,
     /// case-insensitive, matched anywhere unless anchored).
-    private func filtered(_ url: String) -> Bool {
-        NetworkBlock.urlFilters.contains { f in
+    private func filtered(_ url: String, hosts: [String]? = nil) -> Bool {
+        let filters = hosts.map { NetworkBlock.urlFilters(hosts: $0) } ?? hebFilters
+        return filters.contains { f in
             let re = try! NSRegularExpression(pattern: f, options: [.caseInsensitive])
             return re.firstMatch(in: url, options: [], range: NSRange(location: 0, length: (url as NSString).length)) != nil
         }
     }
 
     func testEveryFilterIsOneWebKitAccepts() {
-        XCTAssertFalse(NetworkBlock.urlFilters.isEmpty)
-        for f in NetworkBlock.urlFilters {
+        XCTAssertFalse(hebFilters.isEmpty)
+        for f in hebFilters {
             XCTAssertFalse(f.contains("|"), "WebKit has no disjunction: \(f)")
             XCTAssertFalse(f.contains("{"), "WebKit has no counted quantifier: \(f)")
             XCTAssertTrue(f.unicodeScalars.allSatisfy { $0.isASCII }, f)
@@ -70,15 +74,46 @@ final class Round6Tests: XCTestCase {
             XCTAssertNoThrow(try NSRegularExpression(pattern: f, options: []), f)
         }
         // The JSON WebKit compiles: one block rule per filter.
-        let data = Data(NetworkBlock.ruleListJSON.utf8)
+        let data = Data(NetworkBlock.ruleListJSON(hosts: ["heb.com"]).utf8)
         let rules = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]]
-        XCTAssertEqual(rules?.count, NetworkBlock.urlFilters.count)
+        XCTAssertEqual(rules?.count, hebFilters.count)
         let first = rules?.first
         XCTAssertEqual((first?["action"] as? [String: Any])?["type"] as? String, "block")
         let trigger = first?["trigger"] as? [String: Any]
         XCTAssertEqual(trigger?["url-filter-is-case-sensitive"] as? Bool, false)
         XCTAssertNil(trigger?["resource-type"], "every resource type")
         XCTAssertNil(trigger?["load-type"], "first and third party")
+        XCTAssertNil(trigger?["if-domain"], "the request's host is in the filter, not the page's")
+    }
+
+    /// The store's own hosts and their subdomains, whatever the scheme, case,
+    /// port or userinfo. No other host, however its URL is dressed up.
+    func testTheFiltersAreAnchoredToTheStoresOwnHosts() {
+        for url in ["https://www.heb.com/checkout", "https://heb.com/checkout", "https://a.b.heb.com/api/payment",
+                    "HTTPS://WWW.HEB.COM/CHECKOUT", "https://www.heb.com:443/checkout", "https://u:p@www.heb.com/checkout",
+                    "https://evil.io:x@www.heb.com/checkout", "https://www.heb.com?step=billing",
+                    "mealio-test://www.heb.com/checkout/x"] {
+            XCTAssertTrue(filtered(url), url)
+        }
+        for url in ["https://js.stripe.com/v3/payment", "https://hcaptcha.com/checkout", "https://xheb.com/checkout",
+                    "https://heb.com.evil.io/checkout", "https://www.heb.com@evil.io/checkout",
+                    "https://www.heb.com.evil.io:443/checkout", "https://evil.io/?next=https://www.heb.com/checkout",
+                    "https://evil.io/www.heb.com/checkout", "https://evil.io#www.heb.com/checkout",
+                    "mealio-test://js.stripe.com/payment"] {
+            XCTAssertFalse(filtered(url), url)
+        }
+        // A widened host is a store host too; a store with none has no filters.
+        XCTAssertTrue(filtered("https://cdn.heb-static.com/checkout", hosts: ["heb.com", "heb-static.com"]))
+        XCTAssertFalse(filtered("https://cdn.heb-static.com/checkout"))
+        XCTAssertEqual(NetworkBlock.urlFilters(hosts: []), [])
+    }
+
+    func testRuleHostsAreCleanUniqueAndSorted() {
+        XCTAssertEqual(NetworkBlock.ruleHosts(["WWW.HEB.com", "heb.com", ".heb.com.", "www.heb.com"]), ["heb.com", "www.heb.com"])
+        XCTAssertEqual(NetworkBlock.ruleHosts(["", ".", "a..b", "evil.io/x", "a*b.com", "h\u{e9}b.com"]), [])
+        XCTAssertEqual(NetworkBlock.identifier(hosts: ["safeway.com", "Albertsons.com"]),
+                       "co.mealio.sdk.blocked-paths.albertsons.com,safeway.com")
+        XCTAssertEqual(NetworkBlock.hostPrefix("heb.com"), #"^[^:]+://([^/?#]*@)?([^/?#@]*\.)?heb\.com(:[0-9]*)?"#)
     }
 
     func testExpandWritesOutEachAlternative() {
@@ -105,7 +140,7 @@ final class Round6Tests: XCTestCase {
             }
         }
         // A host or scheme that names checkout is not a path.
-        for url in ["https://checkout.example.com/", "https://payment.heb.com/cart", "https://wallet.x.com/?a=1"] {
+        for url in ["https://checkout.heb.com/", "https://payment.heb.com/cart", "https://wallet.heb.com/?a=1"] {
             XCTAssertFalse(filtered(url), url)
         }
     }

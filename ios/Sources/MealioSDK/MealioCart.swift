@@ -123,6 +123,10 @@ public enum MealioCart {
             guard let allowlist = client?.allowlist else { return false }
             return allowlist.check(store, url, .page).ok || allowlist.check(store, url, .login).ok
         }
+        // The network block's hosts: the store's own, with any signed widening.
+        host.storeHosts = { [weak client] store in
+            client?.allowlist.hostsFor(store)?.hosts ?? WebViewHost.bundledHosts(store)
+        }
         MealioCart.host = host
         MealioCart.client = client
         if users.tracked { client.setUser(users.userId) }

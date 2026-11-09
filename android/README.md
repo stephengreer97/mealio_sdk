@@ -628,6 +628,16 @@ not have.
   only has it from API 33. If your app also bundles BouncyCastle and the build
   complains about duplicate `META-INF` files, add
   `packaging { resources { excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF" } }`.
+- **Native network blocking.** While Mealio drives a store page (from right
+  before its first script until the page loads a new main document or the
+  store changes), the SDK's WebViews refuse requests to checkout, payment and
+  the other blocked paths on that store's own hosts with an empty 403. The
+  store's own boot requests before that, and every third-party host (payment
+  and captcha iframes included), are never blocked.
+- **Service worker requests are outside native blocking.** They do not pass
+  through a `WebViewClient`, and the SDK never sets the process-wide
+  `ServiceWorkerClient`, so any client your app sets stays yours. The in-page
+  guard and the allowlist checks still apply.
 - **Fetch methods.** `HttpURLConnection` has no `PATCH`; such a fetch returns
   `error: "bad_method"` to the server.
 

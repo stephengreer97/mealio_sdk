@@ -97,9 +97,6 @@ internal fun configureMealioWebView(wv: WebView, bridge: MealioNativeBridge, all
     s.allowContentAccess = false
     s.mediaPlaybackRequiresUserGesture = true
 
-    // Service worker requests skip the WebViewClient; refuse blocked ones there too.
-    installServiceWorkerBlock()
-
     val cm = CookieManager.getInstance()
     cm.setAcceptCookie(true)
     cm.setAcceptThirdPartyCookies(wv, true)
@@ -187,6 +184,8 @@ class WebViewHost(context: Context) : Host {
     private var bootstrap = BOOTSTRAP_SCRIPT
     /** The store whose page the hidden view was last told to open. */
     private var currentStore: String? = null
+    /** Native network blocking for the hidden view: armed before each script, off at a new main document or store. */
+    internal val networkBlock = NetworkBlock()
     private var pendingLoad: CompletableDeferred<PageLoad>? = null
     private var loadStarted = false
 
@@ -240,8 +239,9 @@ class WebViewHost(context: Context) : Host {
         return a.check(store, url, UrlUse.PAGE).ok || a.check(store, url, UrlUse.LOGIN).ok
     }
 
-    private inner class HiddenClient : BlockingWebViewClient() {
+    private inner class HiddenClient : BlockingWebViewClient(networkBlock) {
         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+            newMainDocument()
             // Backstop for navigations shouldOverrideUrlLoading does not see
             // (form POSTs): leave at once and report the load as blocked.
             if (url != null && !hiddenMayGo(url)) {
@@ -304,6 +304,8 @@ class WebViewHost(context: Context) : Host {
             val wv = ensureWebView()
             pendingLoad?.complete(PageLoad(ok = false, error = "load_failed")) // superseded
             pendingLoad = load
+            // A new page (or another store): off until its first script.
+            networkBlock.disarm()
             currentStore = store
             loadStarted = false
             wv.stopLoading()
@@ -339,6 +341,8 @@ class WebViewHost(context: Context) : Host {
                 // because the fallback path (no document-start script) may have
                 // raced the page; it does nothing when already installed.
                 wv.evaluateJavascript(bootstrap, null)
+                // Native blocking turns on with the in-page guard, for this store's hosts.
+                networkBlock.arm(blockHostsFor(allowlist, store))
                 wv.evaluateJavascript(guard, null)
                 wv.evaluateJavascript(script, null)
             }

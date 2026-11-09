@@ -7,8 +7,9 @@
 // It goes into every same-origin frame, and refuses workers made from blob: or
 // data: URLs. WebViewHost also injects it into every frame at document start
 // (a WKUserScript with forMainFrameOnly false); the in-page hooks are the
-// second layer. Both WebViews also carry the native block list of checkout
-// paths (NetworkBlock.swift), which page code cannot turn off; the guard is
+// second layer. While Mealio drives a page, both WebViews also carry the
+// native block list of checkout paths on the store's own hosts
+// (NetworkBlock.swift), which page code cannot turn off; the guard is
 // best-effort, since code already running in the page can defeat it.
 //
 // Both scripts are plain ES5 so they run in every WebView. The test suite

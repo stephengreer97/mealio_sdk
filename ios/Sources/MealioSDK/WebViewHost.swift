@@ -13,9 +13,14 @@
 // - show_login: while a MealioCartFlow sheet is open, the sign-in WebView is
 //   published in `login` and the flow draws it inside its own sheet (one sheet
 //   for the whole flow). With no flow open, the host presents its own sheet.
-// - Both WebViews carry a WKContentRuleList that blocks every checkout path
-//   for every request in every frame (NetworkBlock.swift). Nothing loads in
-//   them without it, and jobs are refused if it cannot be compiled.
+// - While Mealio drives a page, it carries a WKContentRuleList that blocks
+//   every checkout path on the store's own hosts, for every request in every
+//   frame (NetworkBlock.swift): added right before the first server script
+//   for a document (the hidden page) or before each check script (sign-in),
+//   dropped when the page commits a new document. Other hosts are never
+//   blocked by it, nor is a store page's boot before Mealio drives it. No
+//   page loads or runs a script without its store's list compiled, and jobs
+//   are refused if WebKit cannot compile the rules.
 
 #if canImport(UIKit) && canImport(WebKit)
 import Combine
@@ -54,9 +59,20 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
         return allowlist.check(store, url, .page).ok || allowlist.check(store, url, .login).ok
     }
 
-    private var hidden: WKWebView?
-    /// The hidden page has the checkout-path block list.
-    private var hiddenHasRules = false
+    /// A store's own hosts (StoreHosts.hosts), whose checkout paths the
+    /// network block refuses. MealioCart sets it to the client's allowlist,
+    /// with any signed widening; until then the bundled allowlist answers.
+    var storeHosts: (_ store: String) -> [String] = WebViewHost.bundledHosts
+
+    nonisolated static func bundledHosts(_ store: String) -> [String] {
+        Allowlist().hostsFor(store)?.hosts ?? []
+    }
+
+    private(set) var hidden: WKWebView?
+    /// The block list on the hidden page now (added when Mealio started
+    /// driving this document), and the hosts it was made for.
+    private var hiddenRules: WKContentRuleList?
+    private var hiddenRulesKey = ""
     private var hiddenStore = ""
     /// The load one job is waiting for. Events and its timer settle it and no other.
     var pageWait: JobWaiter<PageOpenOutcome>?
@@ -104,19 +120,29 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
     public init(presenter: Presenter? = nil) {
         self.presenter = presenter ?? { WebViewHost.topViewController() }
         super.init()
-        // The checkout-path block list compiles now, off the page loads' path.
-        BlockedPathRules.shared.prepare()
+        // WebKit compiles the probe list now, off the jobs' path.
+        BlockedPathRules.shared.prepare(hosts: NetworkBlock.probeHosts)
     }
 
-    /// Jobs run only with the network block in place. MealioHost.
+    /// Jobs run only when WebKit compiles the network block. MealioHost.
     public func ready() async throws {
-        _ = try await BlockedPathRules.shared.list()
+        try await BlockedPathRules.shared.ready()
+    }
+
+    /// The compiled list for a store's own hosts (nil: it has none).
+    func blockList(for store: String, waitingAtMost ms: Int = NetworkBlock.waitMs) async throws -> WKContentRuleList? {
+        try await BlockedPathRules.shared.list(hosts: storeHosts(store), waitingAtMost: ms)
     }
 
     // MARK: - Configuration shared by both WebViews
 
-    /// `rules`: the checkout-path block list (NetworkBlock). The SDK's own
-    /// pages always pass it; only tests of the in-page guard alone leave it out.
+    /// Tests only: serves their pages from a local scheme handler, so no
+    /// test WebView ever reaches a store.
+    static var testConfiguration: ((WKWebViewConfiguration) -> Void)?
+
+    /// No block list here: it is added only while Mealio drives the page
+    /// (`armRules`, LoginSheet.inject). `rules` is for tests that want a page
+    /// blocked from its first load.
     static func makeConfiguration(handler: WKScriptMessageHandler, rules: WKContentRuleList? = nil) -> WKWebViewConfiguration {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = WKWebsiteDataStore.default()
@@ -135,23 +161,16 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
         content.add(handler, name: Bridge.messageHandlerName)
         if let rules = rules { content.add(rules) }
         config.userContentController = content
+        testConfiguration?(config)
         return config
     }
 
-    /// The hidden page. Made without the block list only by `userAgent()`,
-    /// which loads nothing; `openPage` adds the list before any load.
-    private func hiddenWebView(rules: WKContentRuleList? = nil) -> WKWebView {
-        if let web = hidden {
-            if let rules = rules, !hiddenHasRules {
-                web.configuration.userContentController.add(rules)
-                hiddenHasRules = true
-            }
-            return web
-        }
+    /// The hidden page, made on first use with no block list.
+    func hiddenWebView() -> WKWebView {
+        if let web = hidden { return web }
         let handler = ScriptHandler { [weak self] body in self?.hiddenMessage(body) }
         let web = WKWebView(frame: CGRect(x: 0, y: 0, width: 1, height: 1),
-                            configuration: WebViewHost.makeConfiguration(handler: handler, rules: rules))
-        hiddenHasRules = rules != nil
+                            configuration: WebViewHost.makeConfiguration(handler: handler))
         web.navigationDelegate = self
         web.isUserInteractionEnabled = false
         web.alpha = 0.01
@@ -164,6 +183,29 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
         }
         hidden = web
         return web
+    }
+
+    /// Mealio starts driving the hidden page's document: its store's block
+    /// list goes on (once per document and store; a list for other hosts
+    /// comes off first).
+    private func armRules(_ list: WKContentRuleList?, on web: WKWebView) {
+        let key = list?.identifier ?? ""
+        if hiddenRulesKey == key, hiddenRules != nil || list == nil { return }
+        disarmRules(on: web)
+        if let list = list {
+            web.configuration.userContentController.add(list)
+            hiddenRules = list
+            hiddenRulesKey = key
+        }
+    }
+
+    /// The page left the document Mealio drove: its block list comes off.
+    private func disarmRules(on web: WKWebView?) {
+        if hiddenRules != nil {
+            web?.configuration.userContentController.removeAllContentRuleLists()
+        }
+        hiddenRules = nil
+        hiddenRulesKey = ""
     }
 
     private func hiddenMessage(_ body: Any) {
@@ -195,8 +237,8 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
             web.configuration.userContentController.removeScriptMessageHandler(forName: Bridge.messageHandlerName)
             web.removeFromSuperview()
         }
+        disarmRules(on: hidden)
         hidden = nil
-        hiddenHasRules = false
     }
 
     /// This host is being replaced (MealioCart.configure ran again). Drops the
@@ -213,14 +255,17 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
 
     public func openPage(store: String, url: String, timeoutMs: Int) async throws -> PageOpenOutcome {
         guard let target = URL(string: url) else { return PageOpenOutcome(ok: false, error: "load_failed") }
-        // Never a load without the checkout-path block list.
-        let rules: WKContentRuleList
+        // Never a load whose store's block list is not compiled, ready for
+        // the first script. It is not on the page yet: the store's own boot
+        // requests run untouched until Mealio drives the page.
         do {
-            rules = try await BlockedPathRules.shared.list(waitingAtMost: min(max(timeoutMs, 0), NetworkBlock.waitMs))
+            _ = try await blockList(for: store, waitingAtMost: min(max(timeoutMs, 0), NetworkBlock.waitMs))
         } catch {
             return PageOpenOutcome(ok: false, error: "no_network_block")
         }
-        let web = hiddenWebView(rules: rules)
+        let web = hiddenWebView()
+        // Another store: Mealio no longer drives the old one's page.
+        if store != hiddenStore { disarmRules(on: web) }
         hiddenStore = store
         // A load still waiting from before is superseded. Its timer is its own.
         pageWait?.settle(PageOpenOutcome(ok: false, error: "superseded"))
@@ -241,9 +286,21 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
     // MARK: - page_script
 
     public func runScript(store: String, guardScript: String, script: String, until: [Matcher], timeoutMs: Int) async throws -> ScriptOutcome {
+        guard hidden?.url != nil else {
+            return ScriptOutcome(messages: [], timedOut: false, error: "no_page")
+        }
+        // Mealio drives the page from here: the store's block list goes on
+        // first, with the guard's arming. No list, no script.
+        let list: WKContentRuleList?
+        do {
+            list = try await blockList(for: store, waitingAtMost: min(max(timeoutMs, 0), NetworkBlock.waitMs))
+        } catch {
+            return ScriptOutcome(messages: [], timedOut: false, error: "no_network_block")
+        }
         guard let web = hidden, web.url != nil else {
             return ScriptOutcome(messages: [], timedOut: false, error: "no_page")
         }
+        armRules(list, on: web)
         // One script at a time; one still waiting from before is superseded.
         if let old = scriptWait {
             old.waiter.settle(ScriptOutcome(messages: old.messages, timedOut: false, error: "superseded"))
@@ -276,8 +333,9 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
         if request.cancel?.cancelled == true {
             return LoginOutcome(outcome: .cancelled, messages: [])
         }
-        // Never a sign-in page without the checkout-path block list.
-        let rules = try await BlockedPathRules.shared.list()
+        // Never a sign-in page whose store's block list is not compiled. It
+        // goes on before each check script, not before the page's own boot.
+        let rules = try await blockList(for: request.store)
         if request.cancel?.cancelled == true {
             return LoginOutcome(outcome: .cancelled, messages: [])
         }
@@ -505,6 +563,13 @@ extension WebViewHost: WKNavigationDelegate {
         }
     }
 
+    /// A new document in the top frame: Mealio is not driving it (yet), so
+    /// the block list comes off, as the in-page guard starts unarmed.
+    public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        guard webView === hidden else { return }
+        disarmRules(on: webView)
+    }
+
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         pageWait?.settle(PageOpenOutcome(ok: true, finalUrl: webView.url?.absoluteString))
     }
@@ -557,13 +622,19 @@ final class LoginSheet: NSObject, WKNavigationDelegate, WKUIDelegate, UIAdaptive
     /// Why the sheet could not be shown, when it could not. The run then
     /// fails with this instead of waiting out its timeout.
     private(set) var failure: MealioError?
+    /// The store's block list, added before each check script.
+    private let rules: WKContentRuleList?
+    /// It is on the sheet's page now (until the page commits a new document).
+    private var rulesOn = false
 
     /// How long a modal presentation may take to start before it counts as refused.
     static let presentCheckMs = 1000
 
-    /// `rules`: the checkout-path block list. WebViewHost always passes it.
+    /// `rules`: the store's checkout-path block list. WebViewHost always
+    /// passes it when the store has hosts of its own.
     init(request: LoginRequest, rules: WKContentRuleList? = nil) {
         self.request = request
+        self.rules = rules
         if let source = request.doneWhenUrl, !source.isEmpty {
             // A JS regex source with no flags. Most sources mean the same in
             // ICU; one that does not compile is ignored.
@@ -572,7 +643,7 @@ final class LoginSheet: NSObject, WKNavigationDelegate, WKUIDelegate, UIAdaptive
             doneUrlRegex = nil
         }
         let proxy = ScriptHandler()
-        webView = WKWebView(frame: .zero, configuration: WebViewHost.makeConfiguration(handler: proxy, rules: rules))
+        webView = WKWebView(frame: .zero, configuration: WebViewHost.makeConfiguration(handler: proxy))
         super.init()
         proxy.onMessage = { [weak self] body in self?.received(body) }
         webView.navigationDelegate = self
@@ -669,9 +740,14 @@ final class LoginSheet: NSObject, WKNavigationDelegate, WKUIDelegate, UIAdaptive
     static let notShown = MealioError(code: MealioError.Code.unsupported,
                                       message: "Could not show the store sign-in: the presenting view controller is not on screen or is already presenting")
 
-    /// GUARD_ARM_SCRIPT, then the check script, each its own evaluation in
-    /// the top frame. (GUARD_SCRIPT is already in every frame at document start.)
+    /// The store's block list (if not on already), GUARD_ARM_SCRIPT, then the
+    /// check script, each its own evaluation in the top frame. (GUARD_SCRIPT
+    /// is already in every frame at document start.)
     private func inject() {
+        if let rules = rules, !rulesOn {
+            webView.configuration.userContentController.add(rules)
+            rulesOn = true
+        }
         webView.evaluateJavaScript(request.armGuardScript, completionHandler: nil)
         if let check = request.check {
             webView.evaluateJavaScript(check.script, completionHandler: nil)
@@ -746,6 +822,15 @@ final class LoginSheet: NSObject, WKNavigationDelegate, WKUIDelegate, UIAdaptive
             return
         }
         decisionHandler(allowed ? .allow : .cancel)
+    }
+
+    /// A new document: Mealio is not driving it until the next check, so the
+    /// block list comes off.
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        if rulesOn {
+            webView.configuration.userContentController.removeAllContentRuleLists()
+            rulesOn = false
+        }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

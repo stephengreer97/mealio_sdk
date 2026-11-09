@@ -28,6 +28,12 @@ class LoginRequest @JvmOverloads constructor(
     val cancel: CancelToken? = null,
     /** GUARD_ARM_SCRIPT: injected into the top frame right before each check script. It arms the guard. */
     val armGuard: String = GUARD_ARM_SCRIPT,
+    /**
+     * The hosts native network blocking covers on the login page (the store's
+     * own and its sign-in hosts, signed widenings included). Null: the bundled
+     * allowlist's for `store`.
+     */
+    val blockHosts: List<String>? = null,
 )
 
 data class LoginResult(val outcome: LoginOutcome, val messages: List<JSONObject>)

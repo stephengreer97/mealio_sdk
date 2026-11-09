@@ -10,8 +10,10 @@
 // <reason>") counts as blocked. Every wait here is bounded to a few seconds.
 //
 // Most tests here test the in-page guard ALONE: their pages leave out the
-// network block list (NetworkBlock.swift) that the SDK's own pages carry.
-// The "network block" tests at the end add it.
+// network block list (NetworkBlock.swift) that the SDK's own pages carry
+// while Mealio drives them. The "network block" tests at the end add it:
+// H-E-B's list (heb.com and its subdomains) from the first load, or through
+// WebViewHost's own hidden page, where it goes on with the first script.
 //
 // Each page is shown in a window, as WebViewHost parks its hidden page in
 // the key window. A WKWebView in no window counts as hidden: WebKit throttles
@@ -120,13 +122,13 @@ final class GuardBrowserTests: XCTestCase {
     /// start), or with the guard only in the main frame's own markup. `arm`:
     /// then inject the per-script copy, as the runner does before a script.
     @MainActor
-    /// `rules`: with the SDK's network block list, as its own pages have it.
+    /// `rules`: with H-E-B's network block list from the first load.
     private func page(allFrames: Bool = true, pages given: TestPages? = nil, arm: Bool = true,
                       rules: Bool = false) async throws -> WKWebView {
         let pages = given ?? TestPages()
         let config: WKWebViewConfiguration
         var list: WKContentRuleList?
-        if rules { list = try await BlockedPathRules.shared.list() }
+        if rules { list = try await BlockedPathRules.shared.list(hosts: ["heb.com"]) }
         if allFrames {
             config = WebViewHost.makeConfiguration(handler: ScriptHandler(), rules: list)
         } else {
@@ -679,12 +681,96 @@ final class GuardBrowserTests: XCTestCase {
         XCTAssertEqual(pages.reached, [])
     }
 
-    // MARK: round 6: the network block list (NetworkBlock.swift)
+    // MARK: round 6 and 7: the network block list (NetworkBlock.swift)
 
     @MainActor
     func testTheNetworkBlockListCompilesInWebKit() async throws {
-        let list = try await BlockedPathRules.shared.list()
-        XCTAssertEqual(list.identifier, NetworkBlock.identifier)
+        let list = try await BlockedPathRules.shared.list(hosts: ["heb.com"])
+        XCTAssertEqual(list?.identifier, NetworkBlock.identifier(hosts: ["heb.com"]))
+        // The probe `ready` compiles before every job, and a store with no
+        // host of its own (the Kroger family) has nothing to block.
+        try await BlockedPathRules.shared.ready()
+        let none = try await BlockedPathRules.shared.list(hosts: [])
+        XCTAssertNil(none)
+    }
+
+    /// WebViewHost's own hidden page, served locally. Before Mealio drives
+    /// the page, the store's own requests to blocked paths go out (its boot
+    /// code is never refused). From the first server script, the same
+    /// requests to the store's host never leave, even with RegExp and URL
+    /// replaced, including the image and frame loads the in-page guard never
+    /// sees. A third-party host's /payment frame loads before and after. A
+    /// new document starts unblocked again.
+    @MainActor
+    func testTheNetworkBlockIsOnlyForTheStoresHostsWhileMealioDrivesThePage() async throws {
+        let pages = TestPages()
+        WebViewHost.testConfiguration = { $0.setURLSchemeHandler(pages, forURLScheme: TestPages.scheme) }
+        defer { WebViewHost.testConfiguration = nil }
+        let host = WebViewHost(presenter: { nil })
+        defer { host.tearDown() }
+        host.hiddenNavigationPolicy = { _, _ in true }
+        show(host.hiddenWebView())
+
+        func openHome() async throws -> WKWebView {
+            let opened = try await host.openPage(store: "heb", url: TestPages.home,
+                                                 timeoutMs: GuardBrowserTests.firstLoadDone ? 5000 : 20_000)
+            XCTAssertTrue(opened.ok, "\(opened)")
+            GuardBrowserTests.firstLoadDone = true
+            return try XCTUnwrap(host.hidden)
+        }
+        /// The store's three blocked-path requests, one ordinary one, and a
+        /// third party's /payment frame, all tagged `tag`.
+        func send(_ web: WKWebView, _ tag: String, tamper: Bool) async throws {
+            _ = try await run(web, """
+                if (\(tamper)) {
+                  RegExp.prototype.test = function () { return false; };
+                  RegExp.prototype.exec = function () { return null; };
+                  window.URL = function () { return { pathname: '/', search: '', protocol: 'https:', href: location.href }; };
+                }
+                r.fetch = await t(() => fetch('/checkout/\(tag)-fetch', { method: 'POST', body: '{}' }));
+                r.ok = await t(() => fetch('/api/\(tag)-ok', { method: 'POST', body: '{}' }));
+                new Image().src = '/payment/\(tag)-img';
+                { const f = document.createElement('iframe'); f.src = '/billing/\(tag)-frame'; document.body.appendChild(f); }
+                { const f = document.createElement('iframe'); f.src = '\(TestPages.scheme)://js.stripe.com/payment/\(tag)'; document.body.appendChild(f); }
+                """)
+        }
+        func storePaths(_ tag: String) -> [String] {
+            ["/checkout/\(tag)-fetch", "/payment/\(tag)-img", "/billing/\(tag)-frame"]
+        }
+        /// Waits (bounded) for `want` to reach the handler, then a little more.
+        func arrive(_ want: [String]) async throws {
+            for _ in 0..<300 where !want.allSatisfy({ pages.reached.contains($0) }) {
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            try await Task.sleep(nanoseconds: 500_000_000)
+        }
+
+        // Before Mealio drives the page: everything reaches the handler.
+        var web = try await openHome()
+        try await send(web, "before", tamper: false)
+        let before = storePaths("before") + ["/api/before-ok", "js.stripe.com/payment/before"]
+        try await arrive(before)
+        XCTAssertEqual(before.filter { !pages.reached.contains($0) }, [], "\(pages.reached)")
+
+        // The first server script: the list goes on with the guard's arming.
+        let driven = try await host.runScript(
+            store: "heb", guardScript: MealioScripts.guardArmScript,
+            script: "window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'driven' })); true;",
+            until: [Matcher(type: "driven")], timeoutMs: 5000)
+        XCTAssertNil(driven.error)
+        XCTAssertFalse(driven.timedOut)
+        try await send(web, "after", tamper: true)
+        try await arrive(["/api/after-ok", "js.stripe.com/payment/after"])
+        XCTAssertTrue(pages.reached.contains("/api/after-ok"), "\(pages.reached)")
+        XCTAssertTrue(pages.reached.contains("js.stripe.com/payment/after"), "a third party is never blocked: \(pages.reached)")
+        XCTAssertEqual(pages.reached.filter { storePaths("after").contains($0) }, [], "the store's blocked paths, once Mealio drives the page")
+
+        // A new document: Mealio is not driving it yet, so nothing is blocked.
+        web = try await openHome()
+        try await send(web, "next", tamper: false)
+        let next = storePaths("next") + ["js.stripe.com/payment/next"]
+        try await arrive(next)
+        XCTAssertEqual(next.filter { !pages.reached.contains($0) }, [], "\(pages.reached)")
     }
 
     /// Page code has replaced RegExp.prototype.test and window.URL, which the

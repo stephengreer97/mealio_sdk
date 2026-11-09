@@ -212,6 +212,7 @@ class Runner @JvmOverloads constructor(
                                 doneWhen = ins.doneWhen, doneWhenUrl = ins.doneWhenUrl, timeoutMs = ins.timeoutMs,
                                 allowNavigation = { u -> allowlist.check(store, u, UrlUse.LOGIN).ok },
                                 cancel = cancel,
+                                blockHosts = blockHostsFor(allowlist, store),
                             ),
                         )
                     }

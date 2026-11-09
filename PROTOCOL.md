@@ -411,11 +411,19 @@ The controls, strongest first:
    op the SDK makes is checked against the store's hosts and
    `BLOCKED_PATTERNS`, and every `fetch` body against the body rules below,
    in native code (or the React Native JS runtime) that page code cannot reach.
-3. **Native network blocking (iOS and Android only).** The native SDKs refuse
-   every request the store page itself makes whose path matches
+3. **Native network blocking (iOS and Android only): store hosts only,
+   while Mealio drives the page.** The native SDKs refuse every request the
+   store page makes to one of the store's own hosts (or a subdomain, from
+   the SDK allowlist with signed widening) whose path matches
    `BLOCKED_PATTERNS`: documents, frames, form posts, fetch and XHR, in the
-   hidden WebView and the sign-in sheet. iOS compiles a `WKContentRuleList`
-   with a block rule per pattern; Android answers such a request in
+   hidden WebView and the sign-in sheet. Other hosts (a payment or captcha
+   frame) are never refused by it. It starts when the first server script
+   for a document is about to run (when the guard arms; in the sign-in
+   sheet, before each `check.script`) and ends when the page commits a new
+   document or the store changes, so a store page's own boot requests are
+   never refused. iOS compiles a `WKContentRuleList` per store with a block
+   rule per pattern anchored to each store host, and adds it to the page's
+   user content controller only for that time; Android answers such a request in
    `shouldInterceptRequest` with an empty 403 and refuses such a navigation in
    `shouldOverrideUrlLoading`, in every frame. It runs outside the page, so
    page code cannot turn it off. It checks paths only, not bodies.
@@ -437,7 +445,8 @@ installs (`RegExp.prototype.exec`, `URL` and its getters, `Blob.prototype.text`,
 that replaces them later changes nothing. It reads a body's text once and
 sends that same text, so an object cannot show one text and send another.
 
-What it does not cover (native blocking does, on iOS and Android, for paths):
+What it does not cover (native blocking does, on iOS and Android, for paths on
+the store's own hosts while Mealio drives the page):
 
 - Requests it never sees: images, scripts, stylesheets, `<link>` prefetches,
   `<a ping>`, CSS URLs, navigations by `location` or links, and any request

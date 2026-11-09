@@ -6,8 +6,30 @@
 #if canImport(SwiftUI) && canImport(UIKit) && canImport(WebKit)
 import SwiftUI
 import UIKit
+import WebKit
 import XCTest
 @testable import MealioSDK
+
+/// Serves every sign-in page these tests open, so none reaches a store.
+@MainActor
+private final class LocalPages: NSObject, WKURLSchemeHandler {
+    static let scheme = "mealio-test"
+    static let login = "mealio-test://www.heb.com/login"
+    private(set) var asked: [String] = []
+
+    func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+        guard let url = urlSchemeTask.request.url else { return }
+        asked.append(url.absoluteString)
+        if let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+                                          headerFields: ["Content-Type": "text/html"]) {
+            urlSchemeTask.didReceive(response)
+        }
+        urlSchemeTask.didReceive(Data("<html><body>sign in</body></html>".utf8))
+        urlSchemeTask.didFinish()
+    }
+
+    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
+}
 
 final class FlowTests: XCTestCase {
 
@@ -37,6 +59,15 @@ final class FlowTests: XCTestCase {
                                         epochProvider: { 0 }, keys: TestSigner.keys,
                                         urlSession: StubURLProtocol.session(), sdkVersion: "0")
         MealioCart.client = MealioClient(config: config, host: host)
+    }
+
+    /// Every WebView the SDK makes from here serves LocalPages. Undo with
+    /// `WebViewHost.testConfiguration = nil`.
+    @MainActor
+    private func serveLocally() -> LocalPages {
+        let pages = LocalPages()
+        WebViewHost.testConfiguration = { $0.setURLSchemeHandler(pages, forURLScheme: LocalPages.scheme) }
+        return pages
     }
 
     @MainActor
@@ -583,8 +614,10 @@ final class FlowTests: XCTestCase {
 
     @MainActor
     func testASignInIsClosedWhenItsJobIsCancelled() async throws {
+        _ = serveLocally()
+        defer { WebViewHost.testConfiguration = nil }
         let cancel = CancelToken()
-        let request = LoginRequest(store: "heb", url: "https://www.heb.com/login", title: "Sign in", guardScript: "",
+        let request = LoginRequest(store: "heb", url: LocalPages.login, title: "Sign in", guardScript: "",
                                    check: nil, doneWhen: [], doneWhenUrl: nil, timeoutMs: 60_000,
                                    allowNavigation: { _ in true }, cancel: cancel)
         let sheet = LoginSheet(request: request)
@@ -607,11 +640,13 @@ final class FlowTests: XCTestCase {
     /// it, so after its retries it ends as a closed one would.)
     @MainActor
     func testHidingTheSheetMidAddMovesASignInOnScreenToAModal() async throws {
+        _ = serveLocally()
+        defer { WebViewHost.testConfiguration = nil }
         let presenter = UIViewController()
         var asked = 0
         let host = WebViewHost(presenter: { asked += 1; return presenter })
         host.hostLogin(true)
-        let request = LoginRequest(store: "heb", url: "https://www.heb.com/login", title: "Sign in", guardScript: "",
+        let request = LoginRequest(store: "heb", url: LocalPages.login, title: "Sign in", guardScript: "",
                                    check: nil, doneWhen: [], doneWhenUrl: nil, timeoutMs: 600_000,
                                    allowNavigation: { _ in true })
         let log = HostLog()
@@ -633,8 +668,10 @@ final class FlowTests: XCTestCase {
 
     @MainActor
     func testASignInThatCannotBePresentedFailsAtOnce() async throws {
+        _ = serveLocally()
+        defer { WebViewHost.testConfiguration = nil }
         let host = WebViewHost(presenter: { UIViewController() })
-        let request = LoginRequest(store: "heb", url: "https://www.heb.com/login", title: "Sign in", guardScript: "",
+        let request = LoginRequest(store: "heb", url: LocalPages.login, title: "Sign in", guardScript: "",
                                    check: nil, doneWhen: [], doneWhenUrl: nil, timeoutMs: 600_000,
                                    allowNavigation: { _ in true })
         do {
