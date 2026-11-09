@@ -17,10 +17,10 @@ import 'runner.dart';
 import 'verify.dart';
 
 /// The core protocol version this port follows (packages/core 0.2.0).
-const String sdkCoreVersion = '0.6.0';
+const String sdkCoreVersion = '0.6.1';
 
 /// This package's version, sent as `X-Mealio-SDK: flutter/<version>`.
-const String mealioSdkVersion = '0.6.0';
+const String mealioSdkVersion = '0.6.1';
 
 const String defaultBaseUrl = 'https://mealio.co';
 

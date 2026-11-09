@@ -237,6 +237,41 @@ final class EventsTests: XCTestCase {
         ])
     }
 
+    /// 0.6.1: signed out of the saved store, the user picks another from the
+    /// sign-in page. The cart that asked for the sign-in stops, the sign-in
+    /// goes, and the stores show. Never while adding.
+    @MainActor
+    func testADifferentStoreFromSignInStopsTheCartAndShowsTheStores() async throws {
+        defer { reset(); StubURLProtocol.hangs = false }
+        StubURLProtocol.hangs = true
+        MealioCart.client = makeClient()
+        let log = listen()
+        let model = MealioFlowModel()
+        model.open(recipes: [recipe], store: "heb", zip: nil, onAdded: nil, onError: nil)
+        XCTAssertEqual(model.phase, .loading)
+        let request = LoginRequest(store: "heb", url: "https://www.heb.com/login", title: "Sign in",
+                                   guardScript: "", check: nil, doneWhen: [], doneWhenUrl: nil, timeoutMs: 1000,
+                                   allowNavigation: { _ in true })
+        model.loginChanged(LoginSheet(request: request))
+        XCTAssertEqual(model.sheetStep, .signin)
+        model.storeFromSignIn()
+        XCTAssertNil(model.login)
+        XCTAssertEqual(model.phase, .stores)
+        XCTAssertEqual(model.sheetStep, .stores)
+        model.pick("aldi")
+        XCTAssertEqual(model.store, "aldi")
+        XCTAssertEqual(model.phase, .loading)
+        XCTAssertEqual(log.events, [.sheetOpened(recipes: 1), .signinShown(store: "heb"), .storePicked(store: "aldi")])
+
+        // Mid-add, a sign-in belongs to the add: the link does nothing.
+        model.phase = .adding
+        model.loginChanged(LoginSheet(request: request))
+        model.storeFromSignIn()
+        XCTAssertEqual(model.phase, .adding)
+        XCTAssertNotNil(model.login)
+        model.loginChanged(nil)
+    }
+
     @MainActor
     func testSignInAppearingOnceAndClosingFromIt() async throws {
         defer { reset() }

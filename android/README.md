@@ -61,7 +61,7 @@ dependencyResolutionManagement {
 
 // app/build.gradle.kts
 dependencies {
-    implementation("co.mealio:mealio-sdk-compose:0.6.0") // pulls in mealio-sdk
+    implementation("co.mealio:mealio-sdk-compose:0.6.1") // pulls in mealio-sdk
 }
 ```
 
@@ -563,7 +563,7 @@ it the same way.
 A separate artifact, for tests only, so none of it can ship in a release app:
 
 ```kotlin
-testImplementation("co.mealio:mealio-sdk-testing:0.6.0")
+testImplementation("co.mealio:mealio-sdk-testing:0.6.1")
 testImplementation("org.json:json:20231013") // android.jar's org.json is a stub on the JVM
 ```
 

@@ -214,6 +214,18 @@ public struct MealioCartFlow: View {
                     .padding(.horizontal, 20)
                     .padding(.bottom, 8)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                if model.phase != .adding {
+                    // Signed out of the saved store: pick another without signing in to it.
+                    Button(action: { model.storeFromSignIn() }) {
+                        Text(ui.tr(.differentStore))
+                            .font(t.font(13, .semibold))
+                            .foregroundColor(t.accent)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 10)
+                    .accessibilityIdentifier("mealio-signin-different-store")
+                }
                 MealioLoginWebView(webView: login.webView)
                     .id(ObjectIdentifier(login))
                     .overlay(alignment: .top) { Rectangle().fill(t.border).frame(height: 0.5) }
@@ -476,6 +488,20 @@ final class MealioFlowModel: ObservableObject {
                 self.fail(error, step: .loading)
             }
         }
+    }
+
+    /// "Choose a different store" on the sign-in page: stop the cart that
+    /// asked for it (its sign-in goes with it) and show the stores. Not while
+    /// adding: an add's sign-in is for the cart already chosen.
+    func storeFromSignIn() {
+        guard phase != .adding else { return }
+        run += 1
+        preparing?.cancel(reason: .closed)
+        preparing = nil
+        cart?.cancelSearches()
+        login?.cancel()
+        login = nil
+        openStores(from: .error)
     }
 
     /// Show the store picker. Loads the stores the first time, and again

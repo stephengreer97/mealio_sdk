@@ -19,7 +19,7 @@ import { money, resolveTheme, type MealioColorScheme, type MealioTheme } from '.
 import { MealioStoreSettings } from './MealioStoreSettings';
 import { loadInsetView, loadWebView } from './optional';
 
-export const SDK_VERSION = '0.6.0';
+export const SDK_VERSION = '0.6.1';
 
 declare const __DEV__: boolean | undefined;
 

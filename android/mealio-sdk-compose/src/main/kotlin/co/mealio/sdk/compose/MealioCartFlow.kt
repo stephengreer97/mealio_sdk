@@ -78,6 +78,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.collapse
@@ -340,7 +341,8 @@ private fun FlowSheet(
         val r = model.result
         val at = store
         when {
-            l != null -> LoginPane(t, l, storeName)
+            // Not mid-add: an add's sign-in is for the cart already chosen.
+            l != null -> LoginPane(t, l, storeName, onDifferentStore = if (phase != Phase.ADDING) ({ model.storeFromSignIn() }) else null)
             phase == Phase.LOADING -> Loading(t, model.step, storeName, lineCount)
             phase == Phase.STORES -> StorePicker(
                 t, model.stores, store,
@@ -485,12 +487,23 @@ internal fun Header(
 }
 
 @Composable
-private fun ColumnScope.LoginPane(t: MealioTheme, login: InlineLogin, storeName: String) {
+private fun ColumnScope.LoginPane(t: MealioTheme, login: InlineLogin, storeName: String, onDifferentStore: (() -> Unit)?) {
     Text(
         LocalMealioUi.current.tr("loginNote", "store" to storeName),
         style = t.ts(13, color = t.muted),
         modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 8.dp),
     )
+    if (onDifferentStore != null) {
+        // Signed out of the saved store: pick another without signing in to it.
+        Text(
+            LocalMealioUi.current.tr("differentStore"),
+            style = t.ts(13, FontWeight.SemiBold, t.accent),
+            modifier = Modifier
+                .padding(start = 20.dp, end = 20.dp, bottom = 10.dp)
+                .clickable(role = Role.Button, onClick = onDifferentStore)
+                .testTag("mealio-signin-different-store"),
+        )
+    }
     TopRule(t, hairline())
     key(login) {
         AndroidView(

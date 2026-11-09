@@ -1,6 +1,6 @@
 {
   "name": "@mealio/sdk-core",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Platform-neutral core of the Mealio Cart SDK: protocol types, signature checks, allowlist and the relay loop.",
   "license": "SEE LICENSE IN LICENSE",
   "author": "Mealio <contact@mealio.co>",

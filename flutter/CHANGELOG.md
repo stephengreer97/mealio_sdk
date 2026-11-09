@@ -1,4 +1,13 @@
-## Unreleased
+## 0.6.1
+
+- The sign-in step has a "Choose a different store" link. A user signed out
+  of their saved store can pick another without signing in to it first.
+  Not shown while adding.
+- iOS testing kit: a held answer is delivered in the loader thread's run
+  loop mode, so it can no longer time out.
+
+## 0.6.0
+
 
 - `ItemRecipe.share` (double) is the exact share the server sends (0.5);
   `quantity` stays the 0.5.0 int. `toJson` sends the share. Testing kit:

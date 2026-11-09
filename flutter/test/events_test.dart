@@ -526,6 +526,30 @@ void main() {
       ]);
     });
 
+    testWidgets('0.6.1: a different store from the sign-in page stops it and shows the stores', (WidgetTester tester) async {
+      final login = _Login();
+      await _open(tester, listen, gate: Completer<void>());
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      host.login.value = login;
+      await tester.pump();
+      expect(find.text('Sign in to H-E-B'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey<String>('mealio-signin-different-store')));
+      await tester.pump();
+      await tester.pump();
+      expect(login.cancels, 1);
+      expect(find.text('Sign in to H-E-B'), findsNothing);
+      expect(find.text('Kroger'), findsOneWidget);
+      host.login.value = null;
+      await tester.tap(find.text('Kroger'));
+      await tester.pump();
+      expect(log, <_Json>[
+        <String, Object?>{'type': 'sheet_opened', 'recipes': 1},
+        <String, Object?>{'type': 'signin_shown', 'store': 'heb'},
+        <String, Object?>{'type': 'store_picked', 'store': 'kroger'},
+      ]);
+    });
+
     testWidgets('a sign-in already showing is reported after sheet_opened', (WidgetTester tester) async {
       host.login.value = _Login();
       await _open(tester, listen, gate: Completer<void>());

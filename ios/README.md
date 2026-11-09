@@ -332,7 +332,7 @@ Or in `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/stephengreer97/mealio_sdk.git", from: "0.6.0"),
+    .package(url: "https://github.com/stephengreer97/mealio_sdk.git", from: "0.6.1"),
 ],
 targets: [
     .target(name: "MyApp", dependencies: [.product(name: "MealioSDK", package: "mealio_sdk")]),
@@ -345,7 +345,7 @@ The repository root's `Package.swift` is the one Swift Package Manager reads;
 ### CocoaPods
 
 ```ruby
-pod 'MealioSDK', :git => 'https://github.com/stephengreer97/mealio_sdk.git', :tag => 'v0.6.0'
+pod 'MealioSDK', :git => 'https://github.com/stephengreer97/mealio_sdk.git', :tag => 'v0.6.1'
 ```
 
 ## Your server creates an SDK session

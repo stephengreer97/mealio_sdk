@@ -30,7 +30,7 @@ import java.net.URLEncoder
 // drive it through step calls until done or fail, and a single retry with a
 // fresh session token on 401.
 
-const val SDK_CORE_VERSION = "0.6.0"
+const val SDK_CORE_VERSION = "0.6.1"
 const val DEFAULT_BASE_URL = "https://mealio.co"
 
 /** How long a warm-up is offered to the next prepare. The server holds the same line (WARM_TTL_MS). */

@@ -161,6 +161,54 @@ class CartFlowModelTest {
         ).also { it.attach() }
     }
 
+    // ── 0.6.1: a different store from the sign-in step ─────────────
+
+    @Test
+    fun aDifferentStoreFromSignInStopsTheCartAndShowsTheStores() = runTest {
+        val h = Harness(this)
+        h.storesAnswer = { listOf(StoreInfo("heb", "H-E-B", "device"), StoreInfo("aldi", "ALDI", "device")) }
+        // The HEB cart waits on its page, as one waiting for a sign-in does.
+        h.openGate = CompletableDeferred()
+        h.answer = { p, b -> if (b.optString("store") == "aldi") h.start(p, done(cart("aldi"))) else h.start(p, open(), done(cart())) }
+        val m = h.model(store = "heb")
+        runCurrent()
+        assertEquals(Phase.LOADING, m.phase)
+        h.login.activeNow = true
+        m.storeFromSignIn()
+        assertEquals(1, h.login.cancels)
+        assertEquals(Phase.STORES, m.phase)
+        advanceUntilIdle()
+        assertEquals(listOf("heb", "aldi"), m.stores?.map { it.id })
+        m.pickStore("aldi")
+        // The HEB page answers late: that cart was stopped and reports nothing.
+        h.openGate!!.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(Phase.LIST, m.phase)
+        assertEquals("aldi", m.store)
+        assertEquals(listOf("heb", "aldi"), h.bodies.filter { it.has("recipes") }.map { it.optString("store") })
+        assertTrue(h.errors.isEmpty())
+        m.close()
+    }
+
+    @Test
+    fun aDifferentStoreFromSignInDoesNothingWhileAdding() = runTest {
+        val h = Harness(this)
+        h.answer = { p, _ -> if (p.endsWith("/add")) h.start(p, open(), done(added)) else h.start(p, done(cart())) }
+        val m = h.model()
+        advanceUntilIdle()
+        h.openGate = CompletableDeferred()
+        m.add()
+        runCurrent()
+        h.login.activeNow = true
+        m.storeFromSignIn()
+        assertEquals(Phase.ADDING, m.phase)
+        assertEquals(0, h.login.cancels)
+        h.openGate!!.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(Phase.DONE, m.phase)
+        m.close()
+    }
+
     // ── recreation (audit finding 1) ────────────────────────────────
 
     @Test

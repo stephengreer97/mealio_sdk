@@ -9,7 +9,7 @@ import type {
   AddedItem, AddResult, AllowlistPayload, CartItem, CartWarning, Envelope, Instruction, ItemRecipe, PreparedCart, PrepareCartInput, Product, SearchResult, Selection, StepRequest, StoreInfo, StoreLocation, StorePreferences,
 } from './protocol';
 
-export const SDK_CORE_VERSION = '0.6.0';
+export const SDK_CORE_VERSION = '0.6.1';
 export const DEFAULT_BASE_URL = 'https://mealio.co';
 
 export type MealioErrorCode =
