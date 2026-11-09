@@ -142,6 +142,7 @@ void main() {
       final r = seen!;
       expect(r.title, 'Sign in to H-E-B');
       expect(r.guard, guardScript);
+      expect(r.armGuard, guardArmScript);
       expect(r.check!.intervalMs, 3000);
       expect(r.allowNavigation('https://accounts.google.com/o/oauth2'), isTrue);
       expect(r.allowNavigation('https://www.heb.com/my-account'), isTrue);

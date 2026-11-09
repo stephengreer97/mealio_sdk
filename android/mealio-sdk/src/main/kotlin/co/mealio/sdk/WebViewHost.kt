@@ -125,8 +125,9 @@ internal fun configureMealioWebView(wv: WebView, bridge: MealioNativeBridge, all
         true
     } else {
         // An older WebView: the bootstrap goes in from onPageStarted, and the
-        // guard only with each script (runScript, the sign-in check), in the
-        // main frame; its DOM hooks reach same-origin frames from there.
+        // guard only with each script (GUARD_ARM_SCRIPT from runScript and the
+        // sign-in check), in the main frame; its DOM hooks reach same-origin
+        // frames from there.
         false
     }
     return MealioWebViewSetup(docStart, bootstrap)
@@ -136,8 +137,12 @@ internal fun configureMealioWebView(wv: WebView, bridge: MealioNativeBridge, all
  * What goes into every frame at document start, with its allowed-origin rules:
  * the bridge bootstrap everywhere, then GUARD_SCRIPT on the stores' own hosts
  * (and their sign-in hosts) so it is in place in each store frame, iframes
- * included, before any of the store's scripts run. The in-page hooks in the
- * guard stay as a second layer.
+ * included, before any of the store's scripts run. This copy is the DORMANT
+ * one: it installs the hooks unarmed, so the store's own boot code (its
+ * workers, its /payment config fetches) runs untouched, and it installs
+ * nothing in a cross-origin frame. GUARD_ARM_SCRIPT, injected before every
+ * Mealio script, arms it (PROTOCOL.md "Guard script"). The in-page hooks in
+ * the guard stay as a second layer.
  */
 internal fun documentStartScripts(bootstrap: String, allowlist: Allowlist = Allowlist()): List<Pair<String, Set<String>>> =
     listOf(bootstrap to setOf("*"), GUARD_SCRIPT to guardOriginRules(allowlist))

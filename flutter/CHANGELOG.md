@@ -1,5 +1,21 @@
 ## Unreleased
 
+- Guard: installed unarmed and armed by the per-script copy
+  (`guardArmScript`, injected before each page script and each sign-in check
+  script), so the store's own boot traffic runs untouched until Mealio's
+  first script. It never installs in a cross-origin frame, and also covers
+  `setHTMLUnsafe`, `Range.insertNode`/`surroundContents` and `document.write`.
+  `LoginRequest.armGuard` is new.
+- Request bodies: `operations` nested more than 8 deep is blocked, and so is a
+  body over 1 MB (`bodyMaxDepth`, `bodyMaxText`).
+- Messages from the page are read with a depth limit of 512; deeper
+  containers are kept empty, never built. A 100k-deep message no longer
+  overflows the stack.
+- Testing kit: `MealioFakeScript.fromJson` is strict at every level (unknown
+  fields, missing required fields and wrong types throw a FormatException
+  naming the field, such as `script.items[0].key`), and `warm: {}` means
+  signed in, as in TypeScript.
+
 - `restorePicks` re-runs the search that found the picked product, not the
   item's last search, and never throws: it ends with what it could restore.
   A cancel from outside the sheet during it still starts the sheet again.

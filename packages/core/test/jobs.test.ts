@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import vm from 'node:vm';
 import vectors from '../../../protocol/test-vectors.json';
 import {
-  CancelToken, CartSession, GUARD_SCRIPT, HOST_GRACE_MS, MealioClient, REQUEST_TIMEOUT_MS, mutationNames,
+  CancelToken, CartSession, GUARD_ARM_SCRIPT, HOST_GRACE_MS, MealioClient, REQUEST_TIMEOUT_MS, mutationNames,
   type Envelope, type Host,
 } from '../src';
 
@@ -310,7 +310,7 @@ describe('blocked mutations', () => {
     win.XMLHttpRequest.prototype.send = function () { sent.push('xhr'); };
     win.window = win;
     vm.createContext(win);
-    vm.runInContext(GUARD_SCRIPT, win);
+    vm.runInContext(GUARD_ARM_SCRIPT, win);
     return { win, sent };
   }
   const outcome = (p: Promise<unknown>) => p.then(() => 'sent', () => 'refused');
@@ -467,7 +467,7 @@ describe('round 2: guard', () => {
     win.fetch = (u: any) => { sent.push(String(u?.url ?? u)); return Promise.resolve('ok'); };
     win.window = win;
     vm.createContext(win);
-    vm.runInContext(GUARD_SCRIPT, win);
+    vm.runInContext(GUARD_ARM_SCRIPT, win);
     return { win, sent };
   }
   const outcome = (p: Promise<unknown>) => p.then(() => 'sent', () => 'refused');

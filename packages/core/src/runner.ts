@@ -3,7 +3,7 @@
 // Host is the only platform-specific part (WebViews, HTTP, UI).
 
 import { Allowlist, bodyBlocked } from './allowlist';
-import { GUARD_SCRIPT } from './guard';
+import { GUARD_ARM_SCRIPT, GUARD_SCRIPT } from './guard';
 import { checkInstructions, openEnvelope, EnvelopeError } from './verify';
 import type {
   Envelope, FetchOp, FetchResult, Instruction, InstructionResult, Json, JsonMessage, Matcher,
@@ -63,7 +63,9 @@ export interface Host {
   /** Load `url` in the hidden WebView. */
   openPage(store: string, url: string, timeoutMs: number): Promise<{ ok: boolean; finalUrl?: string; error?: string }>;
   /**
-   * Inject `guard` then `script` into the hidden page. Resolve with every JSON
+   * Inject `guard` then `script` into the hidden page's top frame. `guard` is
+   * GUARD_ARM_SCRIPT, the per-script copy that arms the guard; the hidden
+   * WebView's document-start copy is GUARD_SCRIPT. Resolve with every JSON
    * message posted after injection, stopping at the first that matches `until`
    * or when `timeoutMs` passes.
    */
@@ -74,7 +76,11 @@ export interface Host {
    * top-frame navigation; refuse it when false.
    */
   showLogin(opts: {
-    store: string; url: string; title: string; guard: string;
+    store: string; url: string; title: string;
+    /** GUARD_SCRIPT: inject it into every frame at document start. It installs the guard unarmed. */
+    guard: string;
+    /** GUARD_ARM_SCRIPT: inject it into the top frame right before each `check.script`. */
+    armGuard: string;
     check?: { script: string; intervalMs: number } | null;
     doneWhen: Matcher[]; doneWhenUrl?: string | null; timeoutMs: number;
     allowNavigation: (url: string) => boolean;
@@ -156,7 +162,7 @@ export class Runner {
       }
       case 'page_script': {
         try {
-          const r = await bounded(this.host.runScript(store, GUARD_SCRIPT, ins.script, ins.until || [], ins.timeoutMs),
+          const r = await bounded(this.host.runScript(store, GUARD_ARM_SCRIPT, ins.script, ins.until || [], ins.timeoutMs),
             ins.timeoutMs + HOST_GRACE_MS, { messages: [], timedOut: true });
           return { id: ins.id, ok: !r.error, messages: r.messages, timedOut: r.timedOut, error: r.error, ms: now() - t0 } as PageScriptResult;
         } catch (e) {
@@ -171,7 +177,7 @@ export class Runner {
         if (!v.ok) return { id: ins.id, ok: false, outcome: 'cancelled', messages: [], error: 'blocked', ms: 0 } as ShowLoginResult;
         try {
           const r = await bounded(this.host.showLogin({
-            store, url: ins.url, title: ins.title, guard: GUARD_SCRIPT, check: ins.check ?? null,
+            store, url: ins.url, title: ins.title, guard: GUARD_SCRIPT, armGuard: GUARD_ARM_SCRIPT, check: ins.check ?? null,
             doneWhen: ins.doneWhen || [], doneWhenUrl: ins.doneWhenUrl ?? null, timeoutMs: ins.timeoutMs,
             allowNavigation: (u) => this.allowlist.check(store, u, 'login').ok,
             cancel,

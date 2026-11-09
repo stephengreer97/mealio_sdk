@@ -8,10 +8,10 @@
 // the hidden WebView uses.
 
 import React, { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Modal, Platform, Pressable, StatusBar, StyleSheet, Text, useColorScheme, View, type ImageSourcePropType } from 'react-native';
+import { Dimensions, Modal, Platform, Pressable, StatusBar, StyleSheet, Text, useColorScheme, useWindowDimensions, View, type ImageSourcePropType } from 'react-native';
 import type { WebView, WebViewMessageEvent, WebViewNavigation } from 'react-native-webview';
 import {
-  CancelToken as CancelTokenClass, GUARD_SCRIPT, JobQueue, MealioClient, MealioError, PAGE_RESET_MS, matchesAny, parseMessage, safeListener, textTools,
+  CancelToken as CancelTokenClass, GUARD_SCRIPT, JobQueue, MealioClient, MealioError, PAGE_RESET_MS, matchesAny, parseJson, parseMessage, safeListener, textTools,
   type MealioEventListener, type MealioStrings, type TextTools,
   type CancelToken, type CartSession, type Host, type JsonMessage, type Matcher, type PrepareCartInput, type StepListener, type StoreInfo, type StoreLocation, type StorePreferences,
 } from '@mealio/sdk-core';
@@ -191,7 +191,7 @@ const tagScript = (nonce: string) => `(function(){try{
 /** The message a frame posted, or null if it must be dropped. Flips `tag.strict` on the hello. */
 function untag(data: string, tag: Tagged | null): string | null {
   let o: any = null;
-  try { o = JSON.parse(data); } catch { /* a plain message */ }
+  try { o = parseJson(data); } catch { /* a plain message */ }
   if (o && typeof o === 'object' && typeof o.__mealio === 'string') {
     if (!tag || o.__mealio !== tag.nonce) return null;
     if (o.hello) { tag.strict = true; return null; }
@@ -239,7 +239,10 @@ interface LoginState {
   tag: Tagged;
   url: string;
   title: string;
+  /** GUARD_SCRIPT, at document start in every frame: installed, unarmed. */
   guard: string;
+  /** GUARD_ARM_SCRIPT, right before each check script: arms the guard. */
+  armGuard: string;
   check: { script: string; intervalMs: number } | null;
   doneWhen: Matcher[];
   doneWhenUrl: RegExp | null;
@@ -338,7 +341,7 @@ export function MealioProvider(props: MealioProviderProps) {
     const l = loginRef.current;
     if (!l || !l.check) return;
     loginView.current?.injectJavaScript(tagScript(l.tag.nonce));
-    loginView.current?.injectJavaScript(l.guard);
+    loginView.current?.injectJavaScript(l.armGuard);
     loginView.current?.injectJavaScript(l.check.script);
   }, []);
 
@@ -433,7 +436,7 @@ export function MealioProvider(props: MealioProviderProps) {
         let off: (() => void) | undefined;
         const state: LoginState = {
           tag: { nonce: newNonce(), strict: false },
-          url: opts.url, title: opts.title, guard: opts.guard, check: opts.check ?? null, doneWhen: opts.doneWhen,
+          url: opts.url, title: opts.title, guard: opts.guard, armGuard: opts.armGuard, check: opts.check ?? null, doneWhen: opts.doneWhen,
           doneWhenUrl: opts.doneWhenUrl ? new RegExp(opts.doneWhenUrl) : null, allowNavigation: opts.allowNavigation,
           messages: [], finish: (outcome) => { clearTimeout(t); off?.(); resolve({ outcome, messages: state.messages }); },
         };
@@ -642,18 +645,61 @@ export function MealioProvider(props: MealioProviderProps) {
 }
 
 /**
- * The sign-in sheet's frame, clear of the status bar, notch and navigation
- * bar. The Modal draws edge to edge on Android (statusBarTranslucent and
- * navigationBarTranslucent), so the insets are the same whether or not the app
- * itself is edge to edge. With react-native-safe-area-context installed its
- * SafeAreaView measures them; without it, the status bar height on Android
- * and nothing on iOS, where the page sheet already starts below it.
+ * The sign-in sheet's frame, clear of the status bar, notch, home indicator
+ * and navigation bar. The Modal draws edge to edge on Android
+ * (statusBarTranslucent and navigationBarTranslucent), so the insets are the
+ * same whether or not the app itself is edge to edge. With
+ * react-native-safe-area-context installed its SafeAreaView measures them;
+ * without it, fallbackInsets estimates them.
  */
 export function Inset(p: { style?: any; children?: React.ReactNode }) {
+  const win = useWindowDimensions();
   const Safe = loadInsetView();
   if (Safe) return <Safe style={p.style} edges={['top', 'right', 'bottom', 'left']}>{p.children}</Safe>;
-  const top = Platform.OS === 'android' ? StatusBar.currentHeight ?? 0 : 0;
-  return <View style={[p.style, { paddingTop: top }]}>{p.children}</View>;
+  const e = fallbackInsets(Platform.OS, !!(Platform as { isPad?: boolean }).isPad, win, Dimensions.get('screen'), StatusBar.currentHeight ?? 0);
+  return <View style={[p.style, { paddingTop: e.top, paddingRight: e.right, paddingBottom: e.bottom, paddingLeft: e.left }]}>{p.children}</View>;
+}
+
+export interface EdgeInsets { top: number; right: number; bottom: number; left: number }
+
+type Size = { width: number; height: number };
+
+/** Android's navigation bar when it cannot be measured (the app is edge to edge): three-button height. */
+export const ANDROID_NAV_BAR = 48;
+
+/**
+ * The sign-in sheet's insets without react-native-safe-area-context.
+ *
+ * iOS: the page sheet starts below the status bar, so top is 0. An iPhone
+ * with a home indicator (at least 812 points on its long side) keeps 34 at
+ * the bottom in portrait; in landscape 21 at the bottom and 44 on each side,
+ * where the notch can be. An iPad keeps 20 at the bottom. Older iPhones need
+ * nothing.
+ *
+ * Android: the status bar height on top. The navigation bar is what the app's
+ * window leaves out of the screen: below it (less the status bar), or beside
+ * it in landscape, where the bar and the camera cutout can be on either side,
+ * so both sides get it. When the window leaves nothing out (an edge-to-edge
+ * app), ANDROID_NAV_BAR is used: at the bottom in portrait, on both sides and
+ * half of it at the bottom in landscape.
+ */
+export function fallbackInsets(os: string, isPad: boolean, win: Size, screen: Size, statusBar: number): EdgeInsets {
+  const landscape = win.width > win.height;
+  if (os === 'ios') {
+    if (isPad) return { top: 0, right: 0, bottom: 20, left: 0 };
+    if (Math.max(win.width, win.height) < 812) return { top: 0, right: 0, bottom: 0, left: 0 };
+    return landscape ? { top: 0, right: 44, bottom: 21, left: 44 } : { top: 0, right: 0, bottom: 34, left: 0 };
+  }
+  if (os === 'android') {
+    const side = Math.max(0, Math.round(screen.width - win.width));
+    const below = Math.max(0, Math.round(screen.height - win.height - statusBar));
+    if (landscape) {
+      if (side === 0 && below === 0) return { top: statusBar, right: ANDROID_NAV_BAR, bottom: ANDROID_NAV_BAR / 2, left: ANDROID_NAV_BAR };
+      return { top: statusBar, right: side, bottom: below, left: side };
+    }
+    return { top: statusBar, right: 0, bottom: below > 0 ? below : ANDROID_NAV_BAR, left: 0 };
+  }
+  return { top: 0, right: 0, bottom: 0, left: 0 };
 }
 
 /**

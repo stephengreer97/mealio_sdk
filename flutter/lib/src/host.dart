@@ -30,6 +30,7 @@ class LoginRequest {
     required this.url,
     required this.title,
     required this.guard,
+    this.armGuard = '',
     required this.check,
     required this.doneWhen,
     required this.doneWhenUrl,
@@ -40,7 +41,12 @@ class LoginRequest {
   final String store;
   final String url;
   final String title;
+  /// The guard, unarmed: injected on every page load of the sheet.
   final String guard;
+
+  /// The per-script copy that arms the guard: injected right before each
+  /// `check.script`.
+  final String armGuard;
   final LoginCheck? check;
   final List<MessageMatcher> doneWhen;
   final String? doneWhenUrl;

@@ -411,12 +411,28 @@ List<String> mutationNames(String doc) {
 /// query that sends only an innocent name and a hash cannot be read here; the
 /// signature on the envelope covers it. The guard script applies the same rule to requests a
 /// page script makes; this applies it to the runner's own `fetch` op, which
-/// never passes through the page.
-bool bodyBlocked(String? body) {
+/// never passes through the page. A body nested deeper than [bodyMaxDepth] is
+/// blocked, and so is one longer than [bodyMaxText].
+bool bodyBlocked(String? body) => _judged(body, 0);
+
+/// How many times a body may nest inside an `operations` field (form-encoded
+/// or a raw multipart part) and still be read. One nested deeper is blocked.
+/// BODY_MAX_DEPTH in allowlist.ts.
+const int bodyMaxDepth = 8;
+
+/// The longest body (in UTF-16 code units, after a leading byte order mark is
+/// dropped) that is read. A longer one is blocked without being read: store
+/// requests are far smaller, and one that size could hide a blocked name in
+/// escapes no text match would see. BODY_MAX_TEXT.
+const int bodyMaxText = 1048576;
+
+bool _judged(String? body, int depth) {
   if (body == null) return false;
   // A leading byte order mark is dropped, as a server's JSON reader would.
   if (body.startsWith('\uFEFF')) body = body.substring(1);
   if (body.isEmpty) return false;
+  if (depth > bodyMaxDepth) return true;
+  if (body.length > bodyMaxText) return true;
   final names = <String>[
     for (final Match m in _rawOperationRe.allMatches(body)) m.group(1)!,
   ];
@@ -445,7 +461,7 @@ bool bodyBlocked(String? body) {
       if (m.group(1) == 'query') {
         docs.add(v);
       } else if (m.group(1) == 'operations') {
-        if (bodyBlocked(v)) return true;
+        if (_judged(v, depth + 1)) return true;
       } else {
         names.add(v);
       }
@@ -455,7 +471,7 @@ bool bodyBlocked(String? body) {
       if (m.group(1) == 'query') {
         docs.add(v);
       } else if (m.group(1) == 'operations') {
-        if (bodyBlocked(v)) return true;
+        if (_judged(v, depth + 1)) return true;
       } else {
         names.add(v);
       }

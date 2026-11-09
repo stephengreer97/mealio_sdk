@@ -136,13 +136,13 @@ internal class LoginWebController(
         webView = null
     }
 
-    /** Inject GUARD_SCRIPT then the server's check script into the visible page. */
+    /** Inject GUARD_ARM_SCRIPT (installs the guard if missing, and arms it) then the server's check script into the visible page. */
     private fun injectCheck() {
         val wv = webView ?: return
         val c = session.request.check ?: return
         if (session.result.isCompleted) return
         wv.evaluateJavascript(bootstrap, null)
-        wv.evaluateJavascript(session.request.guard, null)
+        wv.evaluateJavascript(session.request.armGuard, null)
         wv.evaluateJavascript(c.script, null)
     }
 

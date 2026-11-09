@@ -33,8 +33,12 @@ public struct LoginRequest {
     public let store: String
     public let url: String
     public let title: String
-    /// GUARD_SCRIPT. Inject it before `check.script` every time.
+    /// GUARD_SCRIPT, the document-start copy: every frame of the sheet's
+    /// WebView gets it (WebViewHost's configuration already injects it).
     public let guardScript: String
+    /// GUARD_ARM_SCRIPT: installs the guard if missing and arms it. Inject it
+    /// into the top frame before `check.script` every time.
+    public let armGuardScript: String
     public let check: LoginCheck?
     public let doneWhen: [Matcher]
     /// A regex source. A main-frame URL matching it means signed in.
@@ -47,11 +51,12 @@ public struct LoginRequest {
 
     public init(store: String, url: String, title: String, guardScript: String, check: LoginCheck?,
                 doneWhen: [Matcher], doneWhenUrl: String?, timeoutMs: Int, allowNavigation: @escaping (String) -> Bool,
-                cancel: CancelToken? = nil) {
+                cancel: CancelToken? = nil, armGuardScript: String = MealioScripts.guardArmScript) {
         self.store = store
         self.url = url
         self.title = title
         self.guardScript = guardScript
+        self.armGuardScript = armGuardScript
         self.check = check
         self.doneWhen = doneWhen
         self.doneWhenUrl = doneWhenUrl
@@ -98,7 +103,8 @@ public protocol MealioHost: AnyObject {
     /// Load `url` in the hidden WebView and wait for it to finish loading.
     func openPage(store: String, url: String, timeoutMs: Int) async throws -> PageOpenOutcome
 
-    /// Inject `guardScript` then `script` into the hidden page. Return every
+    /// Inject `guardScript` (GUARD_ARM_SCRIPT, which arms the guard) then
+    /// `script` into the hidden page. Return every
     /// JSON message posted after injection, stopping at the first that matches
     /// `until` or when `timeoutMs` passes.
     func runScript(store: String, guardScript: String, script: String, until: [Matcher], timeoutMs: Int) async throws -> ScriptOutcome

@@ -186,7 +186,7 @@ class Runner @JvmOverloads constructor(
             is Instruction.PageScript -> {
                 try {
                     val r = bounded(ins.timeoutMs + HOST_GRACE_MS, ScriptRun(emptyList(), timedOut = true)) {
-                        host.runScript(store, GUARD_SCRIPT, ins.script, ins.until, ins.timeoutMs)
+                        host.runScript(store, GUARD_ARM_SCRIPT, ins.script, ins.until, ins.timeoutMs)
                     }
                     InstructionResult.PageScriptResult(ins.id, r.error == null, r.messages, r.timedOut, r.error, ms())
                 } catch (e: Throwable) {
@@ -208,6 +208,7 @@ class Runner @JvmOverloads constructor(
                         host.showLogin(
                             LoginRequest(
                                 store = store, url = ins.url, title = ins.title, guard = GUARD_SCRIPT, check = ins.check,
+                                armGuard = GUARD_ARM_SCRIPT,
                                 doneWhen = ins.doneWhen, doneWhenUrl = ins.doneWhenUrl, timeoutMs = ins.timeoutMs,
                                 allowNavigation = { u -> allowlist.check(store, u, UrlUse.LOGIN).ok },
                                 cancel = cancel,

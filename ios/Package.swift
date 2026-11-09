@@ -26,12 +26,14 @@ let package = Package(
             resources: [
                 // test-vectors.json, strings.json and fake-script.json are
                 // copies of the files in ../protocol.
-                // guard-script.js and bridge-shim.js are the exact text of
-                // GUARD_SCRIPT and BRIDGE_SHIM generated from the TS reference.
+                // guard-script.js, guard-arm.js and bridge-shim.js are the
+                // exact text of GUARD_SCRIPT, GUARD_ARM and BRIDGE_SHIM
+                // generated from the TS reference.
                 .copy("Resources/test-vectors.json"),
                 .copy("Resources/strings.json"),
                 .copy("Resources/fake-script.json"),
                 .copy("Resources/guard-script.js"),
+                .copy("Resources/guard-arm.js"),
                 .copy("Resources/bridge-shim.js"),
             ]
         ),

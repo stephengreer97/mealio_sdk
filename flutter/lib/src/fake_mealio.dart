@@ -48,6 +48,7 @@ class MealioFakeError {
 
   /// From the TypeScript kit's JSON: a code, or `{code, message?, status?}`.
   factory MealioFakeError.fromJson(Object? json) {
+    _checkError(json, 'error');
     if (json is String) return MealioFakeError(json);
     final m = _map(json, 'error');
     return MealioFakeError(
@@ -72,6 +73,184 @@ List<Object?> _listOf(Object? json, String what) {
   throw FormatException('MealioFakeScript: $what must be a list');
 }
 
+// ── Strict checks: the TypeScript types, field by field ─────────────────
+// The same checks as FakeScriptJson.kt. `null` is allowed only where the
+// TypeScript type says `| null`; an absent optional field is always fine.
+
+const Set<String> _errorKinds = <String>{'prepare', 'search', 'add', 'warm', 'stores', 'preferences', 'locations', 'session'};
+
+Never _bad(String path, String what) => throw FormatException('MealioFakeScript: $path $what');
+
+class _Fields {
+  _Fields(Object? json, this.path, Set<String>? known, [Set<String> required = const <String>{}])
+      : o = json is Map ? json : _bad(path, 'must be an object') {
+    for (final Object? k in o.keys) {
+      if (known != null && !known.contains(k)) _bad('$path.$k', 'is not a known field');
+    }
+    for (final String k in required) {
+      if (!o.containsKey(k)) _bad('$path.$k', 'is required');
+    }
+  }
+
+  final Map<Object?, Object?> o;
+  final String path;
+
+  String at(String k) => '$path.$k';
+  bool skip(String k, bool nullable) => !o.containsKey(k) || (nullable && o[k] == null);
+
+  void string(String k, {bool nullable = false, Set<String>? oneOf}) {
+    if (skip(k, nullable)) return;
+    final v = o[k];
+    if (v is! String) _bad(at(k), nullable ? 'must be a string or null' : 'must be a string');
+    if (oneOf != null && !oneOf.contains(v)) _bad(at(k), 'must be one of ${oneOf.join(', ')}, not "$v"');
+  }
+
+  void number(String k, {bool nullable = false, bool integer = false}) {
+    if (skip(k, nullable)) return;
+    final v = o[k];
+    if (v is! num) _bad(at(k), nullable ? 'must be a number or null' : 'must be a number');
+    if (integer && (v is double && (!v.isFinite || v != v.floorToDouble()))) _bad(at(k), 'must be a whole number');
+  }
+
+  void boolean(String k, {bool nullable = false}) {
+    if (skip(k, nullable)) return;
+    if (o[k] is! bool) _bad(at(k), nullable ? 'must be true, false or null' : 'must be true or false');
+  }
+
+  void obj(String k, void Function(Object? v, String path) check, {bool nullable = false}) {
+    if (skip(k, nullable)) return;
+    if (o[k] is! Map) _bad(at(k), nullable ? 'must be an object or null' : 'must be an object');
+    check(o[k], at(k));
+  }
+
+  void list(String k, void Function(Object? v, String path) each) {
+    if (!o.containsKey(k)) return;
+    final a = o[k];
+    if (a is! List) _bad(at(k), 'must be an array');
+    for (var i = 0; i < a.length; i++) {
+      each(a[i], '${at(k)}[$i]');
+    }
+  }
+}
+
+void _checkScript(Object? json) {
+  final f = _Fields(json, 'script', const <String>{
+    'store', 'storeName', 'items', 'recipes', 'warnings', 'search', 'add', 'signIn',
+    'errors', 'stores', 'preferences', 'locations', 'warm',
+  });
+  f.string('store');
+  f.string('storeName');
+  f.list('items', _checkItem);
+  f.list('recipes', (Object? r, String p) {
+    _Fields(r, p, const <String>{'id', 'title'}, const <String>{'id', 'title'})
+      ..string('id')
+      ..string('title', nullable: true);
+  });
+  f.list('warnings', (Object? w, String p) {
+    _Fields(w, p, const <String>{'code', 'message'}, const <String>{'code', 'message'})
+      ..string('code')
+      ..string('message');
+  });
+  f.obj('search', (Object? m, String p) {
+    final g = _Fields(m, p, null);
+    for (final Object? q in g.o.keys) {
+      g.list('$q', _checkProduct);
+    }
+  });
+  f.obj('add', (Object? a, String p) {
+    _Fields(a, p, const <String>{'fail'}, const <String>{'fail'});
+    _checkError((a! as Map)['fail'], '$p.fail');
+  });
+  f.string('signIn', nullable: true, oneOf: const <String>{'signed_in', 'cancelled', 'timeout'});
+  f.obj('errors', (Object? m, String p) {
+    final g = _Fields(m, p, _errorKinds);
+    for (final MapEntry<Object?, Object?> e in g.o.entries) {
+      _checkError(e.value, '$p.${e.key}');
+    }
+  });
+  f.list('stores', (Object? s, String p) {
+    _Fields(s, p, const <String>{'id', 'name', 'via'}, const <String>{'id', 'name', 'via'})
+      ..string('id')
+      ..string('name')
+      ..string('via', oneOf: const <String>{'device', 'kroger_api'});
+  });
+  f.obj('preferences', (Object? s, String p) {
+    _Fields(s, p, const <String>{'defaultStore', 'location'}, const <String>{'defaultStore', 'location'})
+      ..string('defaultStore', nullable: true)
+      ..obj('location', _checkLocation, nullable: true);
+  });
+  f.list('locations', _checkLocation);
+  f.obj('warm', (Object? w, String p) => _Fields(w, p, const <String>{'signedIn'}).boolean('signedIn', nullable: true), nullable: true);
+}
+
+void _checkItem(Object? json, String path) {
+  _Fields(json, path, const <String>{
+    'key', 'ingredient', 'quantity', 'options', 'remembered', 'rememberedPreferenceId', 'rememberedUnavailable',
+    'startUnchecked', 'weightLb', 'recipes', 'unavailable',
+  }, const <String>{'key'})
+    ..string('key')
+    ..string('ingredient')
+    ..number('quantity', integer: true)
+    ..list('options', _checkProduct)
+    ..string('remembered', nullable: true)
+    ..string('rememberedPreferenceId', nullable: true)
+    ..boolean('rememberedUnavailable')
+    ..boolean('startUnchecked')
+    ..number('weightLb')
+    ..list('recipes', (Object? r, String p) {
+      _Fields(r, p, const <String>{'id', 'title', 'quantity'}, const <String>{'id', 'title', 'quantity'})
+        ..string('id')
+        ..string('title', nullable: true)
+        ..number('quantity', integer: true);
+    })
+    ..string('unavailable');
+}
+
+void _checkProduct(Object? json, String path) {
+  _Fields(json, path, const <String>{
+    'id', 'name', 'price', 'imageUrl', 'size', 'outOfStock', 'badge', 'badgeLabel', 'preferences', 'unitPrice',
+    'estimated', 'maxQuantity', 'soldByWeight', 'weightOptions', 'pricePerLb',
+  }, const <String>{'id', 'name'})
+    ..string('id')
+    ..string('name')
+    ..string('price', nullable: true)
+    ..string('imageUrl', nullable: true)
+    ..string('size', nullable: true)
+    ..boolean('outOfStock')
+    ..string('badge', nullable: true, oneOf: const <String>{'picked_before', 'popular', 'partner_pick'})
+    ..string('badgeLabel', nullable: true)
+    ..list('preferences', (Object? p, String at) {
+      _Fields(p, at, const <String>{'id', 'label'}, const <String>{'id', 'label'})
+        ..string('id')
+        ..string('label');
+    })
+    ..number('unitPrice', nullable: true)
+    ..boolean('estimated')
+    ..number('maxQuantity', nullable: true, integer: true)
+    ..boolean('soldByWeight')
+    ..list('weightOptions', (Object? v, String at) {
+      if (v is! num) _bad(at, 'must be a number');
+    })
+    ..number('pricePerLb', nullable: true);
+}
+
+void _checkLocation(Object? json, String path) {
+  _Fields(json, path, const <String>{'id', 'name', 'address', 'zip'}, const <String>{'id', 'name', 'address', 'zip'})
+    ..string('id')
+    ..string('name')
+    ..string('address')
+    ..string('zip', nullable: true);
+}
+
+void _checkError(Object? v, String path) {
+  if (v is String) return;
+  if (v is! Map) _bad(path, 'must be a code or {code, message?, status?}');
+  _Fields(v, path, const <String>{'code', 'message', 'status'}, const <String>{'code'})
+    ..string('code')
+    ..string('message')
+    ..number('status', integer: true);
+}
+
 List<Product> _products(Object? json, String what) => _listOf(json, what).map(Product.fromJson).toList();
 
 /// One line of a cart script.
@@ -92,6 +271,7 @@ class MealioFakeItem {
 
   /// From the TypeScript kit's JSON (`FakeItem`), with its field names.
   factory MealioFakeItem.fromJson(Object? json) {
+    _checkItem(json, 'item');
     final m = _map(json, 'item');
     return MealioFakeItem(
       key: m['key']! as String,
@@ -165,15 +345,13 @@ class MealioFakeScript {
   /// or `{"code", "message", "status"}`; `"warm": null` means nothing to warm.
   /// `onSearch` and `onAdd` are functions and have no JSON form. Loads
   /// protocol/fake-script.json, the script every platform's kit runs.
+  ///
+  /// Strict at every level, as the TypeScript types: an unknown field, a
+  /// missing required field (an item's `key`) or a value of the wrong type
+  /// throws a FormatException naming it (`script.items[0].remebered`).
   factory MealioFakeScript.fromJson(Object? json) {
+    _checkScript(json);
     final m = _map(json, 'script');
-    const known = <String>{
-      'store', 'storeName', 'items', 'recipes', 'warnings', 'search', 'add', 'signIn',
-      'errors', 'stores', 'preferences', 'locations', 'warm',
-    };
-    for (final String k in m.keys) {
-      if (!known.contains(k)) throw FormatException('MealioFakeScript: unknown field "$k"');
-    }
     final add = m['add'];
     return MealioFakeScript(
       store: m['store'] as String?,
@@ -196,7 +374,8 @@ class MealioFakeScript {
           ? const MealioFakeWarm(signedIn: true)
           : m['warm'] == null
               ? null
-              : MealioFakeWarm(signedIn: _map(m['warm'], 'warm')['signedIn'] == true),
+              // TS: `warm?.signedIn ?? true`, so `{}` is signed in.
+              : MealioFakeWarm(signedIn: _map(m['warm'], 'warm')['signedIn'] != false),
     );
   }
 

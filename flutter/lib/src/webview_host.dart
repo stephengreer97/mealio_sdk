@@ -23,6 +23,7 @@ import 'package:webview_flutter_wkwebview/webview_flutter_wkwebview.dart';
 import 'allowlist.dart';
 import 'guard.dart';
 import 'host.dart';
+import 'json_depth.dart';
 import 'matcher.dart';
 import 'protocol.dart';
 import 'runner.dart' show CancelToken;
@@ -61,7 +62,7 @@ String bridgeInjection(String nonce) {
 String? bridgeUnwrap(String raw, String nonce) {
   Object? j;
   try {
-    j = jsonDecode(raw);
+    j = decodeJsonLimited(raw);
   } on FormatException {
     return null;
   }
@@ -608,9 +609,11 @@ class WebViewHost implements MealioHost, MealioPageReset {
   /// - Every top-frame navigation is checked with `allowNavigation`; refused
   ///   ones are cancelled. Sub-frame navigations (captcha, consent) are not
   ///   navigations of the sheet and are let through, as PROTOCOL.md says.
-  /// - After every page load and every `check.intervalMs`, GUARD_SCRIPT then
-  ///   `check.script` are injected; a message matching `doneWhen` means
-  ///   signed in.
+  /// - After every page load and every `check.intervalMs`, GUARD_SCRIPT (the
+  ///   guard, unarmed) is injected, then GUARD_ARM_SCRIPT and `check.script`
+  ///   when there is a check; a message matching `doneWhen` means signed in.
+  ///   With no check script the guard stays unarmed: Mealio runs nothing in
+  ///   the page.
   /// - A URL matching `doneWhenUrl` also means signed in.
   /// - Close, the system back gesture, or popping the route means cancelled.
   ///
@@ -649,7 +652,10 @@ class WebViewHost implements MealioHost, MealioPageReset {
       await _injectBridge(c, nonce);
       await _runQuietly(c, req.guard);
       final check = req.check;
-      if (check != null && check.script.isNotEmpty) await _runQuietly(c, check.script);
+      if (check != null && check.script.isNotEmpty) {
+        await _runQuietly(c, req.armGuard);
+        await _runQuietly(c, check.script);
+      }
     }
 
     c = _newController(

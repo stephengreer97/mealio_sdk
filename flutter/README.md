@@ -418,13 +418,18 @@ Every failure is a `MealioException(code, message)`.
   `WKUserContentController` classes are not exported, and the controller's
   WKWebView is private, so reaching them means importing the plugin's
   `lib/src` files, whose shape changes between the versions this package
-  accepts. So the guard runs in the top frame and, from there, installs
-  itself in each same-origin frame the page adds (`appendChild`,
-  `insertBefore`, `replaceChild`, `append`, `prepend`, `before`, `after`,
-  `replaceWith`, `replaceChildren`, `insertAdjacentElement`,
-  `insertAdjacentHTML`, `innerHTML`, `outerHTML`, then a MutationObserver and
-  each frame's load), and wraps `Worker` and `SharedWorker`. The signature on
-  every envelope stays the primary control.
+  accepts. So Flutter injects only the per-script copy (`guardArmScript`,
+  GUARD_ARM_SCRIPT) into the top frame right before each Mealio script. It
+  installs the guard and arms it; until then the store page runs untouched,
+  as it does on the other SDKs before arming. From the top frame the armed
+  guard arms the same-origin frames the page has, and installs itself, armed,
+  in each one the page adds (`appendChild`, `insertBefore`, `replaceChild`,
+  `append`, `prepend`, `before`, `after`, `replaceWith`, `replaceChildren`,
+  `insertAdjacentElement`, `insertAdjacentHTML`, `innerHTML`, `outerHTML`,
+  `setHTMLUnsafe`, `Range.insertNode` and `surroundContents`,
+  `document.write`, then a MutationObserver and each frame's load), and wraps
+  `Worker` and `SharedWorker`. It never enters a cross-origin frame. The
+  signature on every envelope stays the primary control.
 - **Store sign-in.** A visible WebView that shares the hidden WebView's
   cookie store. While a cart flow sheet is open, `WebViewHost.login` (a
   `ValueNotifier<MealioLoginView?>`) hands it to that sheet, which shows it

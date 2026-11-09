@@ -628,10 +628,11 @@ xcodebuild -scheme MealioSDK -destination 'platform=iOS Simulator,name=iPhone 15
 
 `Tests/MealioSDKTests/Resources/test-vectors.json` is a copy of
 `protocol/test-vectors.json`, and `strings.json` there is a copy of
-`protocol/strings.json`. `guard-script.js` and `bridge-shim.js` there are the
-exact text of `GUARD_SCRIPT` and `BRIDGE_SHIM` from
-`packages/core/src/guard.ts`; the tests compare `MealioScripts` with them byte
-for byte. Regenerate all four whenever the protocol, strings or guard change.
+`protocol/strings.json`. `guard-script.js`, `guard-arm.js` and
+`bridge-shim.js` there are the exact text of `GUARD_SCRIPT`, `GUARD_ARM` and
+`BRIDGE_SHIM` from `packages/core/src/guard.ts`; the tests compare
+`MealioScripts` with them byte for byte. Regenerate them whenever the
+protocol, strings or guard change.
 When `protocol/strings.json` gains a key, add it to `MealioStringKey` and
 `DEFAULT_STRINGS` in `Sources/MealioSDK/MealioStrings.swift`; `StringsTests`
 fails until the two agree.

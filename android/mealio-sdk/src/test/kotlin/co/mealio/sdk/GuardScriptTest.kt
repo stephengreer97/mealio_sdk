@@ -46,4 +46,43 @@ class GuardScriptTest {
         }
         assertTrue(rules.none { ruleMatches(it, "https://evil.com") })
     }
+
+    // ── 0.6 round 5: dormant at document start, armed before each Mealio script ──
+
+    @Test
+    fun theArmingCopyMatchesTheReferenceByteForByte() {
+        assertEquals(readResource("guard-arm-expected.js"), GUARD_ARM_SCRIPT)
+        assertEquals(GUARD_SCRIPT + "\n" + GUARD_ARM, GUARD_ARM_SCRIPT)
+    }
+
+    @Test
+    fun theDocumentStartCopyIsTheDormantOne() {
+        val (script, _) = documentStartScripts(LISTENER_BOOTSTRAP_SCRIPT)[1]
+        assertEquals(GUARD_SCRIPT, script)
+        assertTrue("does not arm itself", !script.contains(GUARD_ARM))
+        // Its first act: leave a cross-origin frame alone.
+        val first = script.lines().drop(1).map { it.trim() }.first { it.isNotEmpty() && !it.startsWith("//") }
+        assertTrue(first, first.contains("window.top") && first.contains("return"))
+    }
+
+    @Test
+    fun everyMealioScriptIsPrecededByTheArmingCopy(): Unit = kotlinx.coroutines.runBlocking {
+        val guards = mutableListOf<String>()
+        var login: LoginRequest? = null
+        val host = object : Host by FakeHost() {
+            override suspend fun runScript(store: String, guard: String, script: String, until: List<Matcher>, timeoutMs: Long): ScriptRun {
+                guards.add(guard)
+                return ScriptRun(listOf(org.json.JSONObject().put("type", "X")), timedOut = false)
+            }
+            override suspend fun showLogin(request: LoginRequest): LoginResult {
+                login = request
+                return LoginResult(LoginOutcome.SIGNED_IN, emptyList())
+            }
+        }
+        val env = TestSigner.instructions(1, listOf(pageScript("s1", "X"), showLoginOp("l1", "https://www.heb.com/my-account/login")))
+        Runner(host, Allowlist(), Vectors.keys).run(env, "job_test", 0)
+        assertEquals(listOf(GUARD_ARM_SCRIPT), guards)
+        assertEquals(GUARD_SCRIPT, login!!.guard)
+        assertEquals(GUARD_ARM_SCRIPT, login!!.armGuard)
+    }
 }

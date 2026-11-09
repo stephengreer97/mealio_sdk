@@ -61,6 +61,9 @@ class FakeHost implements MealioHost {
   FakeHost({this.onOpen, this.onScript, this.onLogin, this.onFetch});
 
   final List<String> calls = <String>[];
+
+  /// The guard text each runScript was given.
+  final List<String> guards = <String>[];
   final Future<PageLoad> Function(String url)? onOpen;
   final Future<ScriptRun> Function(String script, List<MessageMatcher> until)? onScript;
   final Future<LoginResult> Function(LoginRequest request)? onLogin;
@@ -83,6 +86,7 @@ class FakeHost implements MealioHost {
     int timeoutMs,
   ) async {
     calls.add('script');
+    guards.add(guard);
     final f = onScript;
     if (f != null) return f(script, until);
     return ScriptRun(

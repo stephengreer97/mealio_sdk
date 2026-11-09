@@ -116,7 +116,8 @@ describe('the sign-in sheet\'s insets (no deprecated SafeAreaView)', () => {
     await act(async () => { r = TR.create(<Inset style={{ flex: 1 }}><React.Fragment /></Inset>); });
     expect(r.root.findAll((n: any) => n.type === 'SafeAreaContextView')).toHaveLength(0);
     const v = r.root.findAll((n: any) => n.type === 'View')[0];
-    expect(v.props.style).toEqual([{ flex: 1 }, { paddingTop: 24 }]);
+    // Round 5 pads the navigation bar too (round5.test.tsx has the cases).
+    expect(v.props.style).toEqual([{ flex: 1 }, { paddingTop: 24, paddingRight: 0, paddingBottom: 48, paddingLeft: 0 }]);
   });
 
   it('the login Modal draws edge to edge on Android, and nothing imports SafeAreaView from react-native', () => {

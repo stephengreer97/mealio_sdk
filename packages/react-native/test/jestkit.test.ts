@@ -71,3 +71,29 @@ describe('the Jest kit loaded inside a test', () => {
     }
   });
 });
+
+// 0.6 round 5: Jest refuses a hook from inside beforeAll by throwing, and no
+// test name is set there yet, so the mock must catch it, not crash the load.
+describe('the Jest kit loaded inside beforeAll', () => {
+  it('loads, adds no hook, and setupMealioMock says it could not', () => {
+    const state = expect.getState();
+    expect.setState({ currentTestName: undefined });
+    const path = require.resolve('../jest.js');
+    delete require.cache[path];
+    let tries = 0;
+    (globalThis as any).afterEach = () => { tries += 1; throw new Error('Hooks cannot be defined inside tests. Hook of type "afterEach" is nested within "beforeAll".'); };
+    (globalThis as any).expect = expect;
+    try {
+      const m = require('../jest.js');
+      expect(tries).toBe(1);
+      expect(typeof m.setMockUser).toBe('function');
+      m.setMockUser(null);
+      expect(m.useMealio().hasUser).toBe(false);
+      expect(m.setupMealioMock()).toBe(false);
+    } finally {
+      delete (globalThis as any).afterEach;
+      delete (globalThis as any).expect;
+      expect.setState({ currentTestName: state.currentTestName });
+    }
+  });
+});

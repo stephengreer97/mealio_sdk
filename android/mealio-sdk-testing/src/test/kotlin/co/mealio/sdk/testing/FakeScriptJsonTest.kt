@@ -72,4 +72,56 @@ class FakeScriptJsonTest {
             assertTrue(bad, runCatching { FakeScript.fromJson(bad) }.exceptionOrNull() is IllegalArgumentException)
         }
     }
+
+    // ── 0.6 round 5: strict at every level, as the TypeScript types ─────
+
+    private fun refusal(json: String): String? = (runCatching { FakeScript.fromJson(json) }.exceptionOrNull() as? IllegalArgumentException)?.message
+
+    @Test
+    fun aWrongFieldDeepInTheScriptIsAnErrorNamingIt() {
+        val cases = mapOf(
+            """{"items": [{"key": "milk", "options": [{"id": "m1", "name": "Milk", "unitPrice": "3"}]}]}""" to "script.items[0].options[0].unitPrice",
+            """{"items": [{"key": "milk", "options": [{"id": "m1", "name": "Milk", "colour": "red"}]}]}""" to "script.items[0].options[0].colour",
+            """{"items": [{"key": "milk", "quantity": "2"}]}""" to "script.items[0].quantity",
+            """{"items": [{"key": "milk", "recipes": [{"id": "r", "title": "T"}]}]}""" to "script.items[0].recipes[0].quantity",
+            """{"items": [{"key": "milk", "extra": 1}]}""" to "script.items[0].extra",
+            """{"items": [{"key": 7}]}""" to "script.items[0].key",
+            """{"items": {"key": "milk"}}""" to "script.items",
+            """{"search": {"oat": [{"id": "o", "name": 3}]}}""" to "script.search.oat[0].name",
+            """{"search": {"oat": {"id": "o"}}}""" to "script.search.oat",
+            """{"add": {"fail": "x", "retry": true}}""" to "script.add.retry",
+            """{"add": {"fail": {"code": "x", "status": "502"}}}""" to "script.add.fail.status",
+            """{"errors": {"search": {"message": "no code"}}}""" to "script.errors.search.code",
+            """{"stores": [{"id": "heb", "name": "H-E-B", "via": "carrier pigeon"}]}""" to "script.stores[0].via",
+            """{"preferences": {"defaultStore": "heb", "location": {"id": "l", "name": "n", "address": "a"}}}""" to "script.preferences.location.zip",
+            """{"locations": [{"id": "l", "name": "n", "address": 1, "zip": null}]}""" to "script.locations[0].address",
+            """{"warnings": [{"code": "c"}]}""" to "script.warnings[0].message",
+            """{"warm": {"signedIn": "no"}}""" to "script.warm.signedIn",
+            """{"warm": {"signedIn": true, "store": "heb"}}""" to "script.warm.store",
+            """{"warm": true}""" to "script.warm",
+            """{"store": 5}""" to "script.store",
+            """{"stor": "heb"}""" to "script.stor",
+        )
+        for ((json, field) in cases) {
+            val m = refusal(json)
+            assertTrue("$json -> $m", m != null && m.contains(field))
+        }
+    }
+
+    @Test
+    fun trailingTextAndLenientJsonAreErrors() {
+        for (bad in listOf("""{} x""", """{}{}""", """{"store": 'heb'}""", """{store: "heb"}""", """{"store": "heb",}""", """{"store": "heb"} // c""", """{"items": [1,]}""")) {
+            assertTrue(bad, refusal(bad) != null)
+        }
+        assertEquals("heb", FakeScript.fromJson(" {\"store\": \"heb\"} \n").store)
+    }
+
+    @Test
+    fun defaultsMatchTypeScript() {
+        // TS: warm?.signedIn ?? true.
+        assertEquals(true, FakeScript.fromJson("""{"warm": {}}""").warmSignedIn)
+        assertEquals(true, FakeScript.fromJson("""{"warm": {"signedIn": null}}""").warmSignedIn)
+        assertEquals(1, FakeScript.fromJson("""{"items": [{"key": "milk"}]}""").items.single().quantity)
+        assertNull(FakeScript.fromJson("""{"signIn": null}""").signIn)
+    }
 }

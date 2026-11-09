@@ -348,19 +348,70 @@ fun mutationNames(doc: String): List<String> {
 
 private val GRAPHQL_KINDS = setOf("mutation", "query", "subscription", "fragment")
 
-/** JSON.parse as the reference uses it: an object or array, or null when the body is not JSON. */
 /**
- * A field of a multipart/form-data body sent as raw text. Same source as
- * MULTIPART_FIELD in packages/core/src/allowlist.ts, with JavaScript's
- * end-of-input `$` written as `\z` (Java's `$` also matches before a final
- * newline) and JavaScript's `\s` spelled out (Java's has no Unicode spaces).
- * The name may be double-quoted, single-quoted or bare; `operationsX` is
- * another field.
+ * The fields of a multipart/form-data body sent as raw text: every match of
+ * MULTIPART_FIELD in packages/core/src/allowlist.ts, in order, as (name,
+ * value):
+ *
+ *   name=["']?(operationName|query|operations)(?=["';\s]|$)[^\r\n]*\r?\n(?:[^\r\n]+\r?\n)*\r?\n([\s\S]*?)(?=\r?\n--|$)
+ *
+ * Read by hand: java.util.regex recurses once per header line of the
+ * `(?:...)*` group, so a part with a few thousand header lines overflowed the
+ * stack. The pattern never needs to backtrack into a line it has read, so a
+ * scan finds the same matches. The name may be double-quoted, single-quoted or
+ * bare; `operationsX` is another field.
  */
-private val MULTIPART_FIELD_RE = Regex(
-    "name=[\"']?(operationName|query|operations)(?=[\"';\\s\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]|\\z)" +
-        "[^\\r\\n]*\\r?\\n(?:[^\\r\\n]+\\r?\\n)*\\r?\\n([\\s\\S]*?)(?=\\r?\\n--|\\z)",
-)
+internal fun multipartFields(b: String): List<Pair<String, String>> {
+    val out = ArrayList<Pair<String, String>>()
+    val n = b.length
+    var from = 0
+    fun eol(c: Char) = c == '\r' || c == '\n'
+    /** `\r?\n` at i: the index after it, or -1. */
+    fun newline(i: Int): Int = when {
+        i < n && b[i] == '\n' -> i + 1
+        i + 1 < n && b[i] == '\r' && b[i + 1] == '\n' -> i + 2
+        else -> -1
+    }
+    while (true) {
+        val p = b.indexOf("name=", from)
+        if (p < 0) break
+        from = p + 1
+        var i = p + 5
+        if (i < n && (b[i] == '"' || b[i] == '\'')) i++
+        val name = MULTIPART_NAMES.firstOrNull { b.startsWith(it, i) } ?: continue
+        i += name.length
+        if (i < n && b[i] != '"' && b[i] != '\'' && b[i] != ';' && !isJsSpace(b[i])) continue
+        while (i < n && !eol(b[i])) i++
+        i = newline(i)
+        if (i < 0) continue
+        // Header lines, then the blank line.
+        while (i < n && !eol(b[i])) {
+            var k = i
+            while (k < n && !eol(b[k])) k++
+            val next = newline(k)
+            if (next < 0) break
+            i = next
+        }
+        i = newline(i)
+        if (i < 0) continue
+        // The value: up to the first \r?\n-- after it, or the end.
+        val dash = b.indexOf("\n--", i)
+        val end = when {
+            dash < 0 -> n
+            dash - 1 >= i && b[dash - 1] == '\r' -> dash - 1
+            else -> dash
+        }
+        out.add(name to b.substring(i, end))
+        from = end
+    }
+    return out
+}
+
+private val MULTIPART_NAMES = listOf("operationName", "query", "operations")
+
+/** JavaScript's `\s`. */
+private fun isJsSpace(c: Char) = c == ' ' || c in '\t'..'\r' || c == '\u00a0' || c == '\u1680' || c in '\u2000'..'\u200a' ||
+    c == '\u2028' || c == '\u2029' || c == '\u202f' || c == '\u205f' || c == '\u3000' || c == '\ufeff'
 
 /**
  * Does a request body name a blocked operation? Reads `operationName` the way
@@ -372,11 +423,34 @@ private val MULTIPART_FIELD_RE = Regex(
  * The guard script applies the same rule to requests a page script makes; this
  * applies it to the runner's own `fetch` op, which never passes through the page.
  */
-fun bodyBlocked(body: String?): Boolean {
+/**
+ * How many times a body may nest inside an `operations` field (form-encoded
+ * or a raw multipart part) and still be read. One nested deeper is blocked.
+ */
+const val BODY_MAX_DEPTH = 8
+
+/**
+ * The longest body (UTF-16 code units, after a leading byte order mark is
+ * dropped) that is read. A longer one is blocked without being read: it could
+ * hide a blocked name in escapes no text match would see.
+ */
+const val BODY_MAX_TEXT = 1048576
+
+fun bodyBlocked(body: String?): Boolean = try {
+    bodyBlockedAt(body, 0)
+} catch (e: StackOverflowError) {
+    // A body built to exhaust the stack (regex backtracking, nested fragments) is never sent.
+    true
+}
+
+private fun bodyBlockedAt(body: String?, depth: Int): Boolean {
     if (body == null) return false
     // A leading byte order mark is dropped, as a server's JSON reader would.
     val text = body.removePrefix("\uFEFF")
     if (text.isEmpty()) return false
+    if (depth > BODY_MAX_DEPTH) return true
+    // Too long to read: blocked unread. Store requests are far smaller.
+    if (text.length > BODY_MAX_TEXT) return true
     val names = ArrayList<String>()
     val docs = ArrayList<String>()
     for (m in OPERATION_NAME_RE.findAll(text)) names.add(m.groupValues[1])
@@ -399,15 +473,14 @@ fun bodyBlocked(body: String?): Boolean {
             when (m.groupValues[1]) {
                 "query" -> docs.add(v)
                 // GraphQL multipart: `operations` is JSON, judged like a JSON body.
-                "operations" -> if (bodyBlocked(v)) return true
+                "operations" -> if (bodyBlockedAt(v, depth + 1)) return true
                 else -> names.add(v)
             }
         }
-        for (m in MULTIPART_FIELD_RE.findAll(body)) {
-            val v = m.groupValues[2]
-            when (m.groupValues[1]) {
+        for ((field, v) in multipartFields(body)) {
+            when (field) {
                 "query" -> docs.add(v)
-                "operations" -> if (bodyBlocked(v)) return true
+                "operations" -> if (bodyBlockedAt(v, depth + 1)) return true
                 else -> names.add(v)
             }
         }

@@ -156,7 +156,9 @@ final class RunnerTests: XCTestCase {
         XCTAssertEqual(request.check, LoginCheck(script: "true;", intervalMs: 3000))
         XCTAssertEqual(request.doneWhen, [Matcher(type: "HEB_SESSION", eq: ["loggedIn": true])])
         XCTAssertNil(request.doneWhenUrl)
+        // The document-start copy for the sheet's frames, the arming copy before each check.
         XCTAssertEqual(request.guardScript, MealioScripts.guardScript)
+        XCTAssertEqual(request.armGuardScript, MealioScripts.guardArmScript)
         XCTAssertTrue(request.allowNavigation("https://accounts.google.com/o/oauth2"))
         XCTAssertTrue(request.allowNavigation("https://www.heb.com/my-account"))
         XCTAssertFalse(request.allowNavigation("https://www.heb.com/checkout"))

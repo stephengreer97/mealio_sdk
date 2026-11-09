@@ -15,7 +15,7 @@ class LoginRequest @JvmOverloads constructor(
     val store: String,
     val url: String,
     val title: String,
-    /** GUARD_SCRIPT, injected before every check script. */
+    /** GUARD_SCRIPT, the unarmed copy the WebView injects into every store frame at document start. */
     val guard: String,
     val check: LoginCheck?,
     val doneWhen: List<Matcher>,
@@ -26,6 +26,8 @@ class LoginRequest @JvmOverloads constructor(
     val allowNavigation: (String) -> Boolean,
     /** Close the sheet as cancelled when this fires. */
     val cancel: CancelToken? = null,
+    /** GUARD_ARM_SCRIPT: injected into the top frame right before each check script. It arms the guard. */
+    val armGuard: String = GUARD_ARM_SCRIPT,
 )
 
 data class LoginResult(val outcome: LoginOutcome, val messages: List<JSONObject>)
@@ -57,7 +59,9 @@ interface Host {
     suspend fun openPage(store: String, url: String, timeoutMs: Long): PageLoad
 
     /**
-     * Inject `guard` then `script` into the hidden page. Return every JSON
+     * Inject `guard` then `script` into the hidden page's top frame. `guard` is
+     * GUARD_ARM_SCRIPT, the per-script copy that arms the guard; the hidden
+     * WebView's document-start copy is GUARD_SCRIPT. Return every JSON
      * message posted after injection, stopping at the first that matches
      * `until` or when `timeoutMs` passes.
      */

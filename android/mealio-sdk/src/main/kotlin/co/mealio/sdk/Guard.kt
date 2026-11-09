@@ -39,10 +39,14 @@ internal fun jsStringLiteral(s: String): String {
 private const val TRIPLE_QUOTE = "\"\"\""
 
 val GUARD_SCRIPT: String = """(function(){
+  // Never in a cross-origin frame (a captcha, an identity provider): this is
+  // the first thing it does, before it reads or installs anything.
+  try { if (window.top && window.top !== window && !window.top.document) return; } catch (e) { return; }
   if (window.__mealioGuard) return;
   var BLOCK = new RegExp(${jsStringLiteral(BLOCKED_PATTERNS.joinToString("|"))}, 'i');
   var OPS = new RegExp(${jsStringLiteral(BLOCKED_GRAPHQL_OPERATION)}, 'i');
   var PART = "name=[\"']?(operationName|query|operations)(?=[\"';\\s]|$)[^\\r\\n]*\\r?\\n(?:[^\\r\\n]+\\r?\\n)*\\r?\\n([\\s\\S]*?)(?=\\r?\\n--|$)";
+  var MAX_DEPTH = 8, MAX_TEXT = 1048576;
   var root = window, stamps = [];
   function decoded(s) {
     for (var i = 0; i < 2; i++) s = s.replace(/%([0-9a-f]{2})/gi, function (x, h) { return String.fromCharCode(parseInt(h, 16)); });
@@ -107,10 +111,13 @@ val GUARD_SCRIPT: String = """(function(){
     }
     return names;
   }
-  function bodyBlocked(b) {
+  function bodyBlocked(b, depth) {
     if (typeof b !== 'string') return false;
+    depth = depth || 0;
     if (b.charCodeAt(0) === 0xFEFF) b = b.slice(1);
     if (!b) return false;
+    if (depth > MAX_DEPTH) return true;
+    if (b.length > MAX_TEXT) return true;
     var names = [], docs = [], re = /"operationName"\s*:\s*"([^"]*)"/g, m, i;
     while ((m = re.exec(b))) names.push(m[1]);
     try {
@@ -128,13 +135,13 @@ val GUARD_SCRIPT: String = """(function(){
       while ((m = form.exec(b))) {
         var v = decoded(m[2].replace(/\+/g, ' '));
         if (m[1] === 'query') docs.push(v);
-        else if (m[1] === 'operations') { if (bodyBlocked(v)) return true; }
+        else if (m[1] === 'operations') { if (bodyBlocked(v, depth + 1)) return true; }
         else names.push(v);
       }
       var part = new RegExp(PART, 'g');
       while ((m = part.exec(b))) {
         if (m[1] === 'query') docs.push(m[2]);
-        else if (m[1] === 'operations') { if (bodyBlocked(m[2])) return true; }
+        else if (m[1] === 'operations') { if (bodyBlocked(m[2], depth + 1)) return true; }
         else names.push(m[2]);
       }
     }
@@ -153,15 +160,24 @@ val GUARD_SCRIPT: String = """(function(){
     try { root.ReactNativeWebView && root.ReactNativeWebView.postMessage(JSON.stringify({ type: 'MEALIO_GUARD_BLOCKED', why: why })); } catch (e) {}
     return new Error('mealio guard: ' + why);
   }
-  // A same-origin frame gets the guard too, the first time it is reached. A
-  // cross-origin one throws on the first read and is left alone: its requests
-  // carry its own origin, not the store's cookies.
+  // A same-origin frame of an armed window gets the guard, armed, the first
+  // time it is reached. A cross-origin one throws on the first read and is
+  // left alone: its requests carry its own origin, not the store's cookies.
   function intoFrame(w) {
-    try { if (w && !w.__mealioGuard) install(w); } catch (e) {}
+    try {
+      if (!w) return;
+      if (!w.__mealioGuard) install(w);
+      if (typeof w.__mealioArm === 'function') w.__mealioArm();
+    } catch (e) {}
   }
-  // Every window the guard is in: the page and its same-origin frames.
+  function fixed(w, name, value) {
+    Object.defineProperty(w, name, { value: value, writable: false, configurable: false, enumerable: false });
+  }
+  // Every window the guard is in: the page and its same-origin frames. Each
+  // has its own switch; every hook passes straight through while it is off.
   function install(w) {
-    w.__mealioGuard = true;
+    var armed = false;
+    fixed(w, '__mealioGuard', true);
     var loc = w.location;
     function pathOf(u) {
       try { var a = new URL(String(u), loc.href); return a.pathname + a.search; } catch (e) { return String(u || ''); }
@@ -206,6 +222,7 @@ val GUARD_SCRIPT: String = """(function(){
     var f = w.fetch;
     if (f) {
       w.fetch = function (input, init) {
+        if (!armed) return f.apply(this, arguments);
         var url = (input && typeof input === 'object' && input.url) ? input.url : input;
         var self = this, args = arguments;
         if (pathBlocked(url)) return Promise.reject(refuse('blocked_path'));
@@ -220,6 +237,7 @@ val GUARD_SCRIPT: String = """(function(){
     if (beacon) {
       // A beacon cannot wait for a Blob to be read, so only text bodies are allowed.
       nav.sendBeacon = function (url, data) {
+        if (!armed) return beacon.apply(nav, arguments);
         if (pathBlocked(url)) { refuse('blocked_path'); return false; }
         var text = data == null ? '' : bodyText(data);
         if (text && typeof text.then === 'function') { refuse('blocked_operation'); return false; }
@@ -232,6 +250,7 @@ val GUARD_SCRIPT: String = """(function(){
       var open = X.prototype.open, send = X.prototype.send;
       X.prototype.open = function (m, u) { this.__mealioUrl = u; return open.apply(this, arguments); };
       X.prototype.send = function (b) {
+        if (!armed) return send.apply(this, arguments);
         var self = this, args = arguments, text = bodyText(b);
         if (pathBlocked(this.__mealioUrl)) throw refuse('blocked_path');
         function go(body) {
@@ -251,9 +270,11 @@ val GUARD_SCRIPT: String = """(function(){
       var W = w[name];
       if (typeof W !== 'function') return;
       var G = function (url, opts) {
-        var scheme = '';
-        try { scheme = new URL(String(url), loc.href).protocol; } catch (e) {}
-        if (scheme === 'blob:' || scheme === 'data:') throw refuse('blocked_worker');
+        if (armed) {
+          var scheme = '';
+          try { scheme = new URL(String(url), loc.href).protocol; } catch (e) {}
+          if (scheme === 'blob:' || scheme === 'data:') throw refuse('blocked_worker');
+        }
         return arguments.length > 1 ? new W(url, opts) : new W(url);
       };
       G.prototype = W.prototype;
@@ -273,7 +294,7 @@ val GUARD_SCRIPT: String = """(function(){
         configurable: true, enumerable: d.enumerable,
         get: function () {
           var v = d.get.call(this);
-          intoFrame(prop === 'contentWindow' ? v : v && v.defaultView);
+          if (armed) intoFrame(prop === 'contentWindow' ? v : v && v.defaultView);
           return v;
         },
       });
@@ -286,17 +307,27 @@ val GUARD_SCRIPT: String = """(function(){
       intoFrame(el.contentWindow);
       if (el.__mealioWatched || !el.addEventListener) return;
       el.__mealioWatched = true;
-      el.addEventListener('load', function () { intoFrame(el.contentWindow); });
+      el.addEventListener('load', function () { if (armed) intoFrame(el.contentWindow); });
     }
+    // A node, a document, or a fragment or shadow root (which has no
+    // getElementsByTagName), and every frame in it.
     function scan(n) {
-      if (!n || (n.nodeType !== 1 && n.nodeType !== 9)) return;
+      if (!armed || !n || (n.nodeType !== 1 && n.nodeType !== 9 && n.nodeType !== 11)) return;
       if (/^(IFRAME|FRAME|OBJECT)$/i.test(n.nodeName)) watch(n);
-      if (!n.getElementsByTagName) return;
       var names = ['iframe', 'frame', 'object'], i, j, l;
       for (i = 0; i < names.length; i++) {
-        l = n.getElementsByTagName(names[i]);
+        l = n.getElementsByTagName ? n.getElementsByTagName(names[i]) : n.querySelectorAll ? n.querySelectorAll(names[i]) : [];
         for (j = 0; j < l.length; j++) watch(l[j]);
       }
+    }
+    // Every frame the window has, by index, ones a parser made included. (A
+    // frame in a shadow tree is not among them: only its element, whose
+    // getters are hooked, reaches its window.)
+    function sweep() {
+      if (!armed) return;
+      var fr = w.frames, i, n = 0;
+      try { n = fr.length; } catch (e) {}
+      for (i = 0; i < n; i++) { try { intoFrame(fr[i]); } catch (e) {} }
     }
     // Every way a script adds nodes in one call: a frame added this way has a
     // window at once, before any MutationObserver runs. The nodes passed in are
@@ -308,6 +339,7 @@ val GUARD_SCRIPT: String = """(function(){
         var o = P[name];
         if (typeof o !== 'function') return;
         P[name] = function () {
+          if (!armed) return o.apply(this, arguments);
           var added = [], k, j, a;
           for (k = 0; k < arguments.length; k++) {
             a = arguments[k];
@@ -321,7 +353,23 @@ val GUARD_SCRIPT: String = """(function(){
         };
       })(names[i]);
     }
+    // Calls that parse HTML into the node they are called on: it is searched after.
+    function parses(P, names, all) {
+      if (!P) return;
+      for (var i = 0; i < names.length; i++) (function (name) {
+        var o = P[name];
+        if (typeof o !== 'function') return;
+        P[name] = function () {
+          if (!armed) return o.apply(this, arguments);
+          var r = o.apply(this, arguments);
+          scan(this);
+          if (all) sweep();
+          return r;
+        };
+      })(names[i]);
+    }
     var N = w.Node, El = w.Element, CD = w.CharacterData, DT = w.DocumentType, D = w.Document, DF = w.DocumentFragment;
+    var SR = w.ShadowRoot, R = w.Range;
     var kids = ['append', 'prepend', 'replaceChildren'], sibs = ['before', 'after', 'replaceWith'];
     after(N && N.prototype, ['appendChild', 'insertBefore', 'replaceChild']);
     after(El && El.prototype, kids.concat(sibs, ['insertAdjacentElement']));
@@ -329,11 +377,17 @@ val GUARD_SCRIPT: String = """(function(){
     after(DT && DT.prototype, sibs);
     after(D && D.prototype, kids);
     after(DF && DF.prototype, kids);
+    after(R && R.prototype, ['insertNode', 'surroundContents']);
+    parses(El && El.prototype, ['setHTMLUnsafe']);
+    parses(SR && SR.prototype, ['setHTMLUnsafe']);
+    // document.write makes frames where the parser is, and execCommand where the caret is.
+    parses(D && D.prototype, ['write', 'writeln', 'execCommand'], true);
     // HTML text makes frames at once as well: the element, or its parent for
     // the text that lands beside it, is searched after.
     var adj = El && El.prototype.insertAdjacentHTML;
     if (typeof adj === 'function') {
       El.prototype.insertAdjacentHTML = function (where) {
+        if (!armed) return adj.apply(this, arguments);
         var up = this.parentNode, r = adj.apply(this, arguments);
         scan(/^(beforebegin|afterend)$/i.test(String(where)) ? up : this);
         return r;
@@ -345,21 +399,48 @@ val GUARD_SCRIPT: String = """(function(){
       if (!d || !d.set || !d.configurable) return;
       Object.defineProperty(P, prop, {
         configurable: true, enumerable: d.enumerable, get: d.get,
-        set: function (v) { var up = this.parentNode; d.set.call(this, v); scan(prop === 'outerHTML' ? up : this); },
+        set: function (v) {
+          if (!armed) return d.set.call(this, v);
+          var up = this.parentNode; d.set.call(this, v); scan(prop === 'outerHTML' ? up : this);
+        },
       });
     }
     setter(El && El.prototype, 'innerHTML');
     setter(El && El.prototype, 'outerHTML');
+    setter(SR && SR.prototype, 'innerHTML');
     var MO = w.MutationObserver, doc = w.document;
     if (MO && doc) {
       new MO(function (records) {
+        if (!armed) return;
         for (var i = 0; i < records.length; i++) for (var j = 0; j < records[i].addedNodes.length; j++) scan(records[i].addedNodes[j]);
       }).observe(doc, { childList: true, subtree: true });
-      scan(doc.documentElement);
     }
+    // On for good, until the page navigates. It arms every same-origin frame
+    // the window has now; frames added later are armed as they are added.
+    fixed(w, '__mealioArm', function () {
+      if (armed) return;
+      armed = true;
+      if (doc) scan(doc);
+      sweep();
+    });
+    fixed(w, '__mealioArmed', function () { return armed; });
   }
   install(window);
+  // A frame that loads into an armed page starts armed.
+  try { if (window.parent !== window && window.parent.__mealioArmed()) window.__mealioArm(); } catch (e) {}
 })(); true;"""
+
+/** Arms the guard GUARD_SCRIPT installed in this window. Throws if there is none. */
+const val GUARD_ARM: String = "window.__mealioArm(); true;"
+
+/**
+ * The per-script copy: injected into the top frame right before every Mealio
+ * server script (a page_script's script, a show_login check script). It
+ * installs the guard if the document-start copy did not, then arms it. The
+ * document-start copy (GUARD_SCRIPT, see documentStartScripts) only installs
+ * the hooks, unarmed, so the store's own boot code runs untouched.
+ */
+val GUARD_ARM_SCRIPT: String = GUARD_SCRIPT + "\n" + GUARD_ARM
 
 /**
  * Injected at document start so store scripts can post with the same call

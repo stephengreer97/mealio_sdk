@@ -2,19 +2,24 @@
 
 import Foundation
 
+/// Page messages keep containers to this depth; deeper ones come back empty.
+let messageDepth = 512
+
 /// Parse one posted message. Anything that is not a JSON object is dropped.
 /// Accepts JSON text (what the bridge shim posts) or an already-parsed value.
+/// Containers deeper than 512 levels are kept empty, never built, so a page
+/// cannot post a message deep enough to exhaust the stack.
 public func parseMessage(_ raw: Any?) -> JSONMessage? {
     guard let raw = raw else { return nil }
     switch raw {
     case let s as String:
-        return JSONValue.parse(s)?.objectValue
+        return JSONValue.parse(s, keep: messageDepth)?.objectValue
     case let v as JSONValue:
         return v.objectValue
     case let d as [String: Any]:
         guard JSONSerialization.isValidJSONObject(d),
               let data = try? JSONSerialization.data(withJSONObject: d) else { return nil }
-        return JSONValue.parse(data)?.objectValue
+        return JSONValue.parse(data, keep: messageDepth)?.objectValue
     default:
         return nil
     }

@@ -24,8 +24,14 @@ import org.json.JSONTokener
 // The function forms of `search` and `add` have no JSON form: set
 // FakeScript.searchWith / FakeScript.add after loading.
 
-/** A script from its JSON text (TypeScript FakeScript field names). Throws IllegalArgumentException when it is not one. */
+/**
+ * A script from its JSON text (TypeScript FakeScript field names). Throws
+ * IllegalArgumentException when it is not one: text that JSON.parse would
+ * refuse (trailing text included), an unknown field or a value of the wrong
+ * type at any level. The message names the field.
+ */
 fun fakeScriptFromJson(json: String): FakeScript {
+    strictJsonCheck(json)
     val root = try {
         JSONTokener(json).nextValue()
     } catch (e: Exception) {
@@ -37,6 +43,7 @@ fun fakeScriptFromJson(json: String): FakeScript {
 
 /** As above, from a parsed object. */
 fun fakeScriptFromJson(o: JSONObject): FakeScript {
+    checkScript(o)
     val s = FakeScript()
     s.store = o.string("store")
     s.storeName = o.string("storeName")
@@ -56,45 +63,42 @@ fun fakeScriptFromJson(o: JSONObject): FakeScript {
     }
     (o.opt("errors") as? JSONObject)?.let { m ->
         val out = LinkedHashMap<FakeKind, FakeError>()
-        for (k in m.keys()) {
-            val kind = FakeKind.values().firstOrNull { it.name.equals(k, ignoreCase = true) }
-                ?: throw IllegalArgumentException("errors: unknown kind $k")
-            out[kind] = fakeErrorFromJson(m.opt(k))
-        }
+        for (k in m.keys()) out[ERROR_KINDS.getValue(k)] = fakeErrorFromJson(m.opt(k))
         s.errors = out
     }
     if (o.has("stores")) s.stores = o.objects("stores").map { StoreInfo.fromJson(it) }
     (o.opt("preferences") as? JSONObject)?.let { s.preferences = StorePreferences.fromJson(it) }
     s.locations = o.objects("locations").map { StoreLocation.fromJson(it) }
-    // Absent: signed in. null: nothing to warm. {"signedIn": b}: b.
+    // Absent: signed in. null: nothing to warm. {"signedIn": b}: b, and {} is signed in (TS: warm?.signedIn ?? true).
     if (o.has("warm")) s.warmSignedIn = (o.opt("warm") as? JSONObject)?.let { it.opt("signedIn") as? Boolean ?: true }
     return s
 }
 
 /** One script line, TypeScript FakeItem field names. */
-fun fakeItemFromJson(o: JSONObject): FakeItem = FakeItem(
-    key = o.string("key") ?: throw IllegalArgumentException("items: a line has no key"),
-    options = o.objects("options").map { Product.fromJson(it) },
-    remembered = o.string("remembered"),
-    ingredient = o.string("ingredient"),
-    quantity = (o.opt("quantity") as? Number)?.toInt() ?: 1,
-    rememberedPreferenceId = o.string("rememberedPreferenceId"),
-    rememberedUnavailable = o.opt("rememberedUnavailable") == true,
-    startUnchecked = o.opt("startUnchecked") == true,
-    weightLb = (o.opt("weightLb") as? Number)?.toDouble(),
-    recipes = if (o.has("recipes")) o.objects("recipes").map { ItemRecipe.fromJson(it) } else null,
-    unavailable = o.string("unavailable"),
-)
+fun fakeItemFromJson(o: JSONObject): FakeItem {
+    checkItem(o, "item")
+    return FakeItem(
+        key = o.string("key")!!,
+        options = o.objects("options").map { Product.fromJson(it) },
+        remembered = o.string("remembered"),
+        ingredient = o.string("ingredient"),
+        quantity = (o.opt("quantity") as? Number)?.toInt() ?: 1,
+        rememberedPreferenceId = o.string("rememberedPreferenceId"),
+        rememberedUnavailable = o.opt("rememberedUnavailable") == true,
+        startUnchecked = o.opt("startUnchecked") == true,
+        weightLb = (o.opt("weightLb") as? Number)?.toDouble(),
+        recipes = if (o.has("recipes")) o.objects("recipes").map { ItemRecipe.fromJson(it) } else null,
+        unavailable = o.string("unavailable"),
+    )
+}
 
 /** A FakeError: a code string, or {"code", "message"?, "status"?}. */
-fun fakeErrorFromJson(v: Any?): FakeError = when (v) {
-    is String -> FakeError(v)
-    is JSONObject -> FakeError(
-        v.string("code") ?: throw IllegalArgumentException("an error has no code"),
-        v.string("message"),
-        (v.opt("status") as? Number)?.toInt(),
-    )
-    else -> throw IllegalArgumentException("an error must be a code or an object")
+fun fakeErrorFromJson(v: Any?): FakeError {
+    checkError(v, "error")
+    return when (v) {
+        is String -> FakeError(v)
+        else -> (v as JSONObject).let { FakeError(it.string("code")!!, it.string("message"), (it.opt("status") as? Number)?.toInt()) }
+    }
 }
 
 private fun JSONObject.string(k: String): String? = opt(k) as? String
@@ -102,4 +106,199 @@ private fun JSONObject.string(k: String): String? = opt(k) as? String
 private fun JSONObject.objects(k: String): List<JSONObject> {
     val a = opt(k) as? JSONArray ?: return emptyList()
     return (0 until a.length()).mapNotNull { a.opt(it) as? JSONObject }
+}
+
+// ── Strict checks: the TypeScript types, field by field ─────────────────
+
+private val ERROR_KINDS = mapOf(
+    "prepare" to FakeKind.PREPARE, "search" to FakeKind.SEARCH, "add" to FakeKind.ADD, "warm" to FakeKind.WARM,
+    "stores" to FakeKind.STORES, "preferences" to FakeKind.PREFERENCES, "locations" to FakeKind.LOCATIONS, "session" to FakeKind.SESSION,
+)
+
+private fun bad(path: String, what: String): Nothing = throw IllegalArgumentException("The fake Mealio script: $path $what")
+
+/** A field's value against its type. `null` is only allowed where the TypeScript type says `| null`. */
+private class Fields(val o: JSONObject, val path: String, known: Set<String>, required: Set<String> = emptySet()) {
+    init {
+        for (k in o.keys()) if (k !in known) bad("$path.$k", "is not a known field")
+        for (k in required) if (!o.has(k)) bad("$path.$k", "is required")
+    }
+
+    fun at(k: String) = "$path.$k"
+    fun has(k: String) = o.has(k)
+    fun isNull(k: String) = o.opt(k) == JSONObject.NULL
+
+    fun string(k: String, nullable: Boolean = false, oneOf: Set<String>? = null) {
+        if (!has(k) || (nullable && isNull(k))) return
+        val v = o.opt(k) as? String ?: bad(at(k), if (nullable) "must be a string or null" else "must be a string")
+        if (oneOf != null && v !in oneOf) bad(at(k), "must be one of ${oneOf.joinToString()}, not \"$v\"")
+    }
+
+    fun number(k: String, nullable: Boolean = false, integer: Boolean = false) {
+        if (!has(k) || (nullable && isNull(k))) return
+        val v = o.opt(k) as? Number ?: bad(at(k), if (nullable) "must be a number or null" else "must be a number")
+        if (integer && v.toDouble() != Math.floor(v.toDouble())) bad(at(k), "must be a whole number")
+    }
+
+    fun boolean(k: String, nullable: Boolean = false) {
+        if (!has(k) || (nullable && isNull(k))) return
+        o.opt(k) as? Boolean ?: bad(at(k), if (nullable) "must be true, false or null" else "must be true or false")
+    }
+
+    fun obj(k: String, nullable: Boolean = false, check: (JSONObject, String) -> Unit) {
+        if (!has(k) || (nullable && isNull(k))) return
+        check(o.opt(k) as? JSONObject ?: bad(at(k), if (nullable) "must be an object or null" else "must be an object"), at(k))
+    }
+
+    fun list(k: String, each: (Any?, String) -> Unit) {
+        if (!has(k)) return
+        val a = o.opt(k) as? JSONArray ?: bad(at(k), "must be an array")
+        for (i in 0 until a.length()) each(a.opt(i), "${at(k)}[$i]")
+    }
+
+    fun objects(k: String, check: (JSONObject, String) -> Unit) = list(k) { v, p -> check(v as? JSONObject ?: bad(p, "must be an object"), p) }
+}
+
+private fun checkScript(o: JSONObject) {
+    val f = Fields(o, "script", setOf("store", "storeName", "items", "recipes", "warnings", "search", "add", "signIn", "errors", "stores", "preferences", "locations", "warm"))
+    f.string("store")
+    f.string("storeName")
+    f.objects("items", ::checkItem)
+    f.objects("recipes") { r, p -> Fields(r, p, setOf("id", "title"), setOf("id", "title")).run { string("id"); string("title", nullable = true) } }
+    f.objects("warnings") { w, p -> Fields(w, p, setOf("code", "message"), setOf("code", "message")).run { string("code"); string("message") } }
+    f.obj("search") { m, p -> val g = Fields(m, p, m.keys().asSequence().toSet()); for (q in m.keys()) g.objects(q, ::checkProduct) }
+    f.obj("add") { a, p -> Fields(a, p, setOf("fail"), setOf("fail")).run { checkError(a.opt("fail"), at("fail")) } }
+    f.string("signIn", nullable = true, oneOf = setOf("signed_in", "cancelled", "timeout"))
+    f.obj("errors") { m, p -> Fields(m, p, ERROR_KINDS.keys); for (k in m.keys()) checkError(m.opt(k), "$p.$k") }
+    f.objects("stores") { s, p -> Fields(s, p, setOf("id", "name", "via"), setOf("id", "name", "via")).run { string("id"); string("name"); string("via", oneOf = setOf("device", "kroger_api")) } }
+    f.obj("preferences") { s, p ->
+        Fields(s, p, setOf("defaultStore", "location"), setOf("defaultStore", "location")).run { string("defaultStore", nullable = true); obj("location", nullable = true, ::checkLocation) }
+    }
+    f.objects("locations", ::checkLocation)
+    f.obj("warm", nullable = true) { w, p -> Fields(w, p, setOf("signedIn")).boolean("signedIn", nullable = true) }
+}
+
+private fun checkItem(o: JSONObject, path: String) {
+    val f = Fields(o, path, setOf("key", "ingredient", "quantity", "options", "remembered", "rememberedPreferenceId", "rememberedUnavailable",
+        "startUnchecked", "weightLb", "recipes", "unavailable"), setOf("key"))
+    f.string("key")
+    f.string("ingredient")
+    f.number("quantity", integer = true)
+    f.objects("options", ::checkProduct)
+    f.string("remembered", nullable = true)
+    f.string("rememberedPreferenceId", nullable = true)
+    f.boolean("rememberedUnavailable")
+    f.boolean("startUnchecked")
+    f.number("weightLb")
+    f.objects("recipes") { r, p ->
+        Fields(r, p, setOf("id", "title", "quantity"), setOf("id", "title", "quantity")).run { string("id"); string("title", nullable = true); number("quantity", integer = true) }
+    }
+    f.string("unavailable")
+}
+
+private fun checkProduct(o: JSONObject, path: String) {
+    val f = Fields(o, path, setOf("id", "name", "price", "imageUrl", "size", "outOfStock", "badge", "badgeLabel", "preferences", "unitPrice",
+        "estimated", "maxQuantity", "soldByWeight", "weightOptions", "pricePerLb"), setOf("id", "name"))
+    f.string("id")
+    f.string("name")
+    f.string("price", nullable = true)
+    f.string("imageUrl", nullable = true)
+    f.string("size", nullable = true)
+    f.boolean("outOfStock")
+    f.string("badge", nullable = true, oneOf = setOf("picked_before", "popular", "partner_pick"))
+    f.string("badgeLabel", nullable = true)
+    f.objects("preferences") { p, at -> Fields(p, at, setOf("id", "label"), setOf("id", "label")).run { string("id"); string("label") } }
+    f.number("unitPrice", nullable = true)
+    f.boolean("estimated")
+    f.number("maxQuantity", nullable = true, integer = true)
+    f.boolean("soldByWeight")
+    f.list("weightOptions") { v, at -> if (v !is Number) bad(at, "must be a number") }
+    f.number("pricePerLb", nullable = true)
+}
+
+private fun checkLocation(o: JSONObject, path: String) {
+    Fields(o, path, setOf("id", "name", "address", "zip"), setOf("id", "name", "address", "zip")).run {
+        string("id"); string("name"); string("address"); string("zip", nullable = true)
+    }
+}
+
+private fun checkError(v: Any?, path: String) {
+    if (v is String) return
+    val o = v as? JSONObject ?: bad(path, "must be a code or {code, message?, status?}")
+    Fields(o, path, setOf("code", "message", "status"), setOf("code")).run { string("code"); string("message"); number("status", integer = true) }
+}
+
+/**
+ * JSON.parse's grammar, checked before org.json reads the text: its tokener
+ * takes single quotes, bare words, comments and text after the value.
+ */
+internal fun strictJsonCheck(s: String) {
+    var i = 0
+    fun fail(what: String): Nothing = throw IllegalArgumentException("The fake Mealio script is not JSON: $what at offset $i")
+    fun ws() { while (i < s.length && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) i++ }
+    fun str() {
+        i++
+        while (true) {
+            if (i >= s.length) fail("unterminated string")
+            val c = s[i++]
+            if (c == '"') return
+            if (c < ' ') fail("control character in a string")
+            if (c == '\\') {
+                if (i >= s.length) fail("unterminated string")
+                when (s[i++]) {
+                    '"', '\\', '/', 'b', 'f', 'n', 'r', 't' -> {}
+                    'u' -> { if (i + 4 > s.length || (0 until 4).any { s[i + it] !in "0123456789abcdefABCDEF" }) fail("bad \\u escape"); i += 4 }
+                    else -> fail("bad escape")
+                }
+            }
+        }
+    }
+    fun digits() { if (i >= s.length || s[i] !in '0'..'9') fail("expected a digit"); while (i < s.length && s[i] in '0'..'9') i++ }
+    fun value(depth: Int) {
+        if (depth > 512) fail("nested too deep")
+        ws()
+        if (i >= s.length) fail("expected a value")
+        when (val c = s[i]) {
+            '{' -> {
+                i++; ws()
+                if (i < s.length && s[i] == '}') { i++; return }
+                while (true) {
+                    ws()
+                    if (i >= s.length || s[i] != '"') fail("expected a quoted key")
+                    str(); ws()
+                    if (i >= s.length || s[i] != ':') fail("expected ':'")
+                    i++
+                    value(depth + 1); ws()
+                    if (i < s.length && s[i] == ',') { i++; continue }
+                    if (i < s.length && s[i] == '}') { i++; return }
+                    fail("expected ',' or '}'")
+                }
+            }
+            '[' -> {
+                i++; ws()
+                if (i < s.length && s[i] == ']') { i++; return }
+                while (true) {
+                    value(depth + 1); ws()
+                    if (i < s.length && s[i] == ',') { i++; continue }
+                    if (i < s.length && s[i] == ']') { i++; return }
+                    fail("expected ',' or ']'")
+                }
+            }
+            '"' -> str()
+            't', 'f', 'n' -> {
+                val w = when (c) { 't' -> "true"; 'f' -> "false"; else -> "null" }
+                if (!s.startsWith(w, i)) fail("unexpected text")
+                i += w.length
+            }
+            else -> {
+                if (s[i] == '-') i++
+                if (i < s.length && s[i] == '0') i++ else digits()
+                if (i < s.length && s[i] == '.') { i++; digits() }
+                if (i < s.length && (s[i] == 'e' || s[i] == 'E')) { i++; if (i < s.length && (s[i] == '+' || s[i] == '-')) i++; digits() }
+            }
+        }
+    }
+    value(0)
+    ws()
+    if (i != s.length) fail("trailing text")
 }

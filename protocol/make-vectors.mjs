@@ -204,6 +204,44 @@ const vectors = {
     { rule: 'surrogate', body: '{"query":"query { a }","x":"\\ud800"}', blocked: false },
     { rule: 'surrogate', body: '{"query":"mutation { placeOrder { id } }","x":"\\ud83d\\ude00"}', blocked: true },
   ],
+  // 0.6 round 5. Limits on reading a body, in a compact form: the body is
+  // prefix + fill repeated `times` times + suffix.
+  //   depth: a body nests inside an `operations` field (form-encoded or a raw
+  //     multipart part) at most 8 times and is still read; deeper is blocked.
+  //   size: a body longer than 1048576 UTF-16 code units (after a leading BOM
+  //     is dropped) is always blocked. Store requests are far smaller, and a
+  //     body that size could hide a blocked name in escapes no text match sees.
+  bodyLimits: [
+    { rule: 'depth', prefix: '', fill: 'operations=', times: 8, suffix: '{"operationName":"Search"}', blocked: false },
+    { rule: 'depth', prefix: '', fill: 'operations=', times: 9, suffix: '{"operationName":"Search"}', blocked: true },
+    { rule: 'depth', prefix: '', fill: 'operations=', times: 8, suffix: '{"operationName":"PlaceOrder"}', blocked: true },
+    { rule: 'depth', prefix: '--b\r\nContent-Disposition: form-data; name=operations\r\n\r\n', fill: 'operations=', times: 7, suffix: '{"operationName":"Search"}\r\n--b--', blocked: false },
+    { rule: 'depth', prefix: '--b\r\nContent-Disposition: form-data; name=operations\r\n\r\n', fill: 'operations=', times: 8, suffix: '{"operationName":"Search"}\r\n--b--', blocked: true },
+    { rule: 'depth', prefix: '', fill: 'operations=', times: 50000, suffix: '{"operationName":"Search"}', blocked: true },
+    { rule: 'size', prefix: '{"operationName":"Search","pad":"', fill: 'a', times: 1048576 - 33 - 19, suffix: '","note":"payment"}', blocked: false },
+    { rule: 'size', prefix: '{"operationName":"Search","pad":"', fill: 'a', times: 1048576 - 33 - 19 + 1, suffix: '","note":"payment"}', blocked: true },
+    { rule: 'size', prefix: '{"operationName":"Search","pad":"', fill: 'a', times: 1048576 - 33 - 13 + 1, suffix: '","note":"x"}', blocked: true },
+    { rule: 'size', prefix: '﻿{"operationName":"Search","pad":"', fill: 'a', times: 1048576 - 33 - 19, suffix: '","note":"payment"}', blocked: false },
+    { rule: 'size', prefix: '', fill: 'a', times: 1048577, suffix: '', blocked: true },
+    { rule: 'size', prefix: '--b\r\nContent-Disposition: form-data; name=operations\r\n\r\n{"operationName":"Search"}\r\n--b\r\nContent-Disposition: form-data; name="0"\r\n\r\n', fill: 'x\n', times: 600000, suffix: '\r\n--b--', blocked: true },
+    { rule: 'size', prefix: '--b\r\nContent-Disposition: form-data; name=operations\r\n\r\n{"query":"mutation { placeOrder { id } }"}\r\n--b\r\nContent-Disposition: form-data; name="0"\r\n\r\n', fill: 'x\n', times: 600000, suffix: '\r\n--b--', blocked: true },
+  ],
+  // 0.6 round 5. A message a page posts is parsed with a depth limit of 512.
+  // The top container is depth 1. Containers down to depth 512 are built; a
+  // container at depth 513 is kept, empty, in its place, and its contents are
+  // skipped, never built. So a parsed message is at most 513 deep. The message
+  // is prefix + open repeated `times` + close repeated `times` + suffix;
+  // `depth` is the nesting depth of the parsed message (an empty container is
+  // one level) and `keep` a field that must survive as given.
+  deepMessages: [
+    { prefix: '{"type":"X","a":', open: '[', close: ']', times: 10, suffix: ',"keep":1}', depth: 11, keep: 1 },
+    { prefix: '{"type":"X","a":', open: '[', close: ']', times: 511, suffix: ',"keep":1}', depth: 512, keep: 1 },
+    { prefix: '{"type":"X","a":', open: '[', close: ']', times: 512, suffix: ',"keep":1}', depth: 513, keep: 1 },
+    { prefix: '{"type":"X","a":', open: '[', close: ']', times: 600, suffix: ',"keep":1}', depth: 513, keep: 1 },
+    { prefix: '{"type":"X","a":', open: '[', close: ']', times: 100000, suffix: ',"keep":1}', depth: 513, keep: 1 },
+    { prefix: '{"type":"X","a":', open: '{"b":[', close: ']}', times: 50000, suffix: ',"keep":1}', depth: 513, keep: 1 },
+    { prefix: '{"type":"X","a":', open: '["]}\\"{[",[', close: ']]', times: 50000, suffix: ',"keep":1}', depth: 513, keep: 1 },
+  ],
   matchers: [
     { msg: { type: 'ALB_SESSION', loggedIn: true, early: true }, m: { type: 'ALB_SESSION', ne: { early: true } }, ok: false },
     { msg: { type: 'ALB_SESSION', loggedIn: true }, m: { type: 'ALB_SESSION', ne: { early: true } }, ok: true },

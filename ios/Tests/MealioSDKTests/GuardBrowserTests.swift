@@ -1,7 +1,8 @@
 // The guard in a real WKWebView, set up as WebViewHost sets up its pages (the
-// guard as a document-start user script in every frame). Mirrors
-// packages/core/test/guard.browser.test.ts. iOS only: run with xcodebuild,
-// not `swift test`.
+// unarmed guard as a document-start user script in every frame, armed by the
+// per-script copy as the runner injects it). Mirrors
+// packages/core/test/guard.browser.test.ts and round5.browser.test.ts. iOS
+// only: run with xcodebuild, not `swift test`.
 //
 // No network: pages come from a WKURLSchemeHandler at mealio-test://www.heb.com/.
 // A request the guard lets through either reaches that handler or fails in
@@ -25,10 +26,13 @@ private final class TestPages: NSObject, WKURLSchemeHandler {
     func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
         guard let url = urlSchemeTask.request.url else { return }
         let path = url.path.isEmpty ? "/" : url.path
-        let html = pages[path]
-        if html == nil { reached.append(path) }
+        // Pages on www.heb.com by path; on any other host by host + path.
+        let key = url.host == "www.heb.com" ? path : (url.host ?? "") + path
+        let html = pages[key]
+        if html == nil { reached.append(key) }
         let type = html == nil ? "application/json" : "text/html"
-        if let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": type]) {
+        if let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+                                          headerFields: ["Content-Type": type, "Access-Control-Allow-Origin": "*"]) {
             urlSchemeTask.didReceive(response)
         }
         urlSchemeTask.didReceive(Data((html ?? "{}").utf8))
@@ -56,12 +60,16 @@ private final class Once: @unchecked Sendable {
 
 final class GuardBrowserTests: XCTestCase {
 
+    /// The run's first page load has happened (it may take longer).
+    @MainActor private static var firstLoadDone = false
+
     private static let mutation = #"{"query":"mutation { placeOrder { id } }"}"#
 
     /// A page set up like WebViewHost's (the guard in every frame at document
-    /// start), or with the guard only in the main frame's own markup.
+    /// start), or with the guard only in the main frame's own markup. `arm`:
+    /// then inject the per-script copy, as the runner does before a script.
     @MainActor
-    private func page(allFrames: Bool = true, pages given: TestPages? = nil) async throws -> WKWebView {
+    private func page(allFrames: Bool = true, pages given: TestPages? = nil, arm: Bool = true) async throws -> WKWebView {
         let pages = given ?? TestPages()
         let config: WKWebViewConfiguration
         if allFrames {
@@ -72,13 +80,38 @@ final class GuardBrowserTests: XCTestCase {
         config.setURLSchemeHandler(pages, forURLScheme: TestPages.scheme)
         let web = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480), configuration: config)
         _ = web.load(URLRequest(url: URL(string: TestPages.home)!))
-        // Bounded: 3 seconds at most.
-        for _ in 0..<300 {
+        // Bounded: 3 seconds at most, 20 for the run's first page, which
+        // also starts WebKit's processes on a cold simulator.
+        let seconds = GuardBrowserTests.firstLoadDone ? 3 : 20
+        for _ in 0..<(seconds * 100) {
             try await Task.sleep(nanoseconds: 10_000_000)
             if !web.isLoading { break }
         }
-        XCTAssertFalse(web.isLoading, "the test page did not load in 3s")
+        XCTAssertFalse(web.isLoading, "the test page did not load in \(seconds)s")
+        GuardBrowserTests.firstLoadDone = true
+        if arm { try await self.arm(web) }
         return web
+    }
+
+    /// GUARD_ARM_SCRIPT in the top frame, as WebViewHost injects it before
+    /// every server script.
+    @MainActor
+    private func arm(_ web: WKWebView) async throws {
+        // Indirect eval: global scope, as evaluateJavaScript runs it.
+        _ = try await js(web, "(0, eval)(\(MealioScripts.jsStringLiteral(MealioScripts.guardArmScript))); return 'armed';")
+    }
+
+    /// Wait (bounded) until `cond`, a JS expression, is true in the page.
+    @MainActor
+    private func until(_ web: WKWebView, _ cond: String, seconds: Int = 10) async throws {
+        let ok = try await js(web, """
+            for (let i = 0; i < \(seconds * 20); i++) {
+              if (\(cond)) return 'yes';
+              await new Promise((res) => setTimeout(res, 50));
+            }
+            return 'no';
+            """, seconds: Double(seconds + 5))
+        XCTAssertEqual(ok, "yes", "never true: \(cond)")
     }
 
     /// Run an async function body in the page; it returns a string. Bounded.
@@ -216,32 +249,31 @@ final class GuardBrowserTests: XCTestCase {
 
     /// The DOM hooks reach a frame only once the page touches it; a frame's
     /// own first script runs before that. So WebViewHost also injects the
-    /// guard into every frame at document start.
+    /// guard into every frame at document start. A frame that loads into an
+    /// armed page arms itself from its parent.
     @MainActor
     func testNeedsTheDocumentStartInjectionInEveryFrameForAFramesOwnFirstScript() async throws {
-        func first(allFrames: Bool) async throws -> String {
+        func hits(allFrames: Bool) async throws -> [String] {
             let pages = TestPages()
             let top = allFrames ? "" : "<script>\(MealioScripts.guardScript)</script>" // main frame only
             pages.pages = [
-                "/": "<html><head>\(top)</head><body><iframe src=\"/hop\"></iframe></body></html>",
+                "/": "<html><head>\(top)</head><body></body></html>",
                 // A second navigation: the first one reuses the frame's about:blank window.
                 "/hop": "<script>location.replace('/inner')</script>",
-                "/inner": "<script>window.__first = window.__mealioGuard ? 'guarded' : 'bare';</script>",
+                "/inner": "<script>fetch('/checkout/first', { method: 'POST' }).catch(function () {});</script>",
             ]
             let web = try await page(allFrames: allFrames, pages: pages)
-            return try await js(web, """
-                for (let i = 0; i < 30; i++) {
-                  const f = window.frames[0];
-                  if (f && f.__first) return f.__first;
-                  await new Promise((res) => setTimeout(res, 100));
-                }
-                return 'no frame';
+            _ = try await js(web, """
+                const f = document.createElement('iframe'); f.src = '/hop'; document.body.appendChild(f);
+                await new Promise((res) => setTimeout(res, 800));
+                return 'done';
                 """)
+            return pages.reached
         }
-        let bare = try await first(allFrames: false)
-        XCTAssertEqual(bare, "bare")
-        let guarded = try await first(allFrames: true)
-        XCTAssertEqual(guarded, "guarded")
+        let bare = try await hits(allFrames: false)
+        XCTAssertEqual(bare, ["/checkout/first"])
+        let guarded = try await hits(allFrames: true)
+        XCTAssertEqual(guarded, [])
     }
 
     @MainActor
@@ -255,6 +287,157 @@ final class GuardBrowserTests: XCTestCase {
             """)
         XCTAssertEqual(out, all("blocked_operation", ["bom", "multipart"]))
         XCTAssertEqual(pages.reached.filter { $0.contains("checkout") }, [])
+    }
+
+    // MARK: round 5: the guard arms when Mealio uses the page
+
+    /// The challenge frame makes a blob: worker and fetches its own /payment
+    /// path, as Cloudflare's does, on load and again when asked. The guard
+    /// never installs there, armed page or not.
+    @MainActor
+    func testNeverRunsInACrossOriginFrameATurnstileStyleBlobWorkerWorksThereArmedOrNot() async throws {
+        let pages = TestPages()
+        pages.pages = [
+            "/": "<html><head><script>window.msgs = []; addEventListener('message', function (e) { msgs.push(e.data); });</script></head>"
+                + "<body><iframe src=\"\(TestPages.scheme)://challenges.cloudflare.com/turnstile\"></iframe></body></html>",
+            "challenges.cloudflare.com/turnstile": """
+                <script>
+                  function go() {
+                    var out = { guard: typeof window.__mealioGuard, arm: typeof window.__mealioArm };
+                    var src = 'postMessage("pow")';
+                    try {
+                      var w = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+                      w.onmessage = function (e) {
+                        out.worker = e.data;
+                        fetch('/payment/pat', { method: 'POST' }).then(function () { out.fetch = 'sent'; }, function (e) { out.fetch = String(e.message); })
+                          .then(function () { parent.postMessage(out, '*'); });
+                      };
+                    } catch (e) { out.worker = String(e.message); parent.postMessage(out, '*'); }
+                  }
+                  addEventListener('message', go); go();
+                </script>
+                """,
+        ]
+        let web = try await page(pages: pages, arm: false)
+        let want: [String: JSONValue] = ["guard": "undefined", "arm": "undefined", "worker": "pow", "fetch": "sent"]
+        try await until(web, "msgs.length === 1")
+        let first = try await js(web, "return JSON.stringify(msgs[0]);")
+        XCTAssertEqual(JSONValue.parse(first)?.objectValue, want, first)
+        try await arm(web)
+        _ = try await js(web, "frames[0].postMessage('again', '*'); return 'ok';")
+        try await until(web, "msgs.length === 2")
+        let second = try await js(web, "return JSON.stringify(msgs[1]);")
+        XCTAssertEqual(JSONValue.parse(second)?.objectValue, want, second)
+        XCTAssertEqual(pages.reached.filter { $0.contains("/payment/pat") }.count, 2)
+    }
+
+    /// The store's own boot code runs before any Mealio script: its blob
+    /// worker, its fetch to a /payment path and its burst of requests all go
+    /// through, and none of them count toward the rate cap once armed.
+    @MainActor
+    func testLeavesTheStoresBootAloneItsWorkerItsPaymentFetchesItsTrafficVolumeThenBlocksOnceArmed() async throws {
+        let pages = TestPages()
+        let boot = """
+            <script>
+              window.boot = { fetches: 0 };
+              var w = new Worker(URL.createObjectURL(new Blob(['postMessage("boot worker")'], { type: 'text/javascript' })));
+              w.onmessage = function (e) { window.boot.worker = e.data; };
+              fetch('/api/payment/config').then(function () { window.boot.payment = 'sent'; }, function (e) { window.boot.payment = e.message; });
+              var x = new XMLHttpRequest(); x.open('POST', '/graphql'); x.send(\(MealioScripts.jsStringLiteral(GuardBrowserTests.mutation))); window.boot.xhr = 'sent';
+              for (var i = 0; i < 250; i++) fetch('/api/boot/' + i).then(function () { window.boot.fetches++; }, function () {});
+            </script>
+            """
+        pages.pages = ["/": "<html><head>\(boot)</head><body></body></html>"]
+        let web = try await page(pages: pages, arm: false)
+        try await until(web, "window.boot.fetches === 250 && window.boot.worker && window.boot.payment")
+        let bootText = try await js(web, "return JSON.stringify(window.boot);")
+        let booted = JSONValue.parse(bootText)?.objectValue
+        XCTAssertEqual(booted, ["fetches": 250, "worker": "boot worker", "payment": "sent", "xhr": "sent"])
+        XCTAssertTrue(pages.reached.contains("/api/payment/config"))
+        XCTAssertTrue(pages.reached.contains("/graphql"))
+        try await arm(web)
+        let out = try await run(web, """
+            r.after = await t(() => fetch('/api/after'));
+            r.payment = await t(() => fetch('/api/payment/config'));
+            r.body = await t(() => fetch('/graphql', { method: 'POST', body: M }));
+            r.worker = await t(() => new Worker(URL.createObjectURL(new Blob(['1'], { type: 'text/javascript' }))));
+            """)
+        // The 250 boot requests did not count toward the 240 a minute.
+        XCTAssertEqual(out, ["after": "sent", "payment": "blocked_path", "body": "blocked_operation", "worker": "blocked_worker"])
+    }
+
+    @MainActor
+    func testArmingArmsTheFramesThePageAlreadyHasNestedOnesTooAndFramesThatLoadLater() async throws {
+        let pages = TestPages()
+        pages.pages = [
+            "/": "<html><body><iframe src=\"/frame\"></iframe></body></html>",
+            "/frame": "<html><body><iframe></iframe></body></html>",
+            "/later": "<html><body>later</body></html>",
+        ]
+        let web = try await page(pages: pages, arm: false)
+        try await until(web, "frames[0] && frames[0].document.readyState === 'complete' && frames[0].frames.length === 1")
+        func send(_ w: String) -> String { "await t(() => \(w).fetch('/checkout/x', { method: 'POST' }))" }
+        let before = try await run(web, """
+            const a = document.createElement('iframe'); document.body.appendChild(a);
+            r.top = \(send("window")); r.frame = \(send("frames[0]")); r.nested = \(send("frames[0].frames[0]"));
+            r.added = \(send("frames[1]")); r.armed = window.__mealioArmed();
+            """)
+        XCTAssertEqual(before, ["top": "sent", "frame": "sent", "nested": "sent", "added": "sent", "armed": false])
+        try await arm(web)
+        let after = try await run(web, """
+            const b = document.createElement('iframe'); b.src = '/later'; document.body.appendChild(b);
+            await Promise.race([new Promise((res) => b.addEventListener('load', res)), wait(3000)]);
+            r.top = \(send("window")); r.frame = \(send("frames[0]")); r.nested = \(send("frames[0].frames[0]"));
+            r.added = \(send("frames[1]")); r.later = \(send("frames[2]"));
+            """)
+        XCTAssertEqual(after, all("blocked_path", ["top", "frame", "nested", "added", "later"]))
+        XCTAssertEqual(pages.reached.filter { $0.contains("checkout") }.count, 4)
+        // The page cannot turn it off or swap the switch.
+        let tamper = try await run(web, """
+            try { window.__mealioArm = () => {}; window.__mealioArmed = () => false; delete window.__mealioArm; } catch (e) {}
+            r.armed = window.__mealioArmed(); r.send = \(send("window"));
+            """)
+        XCTAssertEqual(tamper, ["armed": true, "send": "blocked_path"])
+    }
+
+    /// No document-start copy here, only the per-script one (the Android
+    /// path). WebKit has setHTMLUnsafe from iOS 17.4; older simulators skip it.
+    @MainActor
+    func testOnceArmedBlocksAFrameMadeBySetHTMLUnsafeAShadowRootARangeExecCommandOrDocumentWrite() async throws {
+        let pages = TestPages()
+        pages.pages = ["/": "<html><body><div id=\"h\"></div></body></html>"]
+        let web = try await page(allFrames: false, pages: pages, arm: true)
+        let out = try await run(web, """
+            const last = () => window[window.length - 1];
+            const box = () => { const b = document.createElement('div'); document.body.appendChild(b); return b; };
+            const send = (w) => t(() => (w || last()).fetch('/checkout/r5', { method: 'POST', body: M }));
+            const unsafe = typeof Element.prototype.setHTMLUnsafe === 'function';
+            if (unsafe) { box().setHTMLUnsafe('<iframe></iframe>'); r.setHTMLUnsafe = await send(); } else r.setHTMLUnsafe = 'missing';
+            // A frame in a shadow tree is not in window.frames: only its element reaches it.
+            if (unsafe) { const sr = box().attachShadow({ mode: 'open' }); sr.setHTMLUnsafe('<iframe></iframe>'); r.shadowSetHTMLUnsafe = await send(sr.querySelector('iframe').contentWindow); } else r.shadowSetHTMLUnsafe = 'missing';
+            { const sr = box().attachShadow({ mode: 'open' }); sr.innerHTML = '<iframe></iframe>'; r.shadowInnerHTML = await send(sr.querySelector('iframe').contentWindow); }
+            { const g = document.createRange(); g.selectNodeContents(box()); g.insertNode(document.createElement('iframe')); } r.rangeInsertNode = await send();
+            { const b = box(); b.appendChild(document.createElement('span')); const g = document.createRange(); g.selectNodeContents(b); g.surroundContents(document.createElement('iframe')); } r.surroundContents = await send();
+            { const d = document.getElementById('h'); d.contentEditable = 'true'; d.focus(); document.execCommand('insertHTML', false, '<iframe></iframe>'); } r.execCommand = await send();
+            { const a = document.createElement('iframe'); document.body.appendChild(a); a.contentDocument.write('<iframe></iframe>'); r.frameWrite = await send(a.contentWindow.frames[0]); }
+            { const a = document.createElement('iframe'); document.body.appendChild(a); a.contentDocument.writeln('<iframe></iframe>'); r.frameWriteln = await send(a.contentWindow.frames[0]); }
+            """)
+        XCTAssertEqual(out.count, 8)
+        for (k, v) in out {
+            if k.lowercased().contains("sethtmlunsafe"), v == "missing" { continue }
+            XCTAssertEqual(v, "blocked_path", k)
+        }
+        // Last, as it replaces the page: document.write on the loaded top
+        // document, then frames[n].fetch.
+        let write = try await js(web, """
+            const t = async (f) => { try { await f(); return 'sent'; } catch (e) { return String(e && e.message || e).replace('mealio guard: ', ''); } };
+            document.write('<body><iframe></iframe></body>');
+            const r = await t(() => frames[0].fetch('/graphql', { method: 'POST', body: \(MealioScripts.jsStringLiteral(GuardBrowserTests.mutation)) }));
+            document.close();
+            return r;
+            """)
+        XCTAssertEqual(write, "blocked_operation")
+        XCTAssertEqual(pages.reached.filter { $0.contains("checkout") || $0.contains("graphql") }, [])
     }
 }
 #endif

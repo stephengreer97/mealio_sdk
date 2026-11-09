@@ -26,10 +26,15 @@ enum StrictJSON {
 }
 
 private struct StrictJSONParser {
+    // The open containers live in their own stacks and are appended to in
+    // place. Holding them inside the frame enum copied each one on every
+    // append (the enum kept a second reference), which is quadratic.
     private enum Frame {
-        case array([JSONValue], keeps: Bool)
-        case object([String: JSONValue], key: String, keeps: Bool)
+        case array(keeps: Bool)
+        case object(key: String, keeps: Bool)
     }
+    private var arrays: [[JSONValue]] = []
+    private var objects: [[String: JSONValue]] = []
 
     private let b: [UInt8]
     private let keep: Int
@@ -68,7 +73,8 @@ private struct StrictJSONParser {
                     value = .object([:])
                 } else {
                     guard let key = memberKey() else { return nil }
-                    stack.append(.object([:], key: key, keeps: keeps))
+                    objects.append([:])
+                    stack.append(.object(key: key, keeps: keeps))
                     continue
                 }
             case UInt8(ascii: "["):
@@ -78,7 +84,8 @@ private struct StrictJSONParser {
                     i += 1
                     value = .array([])
                 } else {
-                    stack.append(.array([], keeps: keeps))
+                    arrays.append([])
+                    stack.append(.array(keeps: keeps))
                     continue
                 }
             case UInt8(ascii: "\""):
@@ -108,30 +115,30 @@ private struct StrictJSONParser {
                     return Optional<JSONValue>.none
                 }
                 switch top {
-                case .array(var a, let keeps):
-                    if keeps { a.append(value) }
+                case .array(let keeps):
+                    if keeps { arrays[arrays.count - 1].append(value) }
                     if peek == UInt8(ascii: ",") {
                         i += 1
                         skipSpace()
-                        stack.append(.array(a, keeps: keeps))
+                        stack.append(.array(keeps: keeps))
                         next = true
                     } else if peek == UInt8(ascii: "]") {
                         i += 1
-                        value = .array(a)
+                        value = .array(arrays.removeLast())
                     } else {
                         return nil
                     }
-                case .object(var o, let key, let keeps):
-                    if keeps { o[key] = value }
+                case .object(let key, let keeps):
+                    if keeps { objects[objects.count - 1][key] = value }
                     if peek == UInt8(ascii: ",") {
                         i += 1
                         skipSpace()
                         guard let k = memberKey() else { return nil }
-                        stack.append(.object(o, key: k, keeps: keeps))
+                        stack.append(.object(key: k, keeps: keeps))
                         next = true
                     } else if peek == UInt8(ascii: "}") {
                         i += 1
-                        value = .object(o)
+                        value = .object(objects.removeLast())
                     } else {
                         return nil
                     }

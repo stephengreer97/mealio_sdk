@@ -8,8 +8,9 @@
 // setMockUser('u1') signs someone in, setMockUser(undefined) stops tracking.
 // Everything resets after each test: mocked answers, the user, and recorded
 // calls. Loaded at a file's top level (the usual jest.mock line), it registers
-// that afterEach itself. Loaded inside a test (a lazy require, or
-// jest.isolateModules), where Jest refuses new hooks, it does not; then add
+// that afterEach itself. Loaded inside a test or a hook (a lazy require,
+// jest.isolateModules, a require in beforeAll), where Jest refuses new hooks,
+// it does not; then add
 //   require('@mealio/react-native-cart/jest').setupMealioMock();
 // to a setup file (Jest's setupFilesAfterEnv) to register it for every test
 // file. It registers once however often it is called.
@@ -145,7 +146,13 @@ let registered = false;
 function setupMealioMock() {
   if (registered) return true;
   if (typeof afterEach !== 'function' || insideTest()) return false;
-  afterEach(() => resetMealioMock());
+  // Jest also refuses a hook from inside beforeAll (or any hook), where no
+  // test name is set yet; there it throws, and loading the mock must not.
+  try {
+    afterEach(() => resetMealioMock());
+  } catch (e) {
+    return false;
+  }
   registered = true;
   return true;
 }

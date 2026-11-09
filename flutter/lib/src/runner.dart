@@ -183,7 +183,7 @@ class Runner {
       case final PageScript i: {
         try {
           final r = await _bounded(
-            _host.runScript(store, guardScript, i.script, i.until, i.timeoutMs),
+            _host.runScript(store, guardArmScript, i.script, i.until, i.timeoutMs),
             i.timeoutMs + hostGraceMs,
             const ScriptRun(messages: <JsonMessage>[], timedOut: true),
           );
@@ -236,6 +236,7 @@ class Runner {
             url: i.url,
             title: i.title,
             guard: guardScript,
+            armGuard: guardArmScript,
             check: i.check,
             doneWhen: i.doneWhen,
             doneWhenUrl: i.doneWhenUrl,

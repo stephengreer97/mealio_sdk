@@ -618,7 +618,8 @@ final class MealioFlowModel: ObservableObject {
 
     /// Hidden mid-add (the partner set `isPresented` false; the user cannot
     /// close then), the add runs on and `report` waits for it. The sheet stops
-    /// hosting sign-in, so a sign-in the add asks for later is shown modally.
+    /// hosting sign-in: one on screen moves to a modal, and one the add asks
+    /// for later is shown modally.
     private func closeNow(_ report: @escaping (AddResult?) -> Void) {
         guard hosting else { return }
         hosting = false
@@ -630,7 +631,9 @@ final class MealioFlowModel: ObservableObject {
         cart?.cancelSearches()
         let outcome = phase == .done ? result : nil
         MealioCart.emit(.sheetClosed(step: sheetStep, added: outcome?.added.count ?? 0))
-        login?.cancel()
+        // Mid-add, a sign-in on screen belongs to the add, which runs on:
+        // the host moves it to a modal when this sheet stops hosting.
+        if !adding { login?.cancel() }
         loginSub?.cancel()
         loginSub = nil
         userSub?.cancel()
@@ -654,6 +657,11 @@ final class MealioFlowModel: ObservableObject {
         var shown = (e as? MealioError) ?? MealioError(code: "error", message: e.localizedDescription)
         if shown.message.isEmpty, let fallback = fallback {
             shown = MealioError(code: shown.code, message: fallback)
+        }
+        // After the restart cap, a cancel's own text ("Cancelled") means
+        // nothing to the user: show the normal error sentence.
+        if shown.code == MealioError.Code.cancelled {
+            shown = MealioError(code: shown.code, message: MealioCart.text.tr(.somethingWrongSentence), reason: shown.reason)
         }
         error = shown
         phase = .error

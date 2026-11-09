@@ -64,11 +64,16 @@ func bounded<T>(_ ms: Int, fallback: T, _ op: @escaping @MainActor () async thro
 }
 
 /// `op`, or what `late` says once `ms` passes. The task running `op` is
-/// cancelled then, which stops a URLSession request.
+/// cancelled then, which stops a URLSession request. When `cancel` fires
+/// first, the task is cancelled the same way and this throws `cancelled`.
 @MainActor
 func withDeadline<T>(_ ms: Int, late: @escaping @MainActor () -> Result<T, Error>,
+                     cancel: CancelToken? = nil,
                      _ op: @escaping @MainActor () async throws -> T) async throws -> T {
+    if let c = cancel, c.cancelled { throw MealioClient.cancelled(c) }
     let box = TaskBox()
+    var stopListening: (() -> Void)?
+    defer { stopListening?() }
     let result: Result<T, Error> = await withCheckedContinuation { (cont: CheckedContinuation<Result<T, Error>, Never>) in
         let once = ResumeOnce(cont)
         let timer = Task { @MainActor in
@@ -83,6 +88,12 @@ func withDeadline<T>(_ ms: Int, late: @escaping @MainActor () -> Result<T, Error
                 once.resume(.failure(error))
             }
             timer.cancel()
+        }
+        if let token = cancel {
+            stopListening = token.onCancel {
+                timer.cancel()
+                if once.resume(.failure(MealioClient.cancelled(token))) { box.task?.cancel() }
+            }
         }
     }
     return try result.get()
@@ -218,7 +229,7 @@ public final class Runner {
         case .pageScript(let op):
             do {
                 let r = try await bounded(op.timeoutMs + grace, fallback: ScriptOutcome(messages: [], timedOut: true)) {
-                    try await host.runScript(store: store, guardScript: MealioScripts.guardScript, script: op.script,
+                    try await host.runScript(store: store, guardScript: MealioScripts.guardArmScript, script: op.script,
                                              until: op.until, timeoutMs: op.timeoutMs)
                 }
                 return InstructionResult(id: op.id, ok: r.error == nil, ms: ms(), error: r.error,
@@ -241,7 +252,8 @@ public final class Runner {
             let request = LoginRequest(
                 store: store, url: op.url, title: op.title, guardScript: MealioScripts.guardScript,
                 check: op.check, doneWhen: op.doneWhen, doneWhenUrl: op.doneWhenUrl, timeoutMs: op.timeoutMs,
-                allowNavigation: { url in allowlist.check(store, url, .login).ok }, cancel: cancel)
+                allowNavigation: { url in allowlist.check(store, url, .login).ok }, cancel: cancel,
+                armGuardScript: MealioScripts.guardArmScript)
             do {
                 let r = try await bounded(op.timeoutMs + grace, fallback: LoginOutcome(outcome: .timeout, messages: [])) {
                     try await host.showLogin(request)

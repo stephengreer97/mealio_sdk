@@ -669,13 +669,15 @@ public final class MealioClient {
     public func addToCart(cartId: String, selections: [Selection],
                           onStep: StepListener? = nil) async throws -> AddResult {
         struct Body: Encodable { let selections: [Selection]; let sdk: SDKInfo; let epoch: Int }
-        // Pending while its session is fetched too, so a warm-up cannot slip in.
-        queue.pending += 1
-        defer { queue.pending -= 1 }
+        // The session is the one of the moment the add was asked for. Its
+        // token is fetched while the add waits in line: the add takes its
+        // place in the queue now, so a job asked for after it cannot run
+        // first while the token is on its way.
         let gen = sessionGen
-        let token = try await sessionToken(gen: gen)
-        let pin = SessionPin(token: token, gen: gen)
+        let first = Task { @MainActor () async throws -> String in try await self.sessionToken(gen: gen) }
         let result: JSONValue = try await cartJob(cancel: nil) { () async throws -> JSONValue in
+            let token = try await first.value
+            let pin = SessionPin(token: token, gen: gen)
             let a = self.about()
             let start = try await self.post("/api/v1/sdk/carts/\(MealioClient.encodeComponent(cartId))/add",
                                             body: Body(selections: selections, sdk: a.sdk, epoch: a.epoch), pin: pin)
@@ -767,17 +769,23 @@ public final class MealioClient {
     }
 
     /// One HTTP call, bounded: headers and body both inside the request
-    /// timeout. `json` is nil when the body is not JSON.
-    private func request(_ req: URLRequest) async throws -> (status: Int, json: JSONValue?) {
+    /// timeout. `json` is nil when the body is not JSON. `cancel` aborts the
+    /// URLSession task in flight and fails with `cancelled`; an answer that
+    /// lands after the cancel is dropped the same way.
+    private func request(_ req: URLRequest, cancel: CancelToken? = nil) async throws -> (status: Int, json: JSONValue?) {
         let session = config.urlSession
+        let got: (Data, URLResponse)
         do {
-            let (data, resp): (Data, URLResponse) = try await withDeadline(config.requestTimeoutMs,
-                                                                          late: { .failure(URLError(.timedOut)) },
-                                                                          { try await session.data(for: req) })
-            return ((resp as? HTTPURLResponse)?.statusCode ?? 0, JSONValue.parse(data))
+            got = try await withDeadline(config.requestTimeoutMs,
+                                         late: { .failure(URLError(.timedOut)) },
+                                         cancel: cancel,
+                                         { try await session.data(for: req) })
         } catch {
+            if let c = cancel { try MealioClient.stopIf(c) }
             throw MealioError(code: MealioError.Code.network, message: "Could not reach Mealio")
         }
+        if let c = cancel { try MealioClient.stopIf(c) }
+        return ((got.1 as? HTTPURLResponse)?.statusCode ?? 0, JSONValue.parse(got.0))
     }
 
     /// The body of a good answer, or the error it stands for.
@@ -834,7 +842,8 @@ public final class MealioClient {
             }
         }
 
-        let answer = try await request(req)
+        if let c = cancel { try MealioClient.stopIf(c) }
+        let answer = try await request(req, cancel: cancel)
         if answer.status == 401 && !retried {
             // An add never moves to another session than the one it was asked
             // for in. Within it, it may get a fresh token.

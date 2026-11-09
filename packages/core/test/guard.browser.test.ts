@@ -5,7 +5,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import { GUARD_SCRIPT } from '../src';
+import { GUARD_ARM_SCRIPT, GUARD_SCRIPT } from '../src';
 
 function loadPlaywright(): any {
   const from = process.env.MEALIO_PLAYWRIGHT;
@@ -43,7 +43,7 @@ describe.skipIf(!browser)('guard in Chromium', () => {
     });
     page = await ctx.newPage();
     await page.goto('https://www.heb.com/');
-    await page.evaluate(GUARD_SCRIPT);
+    await page.evaluate(GUARD_ARM_SCRIPT);
   });
   afterAll(async () => { await browser?.close(); });
 
@@ -148,7 +148,8 @@ describe.skipIf(!browser)('guard in Chromium', () => {
   // The DOM hooks reach a frame only once the page touches it; a frame's own
   // first script runs before that. So every SDK also injects the guard into
   // every frame at document start (here: Playwright's init script, which runs
-  // in every frame like the platforms' all-frames user scripts).
+  // in every frame like the platforms' all-frames user scripts). A frame that
+  // loads into an armed page arms itself from its parent.
   it('needs the document-start injection in every frame for a frame\'s own first script', async () => {
     const hits = async (allFrames: boolean) => {
       const ctx = await browser.newContext();
@@ -157,7 +158,7 @@ describe.skipIf(!browser)('guard in Chromium', () => {
       const top = allFrames ? '' : `<script>${GUARD_SCRIPT}</script>`; // main frame only
       await ctx.route('https://www.heb.com/**', async (r: any) => {
         const u = new URL(r.request().url());
-        if (u.pathname === '/') return r.fulfill({ status: 200, contentType: 'text/html', body: `<html><head>${top}</head><body><iframe src="/hop"></iframe></body></html>` });
+        if (u.pathname === '/') return r.fulfill({ status: 200, contentType: 'text/html', body: `<html><head>${top}</head><body></body></html>` });
         // A second navigation: the first one reuses the frame's about:blank window.
         if (u.pathname === '/hop') return r.fulfill({ status: 200, contentType: 'text/html', body: '<script>location.replace("/inner")</script>' });
         if (u.pathname === '/inner') return r.fulfill({ status: 200, contentType: 'text/html', body: '<script>fetch("/checkout/first", { method: "POST" }).catch(function () {});</script>' });
@@ -166,6 +167,8 @@ describe.skipIf(!browser)('guard in Chromium', () => {
       });
       const p = await ctx.newPage();
       await p.goto('https://www.heb.com/');
+      await p.evaluate(GUARD_ARM_SCRIPT);
+      await p.evaluate(`{ const f = document.createElement('iframe'); f.src = '/hop'; document.body.appendChild(f); }`);
       await p.waitForTimeout(800);
       await ctx.close();
       return got;

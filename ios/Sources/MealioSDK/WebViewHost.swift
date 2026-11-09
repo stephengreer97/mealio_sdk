@@ -64,9 +64,15 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
     /// Open cart flow sheets that will draw the sign-in themselves.
     private var flowHosts = 0
 
-    /// A cart flow sheet opened (`true`) or closed (`false`).
+    /// A cart flow sheet opened (`true`) or closed (`false`). When the last
+    /// one closes with a sign-in on screen (the sheet was hidden mid-add), the
+    /// sign-in moves to a modal of its own instead of being cancelled.
     func hostLogin(_ on: Bool) {
         flowHosts = max(0, flowHosts + (on ? 1 : -1))
+        if !on, flowHosts == 0, let shown = login {
+            login = nil
+            shown.moveToModal(presenter)
+        }
     }
 
     private(set) var madeFetchSession: URLSession?
@@ -103,10 +109,14 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
         let content = WKUserContentController()
         content.addUserScript(WKUserScript(source: Bridge.nativePostScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         content.addUserScript(WKUserScript(source: MealioScripts.bridgeShim, injectionTime: .atDocumentStart, forMainFrameOnly: true))
-        // The guard in EVERY frame, before any of the frame's own scripts run.
-        // The guard's in-page hooks stay as a second layer (a frame a script
-        // adds and uses in the same tick), and it is still injected before
-        // each server script; it skips itself where it is already installed.
+        // The guard in EVERY frame, before any of the frame's own scripts run,
+        // UNARMED: its hooks pass everything through, so the store's own boot
+        // code (workers, /payment config fetches) runs untouched, and in a
+        // cross-origin frame (a captcha, an identity provider) it installs
+        // nothing. Each server script is preceded by `guardArmScript`, which
+        // arms it in the page and its same-origin frames until the page
+        // navigates. The in-page hooks stay as a second layer (a frame a
+        // script adds and uses in the same tick).
         content.addUserScript(WKUserScript(source: MealioScripts.guardScript, injectionTime: .atDocumentStart, forMainFrameOnly: false))
         content.add(handler, name: Bridge.messageHandlerName)
         config.userContentController = content
@@ -589,12 +599,41 @@ final class LoginSheet: NSObject, WKNavigationDelegate, WKUIDelegate, UIAdaptive
         }
     }
 
+    /// The flow sheet that drew this sign-in went away (hidden mid-add): show
+    /// it in a modal sheet instead, once the flow sheet has finished leaving.
+    /// It is retried for a short while, since UIKit refuses to present from a
+    /// controller that is still dismissing; if it never can, the sign-in ends
+    /// as cancelled, as a closed one would.
+    func moveToModal(_ presenter: @escaping @MainActor () -> UIViewController?, tries: Int = 12) {
+        guard !finished, nav == nil else { return }
+        // Off the flow: it no longer draws or takes down this sign-in.
+        unpublish = nil
+        if let from = presenter(), from.viewIfLoaded?.window != nil, from.presentedViewController == nil,
+           !from.isBeingDismissed, !from.isBeingPresented {
+            let screen = LoginViewController(title: request.title, webView: webView) { [weak self] in
+                self?.finish(.cancelled)
+            }
+            let nav = UINavigationController(rootViewController: screen)
+            nav.presentationController?.delegate = self
+            self.nav = nav
+            from.present(nav, animated: true)
+            return
+        }
+        guard tries > 0 else {
+            failure = LoginSheet.notShown
+            finish(.cancelled)
+            return
+        }
+        timers.append(after(250) { [weak self] in self?.moveToModal(presenter, tries: tries - 1) })
+    }
+
     static let notShown = MealioError(code: MealioError.Code.unsupported,
                                       message: "Could not show the store sign-in: the presenting view controller is not on screen or is already presenting")
 
-    /// GUARD_SCRIPT, then the check script.
+    /// GUARD_ARM_SCRIPT, then the check script, each its own evaluation in
+    /// the top frame. (GUARD_SCRIPT is already in every frame at document start.)
     private func inject() {
-        webView.evaluateJavaScript(request.guardScript, completionHandler: nil)
+        webView.evaluateJavaScript(request.armGuardScript, completionHandler: nil)
         if let check = request.check {
             webView.evaluateJavaScript(check.script, completionHandler: nil)
         }
@@ -728,6 +767,18 @@ final class LoginViewController: UIViewController {
         view.backgroundColor = .systemBackground
         navigationItem.largeTitleDisplayMode = .never
         navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .close, target: self, action: #selector(closeTapped))
+        attach()
+    }
+
+    /// A sign-in moved here from the flow sheet may have been taken off this
+    /// view by SwiftUI tearing the old sheet down: put it back.
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        if webView.superview !== view { attach() }
+    }
+
+    private func attach() {
+        webView.removeFromSuperview()
         webView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(webView)
         NSLayoutConstraint.activate([

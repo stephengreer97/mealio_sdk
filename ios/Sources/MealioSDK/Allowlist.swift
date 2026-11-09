@@ -131,13 +131,16 @@ public final class Allowlist {
     }()
 
     private static let operationNameRegex: NSRegularExpression = {
-        try! NSRegularExpression(pattern: #""operationName"\s*:\s*"([^"]*)""#, options: [])
+        // JS \s is ICU \s plus \v and U+FEFF.
+        try! NSRegularExpression(pattern: #""operationName"[\s\u000b\ufeff]*:[\s\u000b\ufeff]*"([^"]*)""#, options: [])
     }()
 
     /// Strings, block strings and comments, which hold no GraphQL names.
     private static let gqlNoiseRegex: NSRegularExpression = {
         // Starts with a group: a raw string may not open with three quotes.
-        try! NSRegularExpression(pattern: #"(?:"""(?:\\"""|[\s\S])*?""")|"(?:[^"\\]|\\.)*"|#[^\n\r]*"#, options: [])
+        // JS `.` is any character but \n, \r, U+2028 and U+2029; ICU's `.`
+        // also stops at \v, \f and U+0085, so the escape is spelled out.
+        try! NSRegularExpression(pattern: #"(?:"""(?:\\"""|[\s\S])*?""")|"(?:[^"\\]|\\[^\n\r\u2028\u2029])*"|#[^\n\r]*"#, options: [])
     }()
 
     private static let gqlTokenRegex: NSRegularExpression = {
@@ -155,7 +158,11 @@ public final class Allowlist {
     /// (`operationsX`) is a different field.
     public static let multipartField = #"name=["']?(operationName|query|operations)(?=["';\s]|$)[^\r\n]*\r?\n(?:[^\r\n]+\r?\n)*\r?\n([\s\S]*?)(?=\r?\n--|$)"#
     private static let multipartFieldRegex: NSRegularExpression = {
-        try! NSRegularExpression(pattern: multipartField.replacingOccurrences(of: "|$)", with: "|\\z)"), options: [])
+        // ICU spellings: `$` is `\z`, and JS \s adds \v and U+FEFF to ICU's.
+        let icu = multipartField
+            .replacingOccurrences(of: "|$)", with: "|\\z)")
+            .replacingOccurrences(of: #"["';\s]"#, with: #"["';\s\u000b\ufeff]"#)
+        return try! NSRegularExpression(pattern: icu, options: [])
     }()
 
     /// A URL split into scheme, host and path + query, or nil if it is not one
@@ -329,14 +336,34 @@ public final class Allowlist {
     /// envelope covers it. The guard script applies the same rule to requests a
     /// page script makes; this applies it to the runner's own `fetch` op, which
     /// never passes through the page.
+    ///
+    /// A body nested deeper than `bodyMaxDepth` inside `operations` fields is
+    /// blocked, and so is one longer than `bodyMaxText`.
     public static func bodyBlocked(_ given: String?) -> Bool {
+        judged(given, depth: 0)
+    }
+
+    /// How many times a body may nest inside an `operations` field
+    /// (form-encoded or a raw multipart part) and still be read. One nested
+    /// deeper is blocked. BODY_MAX_DEPTH in allowlist.ts.
+    public static let bodyMaxDepth = 8
+
+    /// The longest body (UTF-16 code units, after a leading byte order mark is
+    /// dropped) that is read. A longer one is blocked, unread. BODY_MAX_TEXT.
+    public static let bodyMaxText = 1_048_576
+
+    private static func judged(_ given: String?, depth: Int) -> Bool {
         guard var body = given else { return false }
         // A leading byte order mark is dropped, as a server's JSON reader would.
         if body.unicodeScalars.first == "\u{FEFF}" { body = String(body.unicodeScalars.dropFirst()) }
         if body.isEmpty { return false }
+        if depth > bodyMaxDepth { return true }
+        let ns = body as NSString
+        // Store requests are far smaller. A body this big is refused unread:
+        // a text match could miss a blocked name hidden in escapes.
+        if ns.length > bodyMaxText { return true }
         var names: [String] = []
         var docs: [String] = []
-        let ns = body as NSString
         for m in operationNameRegex.matches(in: body, options: [], range: NSRange(location: 0, length: ns.length)) {
             names.append(ns.substring(with: m.range(at: 1)))
         }
@@ -358,7 +385,7 @@ public final class Allowlist {
                 if field == "query" {
                     docs.append(v)
                 } else if field == "operations" {
-                    if bodyBlocked(v) { return true }
+                    if judged(v, depth: depth + 1) { return true }
                 } else {
                     names.append(v)
                 }
@@ -369,7 +396,7 @@ public final class Allowlist {
                 if field == "query" {
                     docs.append(v)
                 } else if field == "operations" {
-                    if bodyBlocked(v) { return true }
+                    if judged(v, depth: depth + 1) { return true }
                 } else {
                     names.append(v)
                 }

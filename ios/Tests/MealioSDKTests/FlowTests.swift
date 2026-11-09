@@ -262,6 +262,8 @@ final class FlowTests: XCTestCase {
         // The first prepare and three restarts; the fourth cancel shows the error.
         XCTAssertEqual(server.paths.filter { $0 == "/carts" }.count, 4)
         XCTAssertEqual(model.error?.code, MealioError.Code.cancelled)
+        // The normal error text, not the cancel's own "Cancelled".
+        XCTAssertEqual(model.error?.message, MealioCart.text.tr(.somethingWrongSentence))
         XCTAssertEqual(errors, 1)
         XCTAssertFalse(model.closeRequested)
         // Try again resets the count, and the sheet loads.
@@ -597,6 +599,36 @@ final class FlowTests: XCTestCase {
         let cancelled = await t.value
         XCTAssertTrue(cancelled)
         XCTAssertEqual(log.order, ["up", "down"])
+    }
+
+    /// Hidden mid-add, the flow sheet stops hosting sign-in. A sign-in on
+    /// screen then belongs to the add, which runs on: it moves to a modal of
+    /// its own instead of being cancelled. (Here there is nowhere to present
+    /// it, so after its retries it ends as a closed one would.)
+    @MainActor
+    func testHidingTheSheetMidAddMovesASignInOnScreenToAModal() async throws {
+        let presenter = UIViewController()
+        var asked = 0
+        let host = WebViewHost(presenter: { asked += 1; return presenter })
+        host.hostLogin(true)
+        let request = LoginRequest(store: "heb", url: "https://www.heb.com/login", title: "Sign in", guardScript: "",
+                                   check: nil, doneWhen: [], doneWhenUrl: nil, timeoutMs: 600_000,
+                                   allowNavigation: { _ in true })
+        let log = HostLog()
+        let t = Task { @MainActor in
+            let r = try? await host.showLogin(request)
+            log.order.append(r?.outcome.rawValue ?? "threw")
+        }
+        try await waitFor { host.login != nil }
+        host.hostLogin(false)
+        // Off the flow at once, and still running: not cancelled.
+        XCTAssertNil(host.login)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(log.order, [])
+        XCTAssertGreaterThan(asked, 0)
+        // The presenter is off screen: it gives up after its retries (about 3 s).
+        _ = await t.value
+        XCTAssertEqual(log.order, ["cancelled"])
     }
 
     @MainActor

@@ -442,4 +442,82 @@ final class FakeMealioTests: XCTestCase {
         let got = await p.value
         XCTAssertNotEqual(got, "ok")
     }
+
+    // MARK: round 5
+
+    /// A cancel while a Mealio request is in flight aborts it at once and
+    /// reports cancelled, instead of waiting for the answer (or its timeout).
+    @MainActor
+    func testCancelAbortsAnInFlightMealioRequestAndReportsCancelled() async throws {
+        let fake = FakeMealio(script: script())
+        let release = fake.hold(.prepare)
+        defer { release() }
+        let client = fake.client()
+        let cancel = CancelToken()
+        let recipe = self.recipe
+        let p = Task { () -> String in
+            await fakeCodeOf { try await client.prepareCart(recipe: recipe, cancel: cancel) }
+        }
+        try await tick()
+        XCTAssertEqual(fake.requests.map(\.kind), [.prepare])
+        let start = Date()
+        cancel.cancel()
+        let got = await p.value
+        XCTAssertEqual(got, "cancelled/cancelled")
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5)
+        XCTAssertEqual(fake.hostCalls, [])
+    }
+
+    /// An add takes its place in line when it is called, then fetches its
+    /// session token: a search called while that token is on its way runs
+    /// after the add, not before it.
+    @MainActor
+    func testAnAddJoinsTheQueueBeforeFetchingItsToken() async throws {
+        let fake = FakeMealio(script: script())
+        let gate = AsyncGate()
+        var slow = false
+        let client = fake.client(token: { () async throws -> String in
+            if slow {
+                slow = false
+                await gate.wait()
+            }
+            return "tok"
+        })
+        let cart = try await client.prepareCart(recipe: recipe)
+        let cartId = cart.cartId
+        let selections = cart.selections()
+        // The next token fetch (the add's) is held until the gate opens.
+        client.resetSession()
+        slow = true
+        let add = Task { await fakeCodeOf { try await client.addToCart(cartId: cartId, selections: selections) } }
+        try await tick()
+        let search = Task { await fakeCodeOf { try await client.search(cartId: cartId, key: "garlic", query: "jar") } }
+        try await tick()
+        XCTAssertEqual(fake.requests.filter { $0.kind == .add || $0.kind == .search }.map(\.kind), [])
+        gate.open()
+        let added = await add.value
+        let searched = await search.value
+        XCTAssertEqual(added, "ok")
+        XCTAssertEqual(searched, "ok")
+        XCTAssertEqual(fake.requests.filter { $0.kind == .add || $0.kind == .search }.map(\.kind), [.add, .search])
+    }
+}
+
+/// Opens once; every wait before that resumes then, every wait after at once.
+@MainActor
+final class AsyncGate {
+    private var isOpen = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { (k: CheckedContinuation<Void, Never>) in waiting.append(k) }
+    }
+
+    func open() {
+        isOpen = true
+        let list = waiting
+        waiting = []
+        for k in list { k.resume() }
+    }
 }

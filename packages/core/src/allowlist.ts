@@ -288,12 +288,35 @@ export const MULTIPART_FIELD = String.raw`name=["']?(operationName|query|operati
  * query that sends only an innocent name and a hash cannot be read here; the
  * signature on the envelope covers it. The guard script applies the same rule
  * to requests a page script makes; this applies it to the runner's own `fetch`
- * op, which never passes through the page.
+ * op, which never passes through the page. A body nested deeper than
+ * BODY_MAX_DEPTH is blocked, and so is one longer than BODY_MAX_TEXT.
  */
 export function bodyBlocked(body: string | null | undefined): boolean {
+  return judged(body, 0);
+}
+
+/**
+ * How many times a body may nest inside an `operations` field (form-encoded
+ * or a raw multipart part) and still be read. One nested deeper is blocked.
+ */
+export const BODY_MAX_DEPTH = 8;
+
+/**
+ * The longest body (in UTF-16 code units, after a leading byte order mark is
+ * dropped) that is parsed. A longer one is blocked unread: store requests
+ * are far smaller, and a text match over megabytes could miss a name hidden
+ * in escapes.
+ */
+export const BODY_MAX_TEXT = 1048576;
+
+function judged(body: string | null | undefined, depth: number): boolean {
   if (typeof body !== 'string') return false;
   if (body.charCodeAt(0) === 0xfeff) body = body.slice(1);
   if (!body) return false;
+  if (depth > BODY_MAX_DEPTH) return true;
+  // Store requests are far smaller. A body this big is refused unread: a text
+  // match could miss a blocked name hidden in escapes.
+  if (body.length > BODY_MAX_TEXT) return true;
   const names: string[] = [];
   const docs: string[] = [];
   const raw = /"operationName"\s*:\s*"([^"]*)"/g;
@@ -312,13 +335,13 @@ export function bodyBlocked(body: string | null | undefined): boolean {
     for (let m = form.exec(body); m; m = form.exec(body)) {
       const v = decodePercent(m[2].replace(/\+/g, ' '));
       if (m[1] === 'query') docs.push(v);
-      else if (m[1] === 'operations') { if (bodyBlocked(v)) return true; }
+      else if (m[1] === 'operations') { if (judged(v, depth + 1)) return true; }
       else names.push(v);
     }
     const part = new RegExp(MULTIPART_FIELD, 'g');
     for (let m = part.exec(body); m; m = part.exec(body)) {
       if (m[1] === 'query') docs.push(m[2]);
-      else if (m[1] === 'operations') { if (bodyBlocked(m[2])) return true; }
+      else if (m[1] === 'operations') { if (judged(m[2], depth + 1)) return true; }
       else names.push(m[2]);
     }
   }

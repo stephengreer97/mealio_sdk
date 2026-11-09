@@ -3,7 +3,7 @@ import vm from 'node:vm';
 import vectors from '../../../protocol/test-vectors.json';
 import sharedStrings from '../../../protocol/strings.json';
 import {
-  Allowlist, GUARD_SCRIPT, Runner, matches, bodyBlocked, parseUrl, openEnvelope, checkInstructions, EnvelopeError, MealioClient, CartSession, addedPrice, DEFAULT_STRINGS, fillText, safeListener, textTools,
+  Allowlist, GUARD_ARM_SCRIPT, Runner, matches, bodyBlocked, parseUrl, openEnvelope, checkInstructions, EnvelopeError, MealioClient, CartSession, addedPrice, DEFAULT_STRINGS, fillText, safeListener, textTools,
   type AddResult, type Host, type Envelope, type Matcher,
 } from '../src';
 
@@ -93,7 +93,7 @@ describe('guard script', () => {
     };
     win.window = win;
     vm.createContext(win);
-    vm.runInContext(GUARD_SCRIPT, win);
+    vm.runInContext(GUARD_ARM_SCRIPT, win);
     return { win, posted, fetched };
   }
 
@@ -108,7 +108,7 @@ describe('guard script', () => {
     };
     win.window = win;
     vm.createContext(win);
-    vm.runInContext(GUARD_SCRIPT, win);
+    vm.runInContext(GUARD_ARM_SCRIPT, win);
     expect(vm.runInContext(`navigator.sendBeacon('/analytics', 'x=1')`, win)).toBe(true);
     expect(vm.runInContext(`navigator.sendBeacon('/checkout/place-order', 'x')`, win)).toBe(false);
     expect(vm.runInContext(`navigator.sendBeacon('/graphql', '{"query":"mutation { confirmOrder { id } }"}')`, win)).toBe(false);
@@ -133,7 +133,7 @@ describe('guard script', () => {
   it('is idempotent', () => {
     const { win } = sandbox();
     const f = win.fetch;
-    vm.runInContext(GUARD_SCRIPT, win);
+    vm.runInContext(GUARD_ARM_SCRIPT, win);
     expect(win.fetch).toBe(f);
   });
 });

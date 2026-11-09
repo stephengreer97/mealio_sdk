@@ -131,7 +131,7 @@ void main() {
         'add': <String, Object?>{'fail': <String, Object?>{'code': 'store_unavailable', 'status': 503}},
         'signIn': 'timeout',
         'errors': <String, Object?>{'search': 'search_limit', 'prepare': <String, Object?>{'code': 'cart_cap_reached', 'status': 429}},
-        'locations': <Object?>[<String, Object?>{'id': 'l1', 'name': 'Main', 'address': '1 Main'}],
+        'locations': <Object?>[<String, Object?>{'id': 'l1', 'name': 'Main', 'address': '1 Main', 'zip': null}],
         'warm': null,
       });
       expect(s.store, 'kroger');

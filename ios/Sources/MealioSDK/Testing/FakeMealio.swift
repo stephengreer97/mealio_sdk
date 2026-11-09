@@ -99,10 +99,14 @@ public final class FakeMealio: @unchecked Sendable {
     }
 
     /// A script from JSON text, for one file shared with the other platforms.
+    /// Throws `bad_script` when it is not one: text JSON.parse would refuse
+    /// (trailing text included), an unknown field or a value of the wrong
+    /// type at any level. The message names the field.
     public convenience init(json: String) throws {
         guard let script = JSONValue.parse(json) else {
             throw MealioError(code: "bad_script", message: "The fake Mealio script is not JSON")
         }
+        try FakeScriptCheck.script(script)
         self.init(script: script)
     }
 
@@ -537,6 +541,19 @@ final class FakeHold: @unchecked Sendable {
     }
 }
 
+/// One answer carried across threads by `perform(_:on:with:waitUntilDone:)`.
+final class FakeAnswer: NSObject {
+    let url: URL?
+    let status: Int
+    let json: JSONValue
+
+    init(url: URL?, status: Int, json: JSONValue) {
+        self.url = url
+        self.status = status
+        self.json = json
+    }
+}
+
 /// Answers each fake's requests. Fakes are found by host name.
 final class FakeMealioURLProtocol: URLProtocol {
     private static let lock = NSLock()
@@ -575,10 +592,24 @@ final class FakeMealioURLProtocol: URLProtocol {
             finish(url, FakeMealio.noFake.0, FakeMealio.noFake.1)
             return
         }
+        // URLProtocol's client must be called on the thread that called
+        // startLoading. A held answer is released from another thread, so it
+        // is handed back to this one.
+        let thread = Thread.current
         fake.receive(path: url?.path ?? "", body: json, auth: request.value(forHTTPHeaderField: "Authorization")) { status, answer in
             // Kept until answered; stopLoading makes this a no-op.
-            self.finish(url, status, answer)
+            if Thread.current === thread {
+                self.finish(url, status, answer)
+            } else {
+                self.perform(#selector(FakeMealioURLProtocol.deliver(_:)), on: thread,
+                             with: FakeAnswer(url: url, status: status, json: answer), waitUntilDone: false)
+            }
         }
+    }
+
+    /// A held answer, back on the startLoading thread.
+    @objc private func deliver(_ answer: FakeAnswer) {
+        finish(answer.url, answer.status, answer.json)
     }
 
     private func finish(_ url: URL?, _ status: Int, _ answer: JSONValue) {
@@ -653,3 +684,203 @@ public final class FakeStoreHost: MealioHost {
     }
 }
 #endif
+
+// MARK: - Strict script check
+
+/// The TypeScript FakeScript type, field by field, as Kotlin's and Dart's
+/// loaders check it. `null` only where the TS type says `| null`.
+enum FakeScriptCheck {
+    static func fail(_ path: String, _ what: String) -> MealioError {
+        MealioError(code: "bad_script", message: "The fake Mealio script: \(path) \(what)")
+    }
+
+    /// A field's value against its type.
+    private struct Fields {
+        let o: [String: JSONValue]
+        let path: String
+
+        init(_ v: JSONValue, _ path: String, known: Set<String>?, required: Set<String> = []) throws {
+            guard let o = v.objectValue else { throw FakeScriptCheck.fail(path, "must be an object") }
+            self.o = o
+            self.path = path
+            if let known = known {
+                for k in o.keys.sorted() where !known.contains(k) { throw FakeScriptCheck.fail("\(path).\(k)", "is not a known field") }
+            }
+            for k in required.sorted() where o[k] == nil { throw FakeScriptCheck.fail("\(path).\(k)", "is required") }
+        }
+
+        func at(_ k: String) -> String { "\(path).\(k)" }
+
+        /// The value to check, or nil when absent (or null and allowed to be).
+        private func value(_ k: String, _ nullable: Bool) -> JSONValue? {
+            guard let v = o[k] else { return nil }
+            if nullable, case .null = v { return nil }
+            return v
+        }
+
+        func string(_ k: String, nullable: Bool = false, oneOf: [String]? = nil) throws {
+            guard let v = value(k, nullable) else { return }
+            guard let s = v.stringValue else {
+                throw FakeScriptCheck.fail(at(k), nullable ? "must be a string or null" : "must be a string")
+            }
+            if let oneOf = oneOf, !oneOf.contains(s) {
+                throw FakeScriptCheck.fail(at(k), "must be one of \(oneOf.joined(separator: ", ")), not \"\(s)\"")
+            }
+        }
+
+        func number(_ k: String, nullable: Bool = false, integer: Bool = false) throws {
+            guard let v = value(k, nullable) else { return }
+            guard let d = v.doubleValue else {
+                throw FakeScriptCheck.fail(at(k), nullable ? "must be a number or null" : "must be a number")
+            }
+            if integer, d.rounded(.down) != d { throw FakeScriptCheck.fail(at(k), "must be a whole number") }
+        }
+
+        func boolean(_ k: String, nullable: Bool = false) throws {
+            guard let v = value(k, nullable) else { return }
+            if v.boolValue == nil {
+                throw FakeScriptCheck.fail(at(k), nullable ? "must be true, false or null" : "must be true or false")
+            }
+        }
+
+        func obj(_ k: String, nullable: Bool = false, _ check: (JSONValue, String) throws -> Void) throws {
+            guard let v = value(k, nullable) else { return }
+            guard v.objectValue != nil else {
+                throw FakeScriptCheck.fail(at(k), nullable ? "must be an object or null" : "must be an object")
+            }
+            try check(v, at(k))
+        }
+
+        func list(_ k: String, _ each: (JSONValue, String) throws -> Void) throws {
+            guard let v = o[k] else { return }
+            guard let a = v.arrayValue else { throw FakeScriptCheck.fail(at(k), "must be an array") }
+            for (i, x) in a.enumerated() { try each(x, "\(at(k))[\(i)]") }
+        }
+
+        func objects(_ k: String, _ check: (JSONValue, String) throws -> Void) throws {
+            try list(k) { v, p in
+                guard v.objectValue != nil else { throw FakeScriptCheck.fail(p, "must be an object") }
+                try check(v, p)
+            }
+        }
+    }
+
+    static let errorKinds: Set<String> = ["prepare", "search", "add", "warm", "stores", "preferences", "locations", "session"]
+
+    static func script(_ v: JSONValue) throws {
+        guard v.objectValue != nil else {
+            throw MealioError(code: "bad_script", message: "The fake Mealio script must be a JSON object")
+        }
+        let f = try Fields(v, "script", known: ["store", "storeName", "items", "recipes", "warnings", "search", "add", "signIn",
+                                                "errors", "stores", "preferences", "locations", "warm"])
+        try f.string("store")
+        try f.string("storeName")
+        try f.objects("items", item)
+        try f.objects("recipes") { r, p in
+            let g = try Fields(r, p, known: ["id", "title"], required: ["id", "title"])
+            try g.string("id")
+            try g.string("title", nullable: true)
+        }
+        try f.objects("warnings") { w, p in
+            let g = try Fields(w, p, known: ["code", "message"], required: ["code", "message"])
+            try g.string("code")
+            try g.string("message")
+        }
+        try f.obj("search") { m, p in
+            let g = try Fields(m, p, known: nil)
+            for q in g.o.keys.sorted() { try g.objects(q, product) }
+        }
+        try f.obj("add") { a, p in
+            let g = try Fields(a, p, known: ["fail"], required: ["fail"])
+            try error(g.o["fail"] ?? .null, g.at("fail"))
+        }
+        try f.string("signIn", nullable: true, oneOf: ["signed_in", "cancelled", "timeout"])
+        try f.obj("errors") { m, p in
+            let g = try Fields(m, p, known: errorKinds)
+            for k in g.o.keys.sorted() { try error(g.o[k] ?? .null, g.at(k)) }
+        }
+        try f.objects("stores") { s, p in
+            let g = try Fields(s, p, known: ["id", "name", "via"], required: ["id", "name", "via"])
+            try g.string("id")
+            try g.string("name")
+            try g.string("via", oneOf: ["device", "kroger_api"])
+        }
+        try f.obj("preferences") { s, p in
+            let g = try Fields(s, p, known: ["defaultStore", "location"], required: ["defaultStore", "location"])
+            try g.string("defaultStore", nullable: true)
+            try g.obj("location", nullable: true, location)
+        }
+        try f.objects("locations", location)
+        // {} is signed in, as TS reads it (warm?.signedIn ?? true).
+        try f.obj("warm", nullable: true) { w, p in
+            try Fields(w, p, known: ["signedIn"]).boolean("signedIn", nullable: true)
+        }
+    }
+
+    static func item(_ v: JSONValue, _ path: String) throws {
+        let f = try Fields(v, path, known: ["key", "ingredient", "quantity", "options", "remembered", "rememberedPreferenceId",
+                                            "rememberedUnavailable", "startUnchecked", "weightLb", "recipes", "unavailable"],
+                           required: ["key"])
+        try f.string("key")
+        try f.string("ingredient")
+        try f.number("quantity", integer: true)
+        try f.objects("options", product)
+        try f.string("remembered", nullable: true)
+        try f.string("rememberedPreferenceId", nullable: true)
+        try f.boolean("rememberedUnavailable")
+        try f.boolean("startUnchecked")
+        try f.number("weightLb")
+        try f.objects("recipes") { r, p in
+            let g = try Fields(r, p, known: ["id", "title", "quantity"], required: ["id", "title", "quantity"])
+            try g.string("id")
+            try g.string("title", nullable: true)
+            try g.number("quantity", integer: true)
+        }
+        try f.string("unavailable")
+    }
+
+    static func product(_ v: JSONValue, _ path: String) throws {
+        let f = try Fields(v, path, known: ["id", "name", "price", "imageUrl", "size", "outOfStock", "badge", "badgeLabel",
+                                            "preferences", "unitPrice", "estimated", "maxQuantity", "soldByWeight",
+                                            "weightOptions", "pricePerLb"],
+                           required: ["id", "name"])
+        try f.string("id")
+        try f.string("name")
+        try f.string("price", nullable: true)
+        try f.string("imageUrl", nullable: true)
+        try f.string("size", nullable: true)
+        try f.boolean("outOfStock")
+        try f.string("badge", nullable: true, oneOf: ["picked_before", "popular", "partner_pick"])
+        try f.string("badgeLabel", nullable: true)
+        try f.objects("preferences") { p, at in
+            let g = try Fields(p, at, known: ["id", "label"], required: ["id", "label"])
+            try g.string("id")
+            try g.string("label")
+        }
+        try f.number("unitPrice", nullable: true)
+        try f.boolean("estimated")
+        try f.number("maxQuantity", nullable: true, integer: true)
+        try f.boolean("soldByWeight")
+        try f.list("weightOptions") { x, at in
+            if x.doubleValue == nil { throw FakeScriptCheck.fail(at, "must be a number") }
+        }
+        try f.number("pricePerLb", nullable: true)
+    }
+
+    static func location(_ v: JSONValue, _ path: String) throws {
+        let f = try Fields(v, path, known: ["id", "name", "address", "zip"], required: ["id", "name", "address", "zip"])
+        try f.string("id")
+        try f.string("name")
+        try f.string("address")
+        try f.string("zip", nullable: true)
+    }
+
+    static func error(_ v: JSONValue, _ path: String) throws {
+        if v.stringValue != nil { return }
+        guard v.objectValue != nil else { throw fail(path, "must be a code or {code, message?, status?}") }
+        let f = try Fields(v, path, known: ["code", "message", "status"], required: ["code"])
+        try f.string("code")
+        try f.string("message")
+        try f.number("status", integer: true)
+    }
+}

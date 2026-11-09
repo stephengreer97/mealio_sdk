@@ -2,15 +2,16 @@
 
 import 'dart:convert';
 
+import 'json_depth.dart';
 import 'protocol.dart';
 
 /// Parse one posted message. Anything that is not a JSON object is dropped
-/// (returns null).
+/// (returns null). Containers deeper than [maxMessageDepth] come back empty.
 JsonMessage? parseMessage(Object? raw) {
   Object? v = raw;
   if (raw is String) {
     try {
-      v = jsonDecode(raw);
+      v = decodeJsonLimited(raw);
     } on FormatException {
       return null;
     }

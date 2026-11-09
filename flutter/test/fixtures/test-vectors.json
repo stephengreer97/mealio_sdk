@@ -703,6 +703,177 @@
       "blocked": true
     }
   ],
+  "bodyLimits": [
+    {
+      "rule": "depth",
+      "prefix": "",
+      "fill": "operations=",
+      "times": 8,
+      "suffix": "{\"operationName\":\"Search\"}",
+      "blocked": false
+    },
+    {
+      "rule": "depth",
+      "prefix": "",
+      "fill": "operations=",
+      "times": 9,
+      "suffix": "{\"operationName\":\"Search\"}",
+      "blocked": true
+    },
+    {
+      "rule": "depth",
+      "prefix": "",
+      "fill": "operations=",
+      "times": 8,
+      "suffix": "{\"operationName\":\"PlaceOrder\"}",
+      "blocked": true
+    },
+    {
+      "rule": "depth",
+      "prefix": "--b\r\nContent-Disposition: form-data; name=operations\r\n\r\n",
+      "fill": "operations=",
+      "times": 7,
+      "suffix": "{\"operationName\":\"Search\"}\r\n--b--",
+      "blocked": false
+    },
+    {
+      "rule": "depth",
+      "prefix": "--b\r\nContent-Disposition: form-data; name=operations\r\n\r\n",
+      "fill": "operations=",
+      "times": 8,
+      "suffix": "{\"operationName\":\"Search\"}\r\n--b--",
+      "blocked": true
+    },
+    {
+      "rule": "depth",
+      "prefix": "",
+      "fill": "operations=",
+      "times": 50000,
+      "suffix": "{\"operationName\":\"Search\"}",
+      "blocked": true
+    },
+    {
+      "rule": "size",
+      "prefix": "{\"operationName\":\"Search\",\"pad\":\"",
+      "fill": "a",
+      "times": 1048524,
+      "suffix": "\",\"note\":\"payment\"}",
+      "blocked": false
+    },
+    {
+      "rule": "size",
+      "prefix": "{\"operationName\":\"Search\",\"pad\":\"",
+      "fill": "a",
+      "times": 1048525,
+      "suffix": "\",\"note\":\"payment\"}",
+      "blocked": true
+    },
+    {
+      "rule": "size",
+      "prefix": "{\"operationName\":\"Search\",\"pad\":\"",
+      "fill": "a",
+      "times": 1048531,
+      "suffix": "\",\"note\":\"x\"}",
+      "blocked": true
+    },
+    {
+      "rule": "size",
+      "prefix": "\ufeff{\"operationName\":\"Search\",\"pad\":\"",
+      "fill": "a",
+      "times": 1048524,
+      "suffix": "\",\"note\":\"payment\"}",
+      "blocked": false
+    },
+    {
+      "rule": "size",
+      "prefix": "",
+      "fill": "a",
+      "times": 1048577,
+      "suffix": "",
+      "blocked": true
+    },
+    {
+      "rule": "size",
+      "prefix": "--b\r\nContent-Disposition: form-data; name=operations\r\n\r\n{\"operationName\":\"Search\"}\r\n--b\r\nContent-Disposition: form-data; name=\"0\"\r\n\r\n",
+      "fill": "x\n",
+      "times": 600000,
+      "suffix": "\r\n--b--",
+      "blocked": true
+    },
+    {
+      "rule": "size",
+      "prefix": "--b\r\nContent-Disposition: form-data; name=operations\r\n\r\n{\"query\":\"mutation { placeOrder { id } }\"}\r\n--b\r\nContent-Disposition: form-data; name=\"0\"\r\n\r\n",
+      "fill": "x\n",
+      "times": 600000,
+      "suffix": "\r\n--b--",
+      "blocked": true
+    }
+  ],
+  "deepMessages": [
+    {
+      "prefix": "{\"type\":\"X\",\"a\":",
+      "open": "[",
+      "close": "]",
+      "times": 10,
+      "suffix": ",\"keep\":1}",
+      "depth": 11,
+      "keep": 1
+    },
+    {
+      "prefix": "{\"type\":\"X\",\"a\":",
+      "open": "[",
+      "close": "]",
+      "times": 511,
+      "suffix": ",\"keep\":1}",
+      "depth": 512,
+      "keep": 1
+    },
+    {
+      "prefix": "{\"type\":\"X\",\"a\":",
+      "open": "[",
+      "close": "]",
+      "times": 512,
+      "suffix": ",\"keep\":1}",
+      "depth": 513,
+      "keep": 1
+    },
+    {
+      "prefix": "{\"type\":\"X\",\"a\":",
+      "open": "[",
+      "close": "]",
+      "times": 600,
+      "suffix": ",\"keep\":1}",
+      "depth": 513,
+      "keep": 1
+    },
+    {
+      "prefix": "{\"type\":\"X\",\"a\":",
+      "open": "[",
+      "close": "]",
+      "times": 100000,
+      "suffix": ",\"keep\":1}",
+      "depth": 513,
+      "keep": 1
+    },
+    {
+      "prefix": "{\"type\":\"X\",\"a\":",
+      "open": "{\"b\":[",
+      "close": "]}",
+      "times": 50000,
+      "suffix": ",\"keep\":1}",
+      "depth": 513,
+      "keep": 1
+    },
+    {
+      "prefix": "{\"type\":\"X\",\"a\":",
+      "open": "[\"]}\\\"{[\",[",
+      "close": "]]",
+      "times": 50000,
+      "suffix": ",\"keep\":1}",
+      "depth": 513,
+      "keep": 1
+    }
+  ],
   "matchers": [
     {
       "msg": {

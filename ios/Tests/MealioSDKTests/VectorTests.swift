@@ -115,6 +115,13 @@ final class VectorTests: XCTestCase {
         XCTAssertEqual(MealioScripts.guardScript, try Fixtures.text("guard-script", "js"))
     }
 
+    /// The per-script copy is the document-start copy plus the arm call
+    /// (GUARD_ARM_SCRIPT = GUARD_SCRIPT + "\n" + GUARD_ARM).
+    func testGuardArmScriptIsTheGuardThenTheArmCall() throws {
+        XCTAssertEqual(MealioScripts.guardArm, try Fixtures.text("guard-arm", "js"))
+        XCTAssertEqual(MealioScripts.guardArmScript, MealioScripts.guardScript + "\n" + MealioScripts.guardArm)
+    }
+
     func testTheGuardJudgesRawMultipartWithTheSamePatternAsBodyBlocked() {
         XCTAssertTrue(MealioScripts.guardScript.contains("  var PART = " + MealioScripts.jsStringLiteral(Allowlist.multipartField) + ";\n"))
     }

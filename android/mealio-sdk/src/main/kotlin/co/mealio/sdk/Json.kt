@@ -115,6 +115,10 @@ internal fun jsonEquals(a: Any?, b: Any?): Boolean {
  * a heap stack, not the call stack, so a body nested a few thousand deep is
  * read as JSON and judged as JSON. A `\u` escape takes ASCII hex digits only,
  * and a lone surrogate (escaped or raw) is kept as it is.
+ *
+ * With [parse]'s `keep`, a container nested deeper than `keep` (the top value
+ * is depth 1) is still read for its grammar but never built: it comes back
+ * empty. Messages from the page are read that way (PROTOCOL.md, depth 512).
  */
 internal object StrictJson {
     /** What [parse] returns for text that is not JSON. */
@@ -122,14 +126,22 @@ internal object StrictJson {
 
     private class Bad : RuntimeException(null, null, false, false)
 
-    fun parse(text: String): Any? = try {
-        P(text).run()
+    /** An open container past the depth limit: read, never filled. */
+    private class Skipped(val isMap: Boolean)
+
+    private val SKIP_MAP = Skipped(true)
+    private val SKIP_LIST = Skipped(false)
+
+    fun parse(text: String, keep: Int = Int.MAX_VALUE): Any? = try {
+        P(text, keep).run()
     } catch (e: Bad) {
         INVALID
     }
 
-    private class P(val s: String) {
+    private class P(val s: String, val keep: Int) {
         var i = 0
+
+        fun isMap(c: Any) = c is LinkedHashMap<*, *> || (c is Skipped && c.isMap)
 
         fun ws() {
             while (i < s.length && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) i++
@@ -164,7 +176,7 @@ internal object StrictJson {
                         i++
                         ws()
                         if (i < s.length && s[i] == '}') { i++; LinkedHashMap<String, Any?>() } else {
-                            open.add(LinkedHashMap<String, Any?>())
+                            open.add(if (open.size >= keep) SKIP_MAP else LinkedHashMap<String, Any?>())
                             keys.add(key())
                             continue@value
                         }
@@ -173,7 +185,7 @@ internal object StrictJson {
                         i++
                         ws()
                         if (i < s.length && s[i] == ']') { i++; ArrayList<Any?>() } else {
-                            open.add(ArrayList<Any?>())
+                            open.add(if (open.size >= keep) SKIP_LIST else ArrayList<Any?>())
                             keys.add(null)
                             continue@value
                         }
@@ -194,19 +206,20 @@ internal object StrictJson {
                     val top = open[open.size - 1]
                     @Suppress("UNCHECKED_CAST")
                     if (top is LinkedHashMap<*, *>) (top as MutableMap<String, Any?>)[keys[keys.size - 1]!!] = v
-                    else (top as MutableList<Any?>).add(v)
+                    else if (top is ArrayList<*>) (top as MutableList<Any?>).add(v)
                     ws()
                     if (i >= s.length) throw Bad()
                     val c = s[i++]
                     if (c == ',') {
                         ws()
-                        if (top is LinkedHashMap<*, *>) keys[keys.size - 1] = key()
+                        if (isMap(top)) keys[keys.size - 1] = key()
                         continue@value
                     }
-                    if (c != (if (top is LinkedHashMap<*, *>) '}' else ']')) throw Bad()
+                    if (c != (if (isMap(top)) '}' else ']')) throw Bad()
                     open.removeAt(open.size - 1)
                     keys.removeAt(keys.size - 1)
-                    v = top
+                    // The first container past the limit lands empty; those inside it are dropped with it.
+                    v = if (top is Skipped) (if (top.isMap) LinkedHashMap<String, Any?>() else ArrayList<Any?>()) else top
                 }
             }
         }

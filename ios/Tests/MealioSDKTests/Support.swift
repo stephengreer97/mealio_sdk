@@ -71,6 +71,8 @@ enum TestSigner {
 final class FakeHost: MealioHost {
     var calls: [String] = []
     var lastLogin: LoginRequest?
+    /// The guard handed with the last page_script.
+    var lastScriptGuard: String?
 
     func openPage(store: String, url: String, timeoutMs: Int) async throws -> PageOpenOutcome {
         calls.append("open \(url)")
@@ -78,6 +80,7 @@ final class FakeHost: MealioHost {
     }
 
     func runScript(store: String, guardScript: String, script: String, until: [Matcher], timeoutMs: Int) async throws -> ScriptOutcome {
+        lastScriptGuard = guardScript
         calls.append("script")
         return ScriptOutcome(messages: [["type": .string(until.first?.type ?? "X"), "loggedIn": true]], timedOut: false)
     }

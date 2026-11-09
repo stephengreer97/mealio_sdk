@@ -106,10 +106,16 @@ JSON messages it posts until one matches `until`, or `timeoutMs` passes.
 - Scripts post messages with `window.ReactNativeWebView.postMessage(JSON.stringify(msg))`.
   Every SDK must define `window.ReactNativeWebView.postMessage` in its WebView
   (React Native's WebView does; native SDKs inject a shim, see `BRIDGE_SHIM`).
-- Before the server's script, the SDK injects `GUARD_SCRIPT` (below) once per
-  page load.
+- Right before the server's script, in the same top frame, the SDK injects
+  `GUARD_ARM_SCRIPT` (see "Guard script": it installs the guard if it is
+  missing and arms it).
 - Collect every message posted after injection. Messages that are not JSON
-  objects are dropped.
+  objects are dropped. A message is parsed with a depth limit of 512: the top
+  container is depth 1, containers down to depth 512 are built, and a
+  container at depth 513 is kept, empty, in its place; its contents are
+  skipped by bracket and string matching and never built. A parser must not
+  recurse per level (a page can post a 100,000-deep message). The cases are
+  `deepMessages` in `protocol/test-vectors.json`.
 - Matcher: `{ "type": string, "eq"?: {field: value}, "ne"?: {field: value} }`.
   A message matches when `msg.type === type`, every `eq` field is strictly
   equal, and every `ne` field is not strictly equal (a missing field is "not
@@ -138,9 +144,10 @@ sheet, or `timeoutMs` passes.
 }
 ```
 
-- After every page load in the sheet, and every `check.intervalMs`, the SDK
-  injects `GUARD_SCRIPT` then `check.script` into the visible page and
-  watches its messages. A message matching `doneWhen` means signed in.
+- The sheet's WebView gets `GUARD_SCRIPT` at document start in every frame.
+  After every page load in the sheet, and every `check.intervalMs`, the SDK
+  injects `GUARD_ARM_SCRIPT` then `check.script` into the visible page's top
+  frame and watches its messages (parsed as for `page_script`). A message matching `doneWhen` means signed in.
 - `doneWhenUrl`, when set, is a regex source. A navigation whose URL matches
   it also means signed in (used by Kroger's OAuth return).
 - Navigations the allowlist forbids are cancelled, except to hosts listed in
@@ -387,13 +394,77 @@ never touch `BLOCKED_PATTERNS`.
 
 ## Guard script
 
-`GUARD_SCRIPT` (in `packages/core/src/guard.ts`) is injected before every
-server script. It wraps `window.fetch`, `XMLHttpRequest` and
-`navigator.sendBeacon` in the page so a request whose URL matches
-`BLOCKED_PATTERNS`, or whose body is a blocked operation, throws (or, for a
-beacon, returns false) instead of leaving the device. It also caps requests at
-240 per minute per page. This is defense in depth. The signature is the
-primary control.
+`GUARD_SCRIPT` (in `packages/core/src/guard.ts`) is defense in depth: the
+signature is the primary control. Once armed, it wraps `window.fetch`,
+`XMLHttpRequest` and `navigator.sendBeacon` in the page so a request whose URL
+matches `BLOCKED_PATTERNS`, or whose body is a blocked operation, throws (or,
+for a beacon, returns false) instead of leaving the device. It caps requests
+at 240 per minute per window, and refuses `blob:` and `data:` workers.
+
+### Two copies, and arming
+
+The guard is installed early but stays OFF until Mealio uses the page.
+
+| Copy | Text | Where | When |
+|---|---|---|---|
+| Document-start | `GUARD_SCRIPT`, exactly | every frame (the platform's all-frames document-start script: a `WKUserScript` with `forMainFrameOnly: false`, Android's `addDocumentStartJavaScript`, which runs in every frame its origin rules match, react-native-webview's `injectedJavaScriptBeforeContentLoaded` with `...ForMainFrameOnly={false}`) | every document, in the hidden WebView and the sign-in sheet |
+| Per-script | `GUARD_ARM_SCRIPT` = `GUARD_SCRIPT + "\n" + GUARD_ARM` | the top frame only, through the platform's evaluate call | right before every Mealio server script: each `page_script` script and each `show_login` `check.script` |
+
+`GUARD_ARM` is exactly `window.__mealioArm(); true;`. Copy all three
+constants byte for byte from `guard.ts`; never build the arm call yourself.
+In the `Host` interface (`runner.ts`), `runScript`'s `guard` argument is
+`GUARD_ARM_SCRIPT`; `showLogin` gets `guard` (`GUARD_SCRIPT`, for document
+start) and `armGuard` (`GUARD_ARM_SCRIPT`, before each check script).
+
+- Evaluate `GUARD_ARM_SCRIPT` as its own evaluation, before the server
+  script's evaluation, in the same frame, with nothing between them. Both
+  steps are needed: on a platform with no document-start script (an older
+  Android WebView, the about:blank idle page), the `GUARD_SCRIPT` half
+  installs the guard; when the document-start copy already did, it returns at
+  once and only the arm call does anything.
+- Never put `GUARD_ARM_SCRIPT` or `GUARD_ARM` in a document-start script. An
+  armed copy at document start blocks the store's own boot code (its blob
+  workers, its `/payment` config fetches) and counts its traffic.
+
+What each state does:
+
+- **Unarmed** (after `GUARD_SCRIPT`): the hooks are in place but every call
+  passes straight through, unread. No path or body checks, no rate counting,
+  no worker refusal, no frame scanning.
+- **Arming** (`window.__mealioArm()`): turns the window's guard on for good,
+  until the page navigates (a new document starts unarmed). It arms every
+  same-origin frame the window has now (`window.frames`, and frame elements in
+  the document), installing the guard into any that lack it, recursively.
+  Calling it again does nothing. `window.__mealioArm`, `window.__mealioArmed`
+  and `window.__mealioGuard` are non-writable, non-configurable properties, so
+  the page cannot swap or remove them once the guard is in.
+- **Armed**: every check is on. A same-origin frame added later is armed as
+  it is added (the DOM hooks below) or as it loads: the document-start copy in
+  a new frame arms itself when its parent's `__mealioArmed()` is true.
+
+A cross-origin frame never gets the guard. The very first thing
+`GUARD_SCRIPT` does is check that it is the top window or that `window.top`
+is reachable and same-origin (reading `window.top.document` does not throw);
+otherwise it returns and installs nothing. So captchas and identity providers
+(Cloudflare Turnstile, reCAPTCHA, hCaptcha, Apple, Google) are never touched.
+
+### Frames made in one tick
+
+The platform's script does not reach a same-origin frame a page script adds
+and uses in the same tick (an about:blank frame), so while armed the guard
+installs itself, armed, into a frame as soon as one of these returns: the
+`contentWindow` and `contentDocument` getters of iframe, frame and object
+elements; `appendChild`, `insertBefore`, `replaceChild`, `append`, `prepend`,
+`replaceChildren`, `before`, `after`, `replaceWith`, `insertAdjacentElement`,
+`insertAdjacentHTML`; the `innerHTML` and `outerHTML` setters (and
+`ShadowRoot`'s `innerHTML`); `Element.prototype.setHTMLUnsafe` and
+`ShadowRoot.prototype.setHTMLUnsafe`; `Range.prototype.insertNode` and
+`surroundContents`; `Document.prototype.write`, `writeln` and
+`execCommand` (after which every `window.frames` entry is covered). A
+`MutationObserver` covers the rest. A frame in a shadow tree is not in
+`window.frames`; only its element's hooked getters reach its window.
+
+### Bodies
 
 A body is a blocked operation when any of these match
 `BLOCKED_GRAPHQL_OPERATION` (case-insensitive): its `operationName` (JSON,
@@ -412,7 +483,18 @@ check_?out|place_?order|submit_?order|confirm_?order|create_?order|purchase|paym
 
 A GraphQL multipart upload's `operations` field is judged as a JSON body, whether the body is FormData or raw multipart text, and whatever the part name's quoting (`name="operations"`, `name='operations'` or bare). A leading byte order mark is ignored. Every SDK reads JSON exactly as `JSON.parse` does: any nesting depth, ASCII hex digits only in `\u` escapes, lone surrogates accepted. The cases are in `protocol/test-vectors.json` (`blockedBodies` and `jsonBodies`).
 
-The guard is injected at document start into every frame where the platform allows it: iOS (`WKUserScript`, all frames), Android (`addDocumentStartJavaScript`, on WebViews that support it) and React Native on iOS. Elsewhere, and as a second layer everywhere, it installs itself into same-origin frames through DOM hooks. It also refuses `blob:` and `data:` workers.
+Limits, in this order after the byte order mark is dropped (`bodyLimits` in
+the vectors; `BODY_MAX_DEPTH` and `BODY_MAX_TEXT` in `allowlist.ts`):
+
+1. **Depth.** The top body is depth 0; an `operations` value (form-encoded or
+   a raw multipart part) is judged at its parent's depth + 1. A body at depth
+   greater than 8 is blocked without being read. Judging never recurses more
+   than that, and never crashes: on Kotlin a `StackOverflowError` in
+   `bodyBlocked` is caught and the body is blocked.
+2. **Size.** A body longer than 1,048,576 UTF-16 code units is blocked
+   without being read. Store requests are far smaller, and a body that size
+   could hide a blocked name in escapes that no text match would see.
+
 A body that cannot be read, such as a stream, is allowed, but its path is
 still checked.
 
@@ -420,7 +502,7 @@ still checked.
 `URLSearchParams` and `FormData` bodies are read before the check. A beacon
 cannot wait for a body to be read, so a beacon whose body is not text is
 refused. The cases every SDK must agree on are in `protocol/test-vectors.json`
-(`blockedBodies`), and `node protocol/check-rails.mjs` confirms none of the
+(`blockedBodies`, `jsonBodies`, `bodyLimits`), and `node protocol/check-rails.mjs` confirms none of the
 rails' own paths or operations are blocked.
 
 ## Rate caps
