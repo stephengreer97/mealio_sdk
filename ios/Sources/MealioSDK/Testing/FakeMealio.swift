@@ -596,13 +596,17 @@ final class FakeMealioURLProtocol: URLProtocol {
         // startLoading. A held answer is released from another thread, so it
         // is handed back to this one.
         let thread = Thread.current
+        // ...and in the run loop mode it is running in: URLSession's loader
+        // thread may not be running the default mode, and an answer
+        // performed only in default mode would then never arrive.
+        let modes = Array(Set([RunLoop.current.currentMode?.rawValue, RunLoop.Mode.default.rawValue].compactMap { $0 }))
         fake.receive(path: url?.path ?? "", body: json, auth: request.value(forHTTPHeaderField: "Authorization")) { status, answer in
             // Kept until answered; stopLoading makes this a no-op.
             if Thread.current === thread {
                 self.finish(url, status, answer)
             } else {
                 self.perform(#selector(FakeMealioURLProtocol.deliver(_:)), on: thread,
-                             with: FakeAnswer(url: url, status: status, json: answer), waitUntilDone: false)
+                             with: FakeAnswer(url: url, status: status, json: answer), waitUntilDone: false, modes: modes)
             }
         }
     }
