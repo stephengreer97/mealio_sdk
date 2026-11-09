@@ -78,14 +78,20 @@ extension JSONValue: ExpressibleByNilLiteral, ExpressibleByBooleanLiteral, Expre
 }
 
 public extension JSONValue {
-    /// Parse JSON text. Nil when it is not valid JSON.
-    static func parse(_ text: String) -> JSONValue? {
-        parse(Data(text.utf8))
+    /// Parse JSON text exactly as JavaScript's JSON.parse does (see
+    /// StrictJSON). Nil when JSON.parse would throw.
+    /// Containers nested deeper than `keep` levels are checked but come back
+    /// empty, never built (page messages use 512).
+    static func parse(_ text: String, keep: Int = Int.max) -> JSONValue? {
+        StrictJSON.parse(text, keep: keep)
     }
 
-    /// Parse JSON bytes. Nil when they are not valid JSON.
-    static func parse(_ data: Data) -> JSONValue? {
-        try? JSONDecoder().decode(JSONValue.self, from: data)
+    /// Parse JSON bytes as a fetch Response's json() does: UTF-8, a leading
+    /// byte order mark dropped, bad bytes read as U+FFFD, then JSON.parse.
+    static func parse(_ data: Data, keep: Int = Int.max) -> JSONValue? {
+        var bytes = data[...]
+        if bytes.starts(with: [0xEF, 0xBB, 0xBF]) { bytes = bytes.dropFirst(3) }
+        return StrictJSON.parse(String(decoding: bytes, as: UTF8.self), keep: keep)
     }
 
     /// Build a JSONValue from any Encodable value.
@@ -701,6 +707,18 @@ public struct CartItem: Codable, Equatable, Identifiable {
     }
 }
 
+/// Something the server changed or ignored in what was sent. The cart still works.
+public struct CartWarning: Codable, Equatable {
+    /// ingredients_dropped, lines_dropped, servings_ignored, or a newer code.
+    public let code: String
+    public let message: String
+
+    public init(code: String, message: String) {
+        self.code = code
+        self.message = message
+    }
+}
+
 public struct PreparedCart: Codable, Equatable {
     public let cartId: String
     public let store: String
@@ -719,10 +737,12 @@ public struct PreparedCart: Codable, Equatable {
     public let ready: [CartItem]
     public let needsChoice: [CartItem]
     public let unavailable: [CartItem]
+    /// What the server changed or ignored. Nil from older servers.
+    public let warnings: [CartWarning]?
 
     public init(cartId: String, store: String, storeName: String? = nil, items: [CartItem],
                 ready: [CartItem] = [], needsChoice: [CartItem] = [], unavailable: [CartItem] = [],
-                recipes: [CartRecipe]? = nil, location: StoreLocation? = nil) {
+                recipes: [CartRecipe]? = nil, location: StoreLocation? = nil, warnings: [CartWarning]? = nil) {
         self.cartId = cartId
         self.store = store
         self.storeName = storeName
@@ -732,9 +752,10 @@ public struct PreparedCart: Codable, Equatable {
         self.ready = ready
         self.needsChoice = needsChoice
         self.unavailable = unavailable
+        self.warnings = warnings
     }
 
-    private enum CodingKeys: String, CodingKey { case cartId, store, storeName, location, recipes, items, ready, needsChoice, unavailable }
+    private enum CodingKeys: String, CodingKey { case cartId, store, storeName, location, recipes, items, ready, needsChoice, unavailable, warnings }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -747,6 +768,8 @@ public struct PreparedCart: Codable, Equatable {
         needsChoice = try c.decodeIfPresent([CartItem].self, forKey: .needsChoice) ?? []
         unavailable = try c.decodeIfPresent([CartItem].self, forKey: .unavailable) ?? []
         items = try c.decodeIfPresent([CartItem].self, forKey: .items) ?? (ready + needsChoice + unavailable)
+        // A warning list that cannot be read never costs the cart.
+        warnings = (try? c.decodeIfPresent([CartWarning].self, forKey: .warnings)) ?? nil
     }
 }
 

@@ -2,7 +2,9 @@
 // UI. Mirrors the `Host` interface in packages/core/src/runner.ts. The Runner
 // does all checking (signature, allowlist, rate caps) before it calls a Host.
 
+import 'guard.dart' show guardArmScript;
 import 'protocol.dart';
+import 'runner.dart' show CancelToken;
 
 /// What `openPage` reports.
 class PageLoad {
@@ -24,21 +26,29 @@ class ScriptRun {
 
 /// Everything the login sheet needs.
 class LoginRequest {
-  const LoginRequest({
+  LoginRequest({
     required this.store,
     required this.url,
     required this.title,
     required this.guard,
+    String? armGuard,
     required this.check,
     required this.doneWhen,
     required this.doneWhenUrl,
     required this.timeoutMs,
     required this.allowNavigation,
-  });
+    this.cancel,
+  }) : armGuard = armGuard ?? guardArmScript;
   final String store;
   final String url;
   final String title;
+  /// The guard, unarmed: injected on every page load of the sheet.
   final String guard;
+
+  /// The per-script copy that arms the guard: injected right before each
+  /// `check.script`. Defaults to [guardArmScript], so a request built without
+  /// it still arms the guard (an empty one would leave it off).
+  final String armGuard;
   final LoginCheck? check;
   final List<MessageMatcher> doneWhen;
   final String? doneWhenUrl;
@@ -46,6 +56,9 @@ class LoginRequest {
 
   /// Must be asked for every top-frame navigation; refuse it when false.
   final bool Function(String url) allowNavigation;
+
+  /// Close the sheet as `cancelled` when this fires.
+  final CancelToken? cancel;
 }
 
 /// What `showLogin` reports.
@@ -83,4 +96,19 @@ abstract class MealioHost {
 
   /// One HTTP request with the store's cookies.
   Future<HttpResult> fetch(String store, FetchRequest request, int timeoutMs, int maxBytes);
+}
+
+/// A Host whose hidden page can be replaced, as a remounted `MealioScope`
+/// does. The client offers a warm-up only to the page it ran on.
+abstract interface class MealioPageIdentity {
+  /// The hidden page now in use, compared by identity.
+  Object? get currentPage;
+}
+
+/// A Host that can put its hidden page back to a blank one. After exclusive
+/// work outlives its cap (`MealioClient.runExclusive`) the page may be left
+/// half way, so the next job calls this before it starts.
+abstract interface class MealioPageReset {
+  /// Load a blank page and forget the store page. Bounded by the client.
+  Future<void> resetPage();
 }

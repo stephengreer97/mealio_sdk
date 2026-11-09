@@ -1,7 +1,7 @@
 // 0.1 compatibility: the list screen on its own, with an add callback.
 // New integrations use <MealioCartButton> or <MealioCartFlow>.
 
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import type { AddResult, CartSession } from '@mealio/sdk-core';
 import { useMealio } from './MealioProvider';
 import { CartList } from './MealioCartFlow';
@@ -19,11 +19,14 @@ export function MealioCartSheet({ cart, onDone, onError, accentColor }: MealioCa
   const t = accentColor ? { ...theme, accent: accentColor } : theme;
   const [busy, setBusy] = useState(false);
   const [, setV] = useState(0);
+  const adding = useRef(false);
   return (
     <CartList t={t} cart={cart} storeName={cart.cart.storeName || cart.store} busy={busy} onChange={() => setV((v) => v + 1)}
       onAdd={async () => {
+        if (adding.current) return;
+        adding.current = true;
         setBusy(true);
-        try { onDone(await cart.addToCart()); } catch (e) { onError?.(e); } finally { setBusy(false); }
+        try { onDone(await cart.addToCart()); } catch (e) { onError?.(e); } finally { adding.current = false; setBusy(false); }
       }} />
   );
 }

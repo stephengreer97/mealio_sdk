@@ -18,7 +18,6 @@ import android.webkit.CookieManager
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -86,6 +85,8 @@ internal class LoginWebController(
     private val handler = Handler(Looper.getMainLooper())
     private var docStartScript = false
     private var bootstrap = BOOTSTRAP_SCRIPT
+    /** Native network blocking for the sign-in sheet: armed at the first check script, on until the sheet closes ([destroy]). */
+    internal val networkBlock = NetworkBlock()
     // doneWhenUrl is a JavaScript regex source. java.util.regex reads the
     // patterns the server uses (plain URL prefixes and escapes) the same way.
     private val doneUrl: Regex? = session.request.doneWhenUrl?.takeIf { it.isNotEmpty() }
@@ -127,6 +128,7 @@ internal class LoginWebController(
 
     fun destroy() {
         handler.removeCallbacksAndMessages(null)
+        networkBlock.disarm()
         CookieManager.getInstance().flush()
         webView?.let {
             it.stopLoading()
@@ -136,13 +138,15 @@ internal class LoginWebController(
         webView = null
     }
 
-    /** Inject GUARD_SCRIPT then the server's check script into the visible page. */
+    /** Inject GUARD_ARM_SCRIPT (installs the guard if missing, and arms it) then the server's check script into the visible page. */
     private fun injectCheck() {
         val wv = webView ?: return
         val c = session.request.check ?: return
         if (session.result.isCompleted) return
         wv.evaluateJavascript(bootstrap, null)
-        wv.evaluateJavascript(session.request.guard, null)
+        // On from the first check until the sheet closes; arming again is the same hosts.
+        if (!networkBlock.armed) networkBlock.arm(session.request.blockHosts ?: blockHostsFor(Allowlist(), session.request.store))
+        wv.evaluateJavascript(session.request.armGuard, null)
         wv.evaluateJavascript(c.script, null)
     }
 
@@ -161,11 +165,15 @@ internal class LoginWebController(
         return session.request.allowNavigation(url)
     }
 
-    private inner class LoginClient : WebViewClient() {
+    private inner class LoginClient : BlockingWebViewClient(networkBlock) {
         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-            if (request == null || !request.isForMainFrame) return false
+            if (request == null) return false
+            // A blocked path, in any frame (iframes included), never loads.
+            if (navigationBlocked(request)) return true
+            if (!request.isForMainFrame) return false
             val url = request.url?.toString() ?: return true
-            return !admit(url)
+            if (!admit(url)) return true
+            return false
         }
 
         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {

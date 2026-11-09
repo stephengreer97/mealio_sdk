@@ -11,11 +11,13 @@ import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
-import android.webkit.WebViewClient
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withContext
@@ -83,7 +85,7 @@ class MealioNativeBridge internal constructor(private val onPost: (String) -> Un
  * dropped. Older WebViews fall back to the JavascriptInterface.
  */
 @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface", "RequiresFeature")
-internal fun configureMealioWebView(wv: WebView, bridge: MealioNativeBridge): MealioWebViewSetup {
+internal fun configureMealioWebView(wv: WebView, bridge: MealioNativeBridge, allowlist: Allowlist = Allowlist()): MealioWebViewSetup {
     val s = wv.settings
     s.javaScriptEnabled = true
     s.domStorageEnabled = true
@@ -112,14 +114,56 @@ internal fun configureMealioWebView(wv: WebView, bridge: MealioNativeBridge): Me
     }
     val docStart = if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
         // VERIFY: "*" is accepted as an allowed-origin rule meaning every origin
-        // (androidx.webkit docs say so); the returned ScriptHandler is not kept
-        // because the script lives as long as the WebView.
-        WebViewCompat.addDocumentStartJavaScript(wv, bootstrap, setOf("*"))
+        // (androidx.webkit docs say so); the returned ScriptHandlers are not kept
+        // because the scripts live as long as the WebView. They run in every
+        // frame whose origin matches, iframes included, before the page's own
+        // scripts, in the order added.
+        for ((script, rules) in documentStartScripts(bootstrap, allowlist)) {
+            WebViewCompat.addDocumentStartJavaScript(wv, script, rules)
+        }
         true
     } else {
+        // An older WebView: the bootstrap goes in from onPageStarted, and the
+        // guard only with each script (GUARD_ARM_SCRIPT from runScript and the
+        // sign-in check), in the main frame; its DOM hooks reach same-origin
+        // frames from there.
         false
     }
     return MealioWebViewSetup(docStart, bootstrap)
+}
+
+/**
+ * What goes into every frame at document start, with its allowed-origin rules:
+ * the bridge bootstrap everywhere, then GUARD_SCRIPT on the stores' own hosts
+ * (and their sign-in hosts) so it is in place in each store frame, iframes
+ * included, before any of the store's scripts run. This copy is the DORMANT
+ * one: it installs the hooks unarmed, so the store's own boot code (its
+ * workers, its /payment config fetches) runs untouched, and it installs
+ * nothing in a cross-origin frame. GUARD_ARM_SCRIPT, injected before every
+ * Mealio script, arms it (PROTOCOL.md "Guard script"). The in-page hooks in
+ * the guard stay as a second layer.
+ */
+internal fun documentStartScripts(bootstrap: String, allowlist: Allowlist = Allowlist()): List<Pair<String, Set<String>>> =
+    listOf(bootstrap to setOf("*"), GUARD_SCRIPT to guardOriginRules(allowlist))
+
+/**
+ * Allowed-origin rules (androidx.webkit form `scheme://[*.]host`) for every
+ * store's hosts and sign-in hosts. By registrable domain, so a host a signed
+ * widening adds later (same registrable domain, see Allowlist.widen) is
+ * covered too. Both the bare domain and its subdomains.
+ */
+internal fun guardOriginRules(allowlist: Allowlist = Allowlist()): Set<String> {
+    val domains = sortedSetOf<String>()
+    for (store in STORES.keys) {
+        val h = allowlist.hostsFor(store) ?: continue
+        for (host in h.hosts + h.authHosts) domains.add(registrableDomain(host))
+    }
+    val out = LinkedHashSet<String>()
+    for (d in domains) {
+        out.add("https://$d")
+        out.add("https://*.$d")
+    }
+    return out
 }
 
 private suspend fun <T> onMain(block: () -> T): T = withContext(Dispatchers.Main) { block() }
@@ -140,8 +184,16 @@ class WebViewHost(context: Context) : Host {
     private var bootstrap = BOOTSTRAP_SCRIPT
     /** The store whose page the hidden view was last told to open. */
     private var currentStore: String? = null
+    /** Native network blocking for the hidden view: armed at a job's first script, off when the job ends or the store changes. */
+    internal val networkBlock = NetworkBlock()
+    /** The store [networkBlock] is armed for. */
+    @Volatile private var armedStore: String? = null
     private var pendingLoad: CompletableDeferred<PageLoad>? = null
     private var loadStarted = false
+
+    /** Bumped when the hidden page is lost (a crashed renderer), so a warm-up on it is not used. */
+    @Volatile private var lost = 0
+    override val pagesLost: Int get() = lost
 
     /** The WebView's own User-Agent, reused for `fetch` so the store sees one browser. */
     @Volatile private var userAgent: String? = null
@@ -159,10 +211,10 @@ class WebViewHost(context: Context) : Host {
      * The server's scripts are written for that; if a store ever needs a window,
      * attach the WebView to a 1x1 invisible view in the current activity.
      */
-    private fun ensureWebView(): WebView {
+    internal fun ensureWebView(): WebView {
         webView?.let { return it }
         val wv = WebView(appContext)
-        val setup = configureMealioWebView(wv, MealioNativeBridge { raw -> sink?.trySend(raw) })
+        val setup = configureMealioWebView(wv, MealioNativeBridge { raw -> sink?.trySend(raw) }, allowlist)
         docStartScript = setup.docStartScript
         bootstrap = setup.bootstrap
         wv.webViewClient = HiddenClient()
@@ -189,7 +241,7 @@ class WebViewHost(context: Context) : Host {
         return a.check(store, url, UrlUse.PAGE).ok || a.check(store, url, UrlUse.LOGIN).ok
     }
 
-    private inner class HiddenClient : WebViewClient() {
+    private inner class HiddenClient : BlockingWebViewClient(networkBlock) {
         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
             // Backstop for navigations shouldOverrideUrlLoading does not see
             // (form POSTs): leave at once and report the load as blocked.
@@ -220,7 +272,13 @@ class WebViewHost(context: Context) : Host {
         // never land on a blocked path. The runner already checked the URL that
         // page_open asked for.
         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-            if (request == null || !request.isForMainFrame) return false
+            if (request == null) return false
+            // A blocked path, in any frame (iframes included), never loads.
+            if (navigationBlocked(request)) {
+                if (request.isForMainFrame) pendingLoad?.complete(PageLoad(ok = false, finalUrl = request.url?.toString(), error = "blocked"))
+                return true
+            }
+            if (!request.isForMainFrame) return false
             val u = request.url?.toString() ?: return true
             if (!hiddenMayGo(u)) {
                 pendingLoad?.complete(PageLoad(ok = false, finalUrl = u, error = "blocked"))
@@ -233,6 +291,7 @@ class WebViewHost(context: Context) : Host {
         override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
             if (view != null && view === webView) {
                 webView = null
+                lost += 1
                 pendingLoad?.complete(PageLoad(ok = false, error = "load_failed"))
                 view.destroy()
             }
@@ -246,6 +305,9 @@ class WebViewHost(context: Context) : Host {
             val wv = ensureWebView()
             pendingLoad?.complete(PageLoad(ok = false, error = "load_failed")) // superseded
             pendingLoad = load
+            // Another store: off until its first script. The same store keeps
+            // blocking on for the rest of the job.
+            if (store != armedStore) networkBlock.disarm()
             currentStore = store
             loadStarted = false
             wv.stopLoading()
@@ -281,6 +343,11 @@ class WebViewHost(context: Context) : Host {
                 // because the fallback path (no document-start script) may have
                 // raced the page; it does nothing when already installed.
                 wv.evaluateJavascript(bootstrap, null)
+                // Native blocking turns on with the in-page guard, for this store's
+                // hosts, and stays on until the job ends (jobEnded) or the store changes.
+                // Arming again for the same store changes nothing.
+                networkBlock.arm(blockHostsFor(allowlist, store))
+                armedStore = store
                 wv.evaluateJavascript(guard, null)
                 wv.evaluateJavascript(script, null)
             }
@@ -302,6 +369,8 @@ class WebViewHost(context: Context) : Host {
     override suspend fun showLogin(request: LoginRequest): LoginResult {
         val session = LoginBroker.open(request)
         var inline: InlineLogin? = null
+        // A cancelled job closes its sign-in at once.
+        val stopListening = request.cancel?.onCancel { session.complete(LoginOutcome.CANCELLED) }
         try {
             onMain {
                 CookieManager.getInstance() // make sure the cookie store is up before the sheet
@@ -320,6 +389,7 @@ class WebViewHost(context: Context) : Host {
             return LoginResult(outcome, session.messages())
         } finally {
             // Closes the sheet if it is still up (timeout or a cancelled run).
+            stopListening?.invoke()
             session.complete(LoginOutcome.CANCELLED)
             LoginBroker.close(session.id)
             inline?.let { l -> withContext(NonCancellable + Dispatchers.Main) { MealioInlineLogin.clear(l) } }
@@ -336,10 +406,33 @@ class WebViewHost(context: Context) : Host {
         }
         val a = allowlist
         val hopAllowed = { u: String -> a.check(store, u, UrlUse.FETCH).ok }
-        return withContext(Dispatchers.IO) { StoreFetch(request, timeoutMs, maxBytes, ua, hopAllowed).run() }
+        return withContext(Dispatchers.IO) {
+            val f = StoreFetch(request, timeoutMs, maxBytes, ua, hopAllowed)
+            // A cancelled step (the runner's bound) disconnects, which unblocks the read.
+            val unblock = launch(start = CoroutineStart.UNDISPATCHED) {
+                try {
+                    awaitCancellation()
+                } finally {
+                    f.abort()
+                }
+            }
+            try {
+                f.run()
+            } finally {
+                unblock.cancel()
+            }
+        }
     }
 
     /** Leave the store page (after a sign-out). */
+    override suspend fun resetPage() { reset() }
+
+    /** The job is over (done, failed or cancelled): native blocking turns off until the next job's first script. */
+    override fun jobEnded() {
+        networkBlock.disarm()
+        armedStore = null
+    }
+
     suspend fun reset() = onMain {
         webView?.stopLoading()
         webView?.loadUrl("about:blank")
@@ -348,6 +441,7 @@ class WebViewHost(context: Context) : Host {
     /** Release the hidden WebView. The host can still be used; it makes a new one. */
     fun destroy() {
         Handler(Looper.getMainLooper()).post {
+            if (webView != null) lost += 1
             webView?.let {
                 it.stopLoading()
                 it.destroy()
@@ -373,6 +467,14 @@ private class StoreFetch(
     private val hopAllowed: (String) -> Boolean,
 ) {
     private val cookies = CookieManager.getInstance()
+    @Volatile private var open: HttpURLConnection? = null
+    @Volatile private var aborted = false
+
+    /** Stop now, from any thread. */
+    fun abort() {
+        aborted = true
+        open?.disconnect()
+    }
 
     fun run(): FetchResponse {
         var url = request.url
@@ -382,7 +484,9 @@ private class StoreFetch(
 
         try {
             for (hop in 0..MAX_REDIRECTS) {
+                if (aborted) return FetchResponse(ok = false, error = "timeout")
                 val conn = URL(url).openConnection() as HttpURLConnection
+                open = conn
                 try {
                     conn.instanceFollowRedirects = false
                     conn.connectTimeout = timeout

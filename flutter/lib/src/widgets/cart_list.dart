@@ -100,7 +100,8 @@ class _MealioCartListState extends State<MealioCartList> {
           builder: (BuildContext context, Widget? _) {
             final est = s.estimate();
             final selectable = s.items.where((CartItem i) => i.status != ItemStatus.unavailable).length;
-            final canAdd = !widget.busy && est.count > 0 && widget.onAdd != null;
+            // Off while a search runs: the add would wait behind it on the page.
+            final canAdd = !widget.busy && est.count > 0 && widget.onAdd != null && !s.searching;
             final pending = s.pendingPreferences().length;
             final location = s.location;
             return Column(
@@ -338,12 +339,13 @@ class _ItemRowState extends State<_ItemRow> {
 
   void _pick(Product p, [String? preferenceId]) {
     if (widget.disabled) return;
+    if (!_s.isSelected(_item.key)) MealioUi.of(context).emit(MealioItemChecked(key: _item.key));
     _s.select(_item.key, p.id, preferenceId: preferenceId);
   }
 
   Future<void> _search() async {
     final q = _query.text.trim();
-    if (q.length < 2 || _searching) return;
+    if (q.length < 2 || _searching || widget.disabled) return;
     setState(() {
       _searching = true;
       _searchNote = null;
@@ -354,7 +356,7 @@ class _ItemRowState extends State<_ItemRow> {
       setState(() => _searchNote = found.isEmpty ? _ui.tr('nothingFound', <String, Object?>{'query': q}) : null);
       _query.clear();
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || (e is MealioException && e.code == MealioErrorCode.cancelled)) return;
       setState(() => _searchNote = e is MealioException && e.message.isNotEmpty ? e.message : _ui.tr('searchFailed'));
     } finally {
       if (mounted) setState(() => _searching = false);

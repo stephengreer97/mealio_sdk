@@ -133,6 +133,8 @@ class ClientTest {
             assertEquals("android", sdk.getString("platform"))
             assertEquals(MealioCart.SDK_VERSION, sdk.getString("version"))
             assertEquals(SDK_CORE_VERSION, sdk.getString("core"))
+            // Core and SDK versions move together (scripts/check-versions.mjs).
+            assertEquals(MealioCart.SDK_VERSION, sdk.getString("core"))
             assertEquals(SUPPORTED_OPS, sdk.getJSONArray("ops").strings())
         }
         assertEquals("heb", bodies[0].getString("store"))
@@ -247,7 +249,8 @@ class ClientTest {
         assertEquals("store_unavailable", code { MealioClient(config(), FakeHost(), serverErr).prepareCart("heb", r) })
         assertEquals("server", code { MealioClient(config(), FakeHost(), FakeTransport { _, _, _ -> HttpResponse(500, "oops") }).prepareCart("heb", r) })
         assertEquals("network", code { MealioClient(config(), FakeHost(), FakeTransport { _, _, _ -> throw IOException("down") }).prepareCart("heb", r) })
-        assertEquals("session_expired", code { MealioClient(config { throw RuntimeException("no") }, FakeHost(), serverErr).prepareCart("heb", r) })
+        // A failing session function is session_failed (0.6; was session_expired).
+        assertEquals("session_failed", code { MealioClient(config { throw RuntimeException("no") }, FakeHost(), serverErr).prepareCart("heb", r) })
     }
 
     private fun cartFlow(first: Envelope, onStep: (JSONObject) -> HttpResponse = { error("no step expected") }) =
@@ -369,7 +372,7 @@ class ClientTest {
         val down = MealioClient(config(), FakeHost(), FakeTransport(onGet = { throw IOException("down") }) { _, _, _ -> error("no POST") })
         assertEquals("network", code { down.stores() })
         val html = MealioClient(config(), FakeHost(), FakeTransport(onGet = { HttpResponse(502, "<html>") }) { _, _, _ -> error("no POST") })
-        assertEquals("network", code { html.stores() })
+        assertEquals("server", code { html.stores() })
     }
 
     @Test

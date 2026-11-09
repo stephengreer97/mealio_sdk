@@ -1,6 +1,17 @@
 package co.mealio.sdk
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * The partner-facing entry point.
@@ -16,15 +27,40 @@ import android.content.Context
  * ```
  */
 object MealioCart {
-    const val SDK_VERSION = "0.5.0"
+    const val SDK_VERSION = "0.6.0"
 
-    private class State(val client: MealioClient, val host: WebViewHost, val sessions: StoreSessions)
+    /** `io` runs the sign-outs' disk work: Dispatchers.IO, or a test's dispatcher (MealioTesting). */
+    private class State(val client: MealioClient, val host: Host, val sessions: SessionStore, val release: () -> Unit, val io: CoroutineDispatcher)
 
     @Volatile private var state: State? = null
 
     /**
+     * One job queue for every client configure makes: an old client's add
+     * still running holds the hidden page until it ends, and the new client's
+     * jobs wait for it.
+     */
+    private val queue = JobQueue()
+
+    /** For work that outlives a screen, like the store sign-out after a user change. */
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
+    private val userState = MutableStateFlow(MealioUser())
+
+    /** Who [setUser] says is signed in. The drop-in watches it. */
+    val user: StateFlow<MealioUser> = userState.asStateFlow()
+
+    /**
+     * Called when a MealioCartButton or MealioStoreSettings is used while
+     * [setUser] says nobody is signed in, and the composable has no
+     * onSignInRequired of its own. Send the user to your sign-in. With neither,
+     * the button is disabled.
+     */
+    @Volatile var onSignInRequired: (() -> Unit)? = null
+
+    /**
      * Set up the SDK once, e.g. in Application.onCreate. Calling it again
-     * replaces the previous setup.
+     * replaces the previous setup: carts still loading under it are cancelled,
+     * an add under way finishes first, and the new setup's jobs queue behind it.
      *
      * @param publishableKey the partner app's publishable key.
      * @param sessionTokenProvider returns an SDK session token from YOUR server
@@ -52,14 +88,50 @@ object MealioCart {
             baseUrl = baseUrl,
             attestationProvider = attestationProvider,
             epochProvider = { sessions.epoch() },
+            debug = (app.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0,
         )
+        install(host, sessions, release = { host.destroy() }) { q ->
+            MealioClient(config, host, UrlConnectionTransport(), q).also {
+                // The hidden page and fetch redirects are checked against the same
+                // allowlist the runner uses, widenings included.
+                host.allowlist = it.allowlist
+            }
+        }
+    }
+
+    /**
+     * Make `client` the configured one (configure, and MealioTesting).
+     * Whatever the old client had loading is cancelled; its add runs on and
+     * its page is released after it, in the shared queue. `io` runs the
+     * store sign-outs' disk work.
+     */
+    internal fun install(
+        host: Host,
+        sessions: SessionStore,
+        release: () -> Unit,
+        io: CoroutineDispatcher = Dispatchers.IO,
+        makeClient: (JobQueue) -> MealioClient,
+    ): MealioClient {
+        val client = makeClient(queue)
+        // Carry the user over to the new client, without a store sign-out.
+        val u = userState.value
+        if (u.tracked) client.setUser(u.id)
         val old = state
-        val client = MealioClient(config, host)
-        // The hidden page and fetch redirects are checked against the same
-        // allowlist the runner uses, widenings included.
-        host.allowlist = client.allowlist
-        state = State(client, host, sessions)
-        old?.host?.destroy()
+        state = State(client, host, sessions, release, io)
+        if (old != null) {
+            old.client.cancelJobs()
+            queueExclusive(scope, client) { old.release() }
+        }
+        return client
+    }
+
+    /** Forget the configuration and the user (MealioTesting, between tests). */
+    internal fun uninstall() {
+        val old = state
+        state = null
+        userState.value = MealioUser()
+        old?.client?.cancelJobs()
+        old?.release?.invoke()
     }
 
     val isConfigured: Boolean get() = state != null
@@ -89,6 +161,13 @@ object MealioCart {
     @JvmOverloads
     suspend fun prepareCart(store: String?, recipes: List<Recipe>, zip: String? = null, onStep: StepListener? = null): CartSession =
         current().client.prepareCart(store, recipes, zip, onStep)
+
+    /**
+     * As above, stopped by `cancel`: it stops after the current step, sends
+     * nothing more, never shows sign-in, and fails with "cancelled".
+     */
+    suspend fun prepareCart(store: String?, recipes: List<Recipe>, zip: String?, cancel: CancelToken, onStep: StepListener? = null): CartSession =
+        current().client.prepareCart(store, recipes, zip, cancel, onStep)
 
     /** Stores the SDK supports right now (GET /api/v1/stores). */
     suspend fun stores(): List<StoreInfo> = current().client.stores()
@@ -124,14 +203,40 @@ object MealioCart {
         state?.client?.resetSession()
     }
 
+    /**
+     * Tell the SDK who is signed in to your app: their id, or null for nobody.
+     * Call it at start-up and whenever that changes. On a change it stops any
+     * cart still loading, starts a new Mealio session, and when the old value
+     * was a user, signs out of the stores on this device (that never throws,
+     * and an add under way finishes first). While null, warm does nothing, no
+     * session is asked for, and MealioCartButton calls [onSignInRequired].
+     * Calling it with the same id again does nothing.
+     */
+    fun setUser(id: String?) {
+        userState.value = MealioUser(tracked = true, id = id)
+        val s = state ?: return
+        if (s.client.setUser(id)) queueExclusive(scope, s.client) { clearAllStores(s) }
+    }
+
+    /** Stop every cart still loading and every search. An add runs on. */
+    fun cancelJobs() {
+        state?.client?.cancelJobs()
+    }
+
     /** Sign the user out of one store on this device. */
     suspend fun signOutOfStore(store: String) {
         val s = current()
+        s.client.cancelJobs()
         s.client.resetSession()
-        val hosts = s.client.allowlist.hostsFor(store) ?: STORES[store]
-        if (hosts != null) s.sessions.clearStore(hosts)
-        s.host.reset()
-        s.sessions.bumpEpoch()
+        // Queued, so an add under way finishes first and the next cart waits for this.
+        s.client.runExclusive {
+            val hosts = s.client.allowlist.hostsFor(store) ?: STORES[store]
+            signOutSteps(
+                { if (hosts != null) s.sessions.clearStore(hosts) },
+                { s.host.resetPage() },
+                { withContext(s.io) { s.sessions.bumpEpoch() } },
+            )
+        }
     }
 
     /**
@@ -141,12 +246,43 @@ object MealioCart {
      */
     suspend fun signOutOfAllStores() {
         val s = current()
+        s.client.cancelJobs()
         s.client.resetSession()
-        s.sessions.clearAll()
-        s.host.reset()
-        s.sessions.bumpEpoch()
+        s.client.runExclusive { clearAllStores(s) }
     }
+
+    /**
+     * Run `block` in the client's job queue from non-suspending code. Undispatched,
+     * so it takes its place in the queue before this returns: a cart started
+     * after this call (the next user's, after setUser) runs after it, never
+     * before. A failure is dropped: a failed store sign-out never blocks a user change.
+     */
+    internal fun queueExclusive(scope: CoroutineScope, client: MealioClient, block: suspend () -> Unit) {
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            try {
+                client.runExclusive(block)
+            } catch (e: Throwable) {
+                // See above.
+            }
+        }
+    }
+
+    /** Each step bounded (see [signOutSteps]), so a sign-out never holds the queue for good. */
+    private suspend fun clearAllStores(s: State) = signOutSteps(
+        { s.sessions.clearAll() },
+        { s.host.resetPage() },
+        { withContext(s.io) { s.sessions.bumpEpoch() } },
+    )
 
     private fun current(): State =
         state ?: throw IllegalStateException("Call MealioCart.configure(context, publishableKey, sessionTokenProvider) first")
+}
+
+/**
+ * Who [MealioCart.setUser] says is signed in. `tracked` is false until it is
+ * first called: then users are not tracked and every call may ask for a session.
+ */
+data class MealioUser(val tracked: Boolean = false, val id: String? = null) {
+    /** False only when setUser(null) said nobody is signed in. */
+    val signedIn: Boolean get() = !tracked || id != null
 }

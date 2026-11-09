@@ -1,6 +1,6 @@
 {
   "name": "@mealio/sdk-core",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Platform-neutral core of the Mealio Cart SDK: protocol types, signature checks, allowlist and the relay loop.",
   "license": "SEE LICENSE IN LICENSE",
   "author": "Mealio <contact@mealio.co>",
@@ -15,10 +15,34 @@
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
+    },
+    "./testing.js": {
+      "types": "./testing.d.ts",
+      "default": "./testing.js"
+    },
+    "./dist": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./dist/*.js": "./dist/*.js",
+    "./dist/*": "./dist/*.js",
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
   "source": "src/index.ts",
   "files": [
     "dist",
     "src",
+    "testing.js",
+    "testing.d.ts",
     "LICENSE",
     "README.md"
   ],
@@ -26,7 +50,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/bundle-noble.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "prepack": "npm run build"
@@ -37,6 +61,7 @@
   },
   "devDependencies": {
     "typescript": "5.6.3",
-    "vitest": "2.1.8"
+    "vitest": "2.1.8",
+    "esbuild": "0.21.5"
   }
 }

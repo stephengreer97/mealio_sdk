@@ -14,7 +14,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
-import 'package:flutter/foundation.dart' show kDebugMode;
+import 'package:flutter/foundation.dart' show ValueListenable, kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
@@ -23,8 +23,10 @@ import 'package:webview_flutter_wkwebview/webview_flutter_wkwebview.dart';
 import 'allowlist.dart';
 import 'guard.dart';
 import 'host.dart';
+import 'json_depth.dart';
 import 'matcher.dart';
 import 'protocol.dart';
+import 'runner.dart' show CancelToken;
 import 'theme.dart';
 import 'ui.dart';
 
@@ -41,16 +43,26 @@ const String bridgeChannelName = '__mealioNativeBridge';
 /// wraps each message as `{"n": nonce, "m": message}` with a random nonce the
 /// Dart side holds, and [bridgeUnwrap] drops anything without it. A sub-frame
 /// calling the channel directly cannot forge a result.
-String bridgeInjection(String nonce) =>
-    'window.__mealioNativePost = function(s){ __mealioNativeBridge.postMessage(JSON.stringify({ n: '
-    '${jsonEncode(nonce)}, m: String(s) })) };$bridgeShim';
+///
+/// The hidden page takes a new nonce for every script it runs, and this also
+/// replaces `window.ReactNativeWebView` with one bound to that nonce. A late
+/// message from an earlier script, through the poster it held, carries the
+/// old nonce and is dropped.
+String bridgeInjection(String nonce) {
+  final n = jsonEncode(nonce);
+  return 'window.__mealioNativePost = function(s){ __mealioNativeBridge.postMessage(JSON.stringify({ n: '
+      '$n, m: String(s) })) };'
+      '(function(){ try { window.ReactNativeWebView = { postMessage: function (s) { try { '
+      '__mealioNativeBridge.postMessage(JSON.stringify({ n: $n, m: String(s) })); } catch (e) {} } }; } catch (e) {} })();'
+      '$bridgeShim';
+}
 
 /// The original message posted through [bridgeInjection] with `nonce`, or
 /// null when `raw` was not posted that way.
 String? bridgeUnwrap(String raw, String nonce) {
   Object? j;
   try {
-    j = jsonDecode(raw);
+    j = decodeJsonLimited(raw);
   } on FormatException {
     return null;
   }
@@ -76,7 +88,7 @@ const int _maxLoginMessages = 200;
 
 /// A WebViewController set up the way every Mealio WebView needs it.
 WebViewController _newController({
-  required String nonce,
+  required String Function() nonce,
   required void Function(String message) onMessage,
   required NavigationDelegate delegate,
 }) {
@@ -88,7 +100,7 @@ WebViewController _newController({
   unawaited(c.addJavaScriptChannel(
     bridgeChannelName,
     onMessageReceived: (JavaScriptMessage m) {
-      final s = bridgeUnwrap(m.message, nonce);
+      final s = bridgeUnwrap(m.message, nonce());
       if (s != null) onMessage(s);
     },
   ));
@@ -152,6 +164,37 @@ class _LoadEnd {
   final String? error;
 }
 
+/// One page_open's wait. Only this request's own events settle it: a finish
+/// counts once a page has started since the request, and never for a
+/// navigation that was replaced before it finished.
+class _PageWait {
+  final Completer<_LoadEnd> done = Completer<_LoadEnd>();
+
+  /// The page that started for this request, if one has.
+  String? started;
+
+  /// Pages whose navigation was replaced (a redirect, or Android's plugin
+  /// cancelling a navigation and loading it again). Their finish is stale.
+  final Set<String> replaced = <String>{};
+
+  void end(_LoadEnd e) {
+    if (!done.isCompleted) done.complete(e);
+  }
+}
+
+/// Runs `f` until `end`. False when time ran out first; `f` is then left
+/// behind, so a platform call that never returns cannot hold up the page.
+Future<bool> _before(Future<void> f, DateTime end) async {
+  final left = end.difference(DateTime.now());
+  if (left <= Duration.zero) return false;
+  try {
+    await f.timeout(left);
+    return true;
+  } on TimeoutException {
+    return false;
+  }
+}
+
 /// A store sign-in in progress, handed to an open cart flow sheet so it can
 /// show the sign-in inside itself. [webview] shares the hidden WebView's
 /// cookie store, and its navigation is checked against the allowlist exactly
@@ -178,10 +221,11 @@ class MealioLoginView {
 }
 
 /// The Flutter [MealioHost]. One per app, created and drawn by `MealioScope`.
-class WebViewHost implements MealioHost {
+class WebViewHost implements MealioHost, MealioPageReset {
   WebViewHost() {
     hidden = _newController(
-      nonce: _hiddenNonce,
+      // Read per message: it changes with every script.
+      nonce: () => _hiddenNonce,
       onMessage: _hiddenMessages.add,
       delegate: NavigationDelegate(
         // The runner checks every page_open, but a page can navigate itself
@@ -191,46 +235,96 @@ class WebViewHost implements MealioHost {
         // navigations of the page.
         onNavigationRequest: (NavigationRequest r) {
           if (!r.isMainFrame || _isBlank(r.url)) return NavigationDecision.navigate;
-          final store = _pageStore;
-          if (store != null &&
-              (_allowlist.check(store, r.url, UrlUse.page).ok || _allowlist.check(store, r.url, UrlUse.login).ok)) {
+          final l = _load;
+          if (_pageAllowed(r.url)) {
+            // A new navigation replaces the page that started, and that
+            // page's finish must not end the wait. On Android the plugin
+            // cancels every main-frame navigation it is asked about and loads
+            // it again itself, and the cancelled one can still report a
+            // finish: wait for the reissued load to start. iOS lets the
+            // navigation go on, and a server redirect starts no new page.
+            final from = l?.started;
+            if (l != null && from != null && from != r.url) l.replaced.add(from);
+            if (l != null && reissuesNavigations) l.started = null;
             return NavigationDecision.navigate;
           }
-          final l = _load;
-          if (l != null && !l.isCompleted) l.complete(const _LoadEnd(error: 'blocked'));
+          l?.end(const _LoadEnd(error: 'blocked'));
           return NavigationDecision.prevent;
         },
         // webview_flutter has no universal document-start script API, so the
         // bridge goes in at page start and again before every script. On iOS
         // onPageStarted can still see the previous document; the second
         // injection is the one that counts.
-        onPageStarted: (String url) => unawaited(_injectBridge(hidden, _hiddenNonce)),
-        onPageFinished: (String url) {
+        onPageStarted: (String url) {
+          if (_isBlank(url)) return;
+          // The backstop: some navigations (a form POST, for one) never reach
+          // onNavigationRequest. A page we would have refused is replaced
+          // with a blank one, as on the login sheet.
+          if (!_pageAllowed(url)) {
+            unawaited(_loadBlank(hidden));
+            _load?.end(_LoadEnd(url: url, error: 'blocked'));
+            return;
+          }
           unawaited(_injectBridge(hidden, _hiddenNonce));
           final l = _load;
-          if (l != null && !l.isCompleted) l.complete(_LoadEnd(url: url));
+          if (l != null) {
+            l.started = url;
+            l.replaced.remove(url);
+          }
+        },
+        onPageFinished: (String url) {
+          if (_isBlank(url)) return;
+          unawaited(_injectBridge(hidden, _hiddenNonce));
+          final l = _load;
+          // A page that finished without starting for this request is an
+          // older load: a stale finish never answers this one.
+          if (l == null || l.started == null || l.replaced.contains(url)) return;
+          l.end(_LoadEnd(url: url));
         },
         onWebResourceError: (WebResourceError e) {
+          // iOS reports a web content process that died here. The page it
+          // held is gone, so no warm-up may count on it.
+          if (e.errorType == WebResourceErrorType.webContentProcessTerminated) _page = Object();
           // VERIFY: WebResourceError.isForMainFrame (nullable bool) in the resolved webview_flutter version.
           if (e.isForMainFrame != true) return;
-          final l = _load;
-          if (l != null && !l.isCompleted) l.complete(const _LoadEnd(error: 'load_failed'));
+          _load?.end(const _LoadEnd(error: 'load_failed'));
         },
       ),
     );
   }
 
-  static WebViewHost? _current;
+  static final ValueNotifier<WebViewHost?> _current = ValueNotifier<WebViewHost?>(null);
 
   /// The host of the mounted `MealioScope`, or null when none is mounted.
-  static WebViewHost? get current => _current;
+  static WebViewHost? get current => _current.value;
+
+  /// Notifies when the mounted host changes, as on a `MealioScope` remount.
+  /// An open cart flow moves to the new host.
+  static ValueListenable<WebViewHost?> get currentListenable => _current;
 
   /// Called by `MealioScope`. The most recently mounted scope wins.
-  static void attach(WebViewHost host) => _current = host;
+  static void attach(WebViewHost host) => _current.value = host;
 
   /// Called by `MealioScope` on dispose.
   static void detach(WebViewHost host) {
-    if (identical(_current, host)) _current = null;
+    if (identical(_current.value, host)) _current.value = null;
+  }
+
+  /// The page the hidden WebView holds, compared by identity. Replaced when
+  /// the page is lost, so a warm-up made on it is not offered.
+  Object get page => _page;
+  Object _page = Object();
+
+  /// True on Android, where webview_flutter_android cancels each main-frame
+  /// navigation it asks about and loads it again
+  /// (AndroidNavigationDelegate._handleNavigation).
+  @visibleForTesting
+  late bool reissuesNavigations = hidden.platform is AndroidWebViewController;
+
+  bool _pageAllowed(String url) {
+    final store = _pageStore;
+    return store != null &&
+        (_allowlist.check(store, url, UrlUse.page).ok || _allowlist.check(store, url, UrlUse.login).ok);
   }
 
   /// The hidden WebView's controller. `MealioScope` draws it.
@@ -243,7 +337,9 @@ class WebViewHost implements MealioHost {
   static final Allowlist _bundledAllowlist = Allowlist();
   Allowlist get _allowlist => sharedAllowlist ?? _bundledAllowlist;
 
-  final String _hiddenNonce = _newNonce();
+  /// The hidden page's bridge nonce. A new one for every script, so a late
+  /// message from the script before cannot answer the next.
+  String _hiddenNonce = _newNonce();
 
   /// The store whose page the hidden WebView was last asked to open.
   String? _pageStore;
@@ -278,13 +374,14 @@ class WebViewHost implements MealioHost {
   }
 
   final StreamController<String> _hiddenMessages = StreamController<String>.broadcast();
-  Completer<_LoadEnd>? _load;
+  _PageWait? _load;
   Future<void> _tail = Future<void>.value();
   int _fetchSeq = 0;
 
-  /// The hidden WebView does one thing at a time. The Runner is sequential,
-  /// but two carts could run at once; this keeps their steps from
-  /// interleaving on one page.
+  /// The hidden WebView does one thing at a time. Whole jobs are queued by
+  /// the client (JobQueue); this also keeps single steps from overlapping.
+  /// Every task here ends by its own timeout, so a platform call that never
+  /// returns cannot block the steps behind it.
   Future<T> _serial<T>(Future<T> Function() task) {
     final run = _tail.then((_) => task());
     _tail = run.then<void>((_) {}, onError: (Object _) {});
@@ -294,31 +391,43 @@ class WebViewHost implements MealioHost {
   @override
   Future<PageLoad> openPage(String store, String url, int timeoutMs) {
     return _serial(() async {
-      final done = Completer<_LoadEnd>();
-      _load = done;
+      final until = DateTime.now().add(Duration(milliseconds: timeoutMs));
+      final wait = _PageWait();
+      // Only this request's wait is live: an older one ends here.
+      _load?.end(const _LoadEnd(error: 'superseded'));
+      _load = wait;
       _pageStore = store;
       try {
-        await hidden.loadRequest(Uri.parse(url));
-      } catch (_) {
-        if (identical(_load, done)) _load = null;
-        return const PageLoad(ok: false, error: 'load_failed');
-      }
-      try {
-        final end = await done.future.timeout(Duration(milliseconds: timeoutMs));
-        if (end.error != null) return PageLoad(ok: false, error: end.error);
+        try {
+          if (!await _before(hidden.loadRequest(Uri.parse(url)), until)) return _stopLoad();
+        } catch (_) {
+          return const PageLoad(ok: false, error: 'load_failed');
+        }
+        final _LoadEnd end;
+        try {
+          end = await wait.done.future.timeout(until.difference(DateTime.now()));
+        } on TimeoutException {
+          return _stopLoad();
+        }
+        if (end.error != null) return PageLoad(ok: false, finalUrl: end.url, error: end.error);
         String? finalUrl = end.url;
         try {
-          finalUrl = await hidden.currentUrl() ?? finalUrl;
+          finalUrl = await hidden.currentUrl().timeout(const Duration(seconds: 1)) ?? finalUrl;
         } catch (_) {
           // Keep the URL onPageFinished reported.
         }
         return PageLoad(ok: true, finalUrl: finalUrl);
-      } on TimeoutException {
-        return const PageLoad(ok: false, error: 'timeout');
       } finally {
-        if (identical(_load, done)) _load = null;
+        if (identical(_load, wait)) _load = null;
       }
     });
+  }
+
+  /// A load that ran out of time is stopped, so it cannot finish later under
+  /// the next step's script.
+  PageLoad _stopLoad() {
+    unawaited(_loadBlank(hidden));
+    return const PageLoad(ok: false, error: 'timeout');
   }
 
   @override
@@ -330,6 +439,8 @@ class WebViewHost implements MealioHost {
     int timeoutMs,
   ) {
     return _serial(() async {
+      // This run's own nonce: anything stamped for an earlier one is dropped.
+      _hiddenNonce = _newNonce();
       final messages = <JsonMessage>[];
       final matched = Completer<void>();
       final started = DateTime.now();
@@ -341,19 +452,19 @@ class WebViewHost implements MealioHost {
         messages.add(m);
         if (!matched.isCompleted && messageMatchesAny(m, until)) matched.complete();
       });
+      // The timeout covers the injection too: a runJavaScript that never
+      // returns ends this step as timed out.
+      final deadline = started.add(Duration(milliseconds: timeoutMs));
       try {
-        await _injectBridge(hidden, _hiddenNonce);
-        await _runQuietly(hidden, guard);
-        await _runQuietly(hidden, script);
-        final left = timeoutMs - DateTime.now().difference(started).inMilliseconds;
-        var timedOut = false;
-        if (!matched.isCompleted) {
-          try {
-            await matched.future.timeout(Duration(milliseconds: left < 0 ? 0 : left));
-          } on TimeoutException {
-            timedOut = true;
-          }
-        }
+        final injected = await _before(
+          () async {
+            await _injectBridge(hidden, _hiddenNonce);
+            await _runQuietly(hidden, guard);
+            await _runQuietly(hidden, script);
+          }(),
+          deadline,
+        );
+        final timedOut = !matched.isCompleted && !(injected && await _before(matched.future, deadline));
         return ScriptRun(messages: List<JsonMessage>.of(messages), timedOut: timedOut);
       } finally {
         await sub.cancel();
@@ -398,18 +509,25 @@ class WebViewHost implements MealioHost {
         }
         result.complete(_httpResultFrom(m));
       });
+      // The JS side aborts at timeoutMs; the extra time covers the trip back.
+      // The injection counts against it too.
+      final until = DateTime.now().add(Duration(milliseconds: timeoutMs + 2000));
       try {
-        await _injectBridge(hidden, _hiddenNonce);
         try {
-          await hidden.runJavaScript(_fetchScript(id, request, timeoutMs, maxBytes));
+          final injected = await _before(
+            () async {
+              await _injectBridge(hidden, _hiddenNonce);
+              await hidden.runJavaScript(_fetchScript(id, request, timeoutMs, maxBytes));
+            }(),
+            until,
+          );
+          if (!injected) return const HttpResult(ok: false, error: 'timeout');
         } catch (_) {
           return const HttpResult(ok: false, error: 'no_response');
         }
-        // The JS side aborts at timeoutMs; the extra time covers the trip back.
-        return await result.future.timeout(
-          Duration(milliseconds: timeoutMs + 2000),
-          onTimeout: () => const HttpResult(ok: false, error: 'timeout'),
-        );
+        if (result.isCompleted) return await result.future;
+        if (!await _before(result.future, until)) return const HttpResult(ok: false, error: 'timeout');
+        return await result.future;
       } finally {
         await sub.cancel();
       }
@@ -491,9 +609,11 @@ class WebViewHost implements MealioHost {
   /// - Every top-frame navigation is checked with `allowNavigation`; refused
   ///   ones are cancelled. Sub-frame navigations (captcha, consent) are not
   ///   navigations of the sheet and are let through, as PROTOCOL.md says.
-  /// - After every page load and every `check.intervalMs`, GUARD_SCRIPT then
-  ///   `check.script` are injected; a message matching `doneWhen` means
-  ///   signed in.
+  /// - After every page load and every `check.intervalMs`, GUARD_SCRIPT (the
+  ///   guard, unarmed) is injected, then GUARD_ARM_SCRIPT and `check.script`
+  ///   when there is a check; a message matching `doneWhen` means signed in.
+  ///   With no check script the guard stays unarmed: Mealio runs nothing in
+  ///   the page.
   /// - A URL matching `doneWhenUrl` also means signed in.
   /// - Close, the system back gesture, or popping the route means cancelled.
   ///
@@ -532,11 +652,14 @@ class WebViewHost implements MealioHost {
       await _injectBridge(c, nonce);
       await _runQuietly(c, req.guard);
       final check = req.check;
-      if (check != null && check.script.isNotEmpty) await _runQuietly(c, check.script);
+      if (check != null && check.script.isNotEmpty) {
+        await _runQuietly(c, req.armGuard);
+        await _runQuietly(c, check.script);
+      }
     }
 
     c = _newController(
-      nonce: nonce,
+      nonce: () => nonce,
       onMessage: (String raw) {
         final m = parseMessage(raw);
         if (m == null) return;
@@ -587,6 +710,9 @@ class WebViewHost implements MealioHost {
     final timers = <Timer>[
       Timer(Duration(milliseconds: req.timeoutMs), () => finish(LoginOutcome.timeout)),
     ];
+    // The job was cancelled (the sheet closed, the user changed): close.
+    final stopListening = req.cancel?.onCancel(() => finish(LoginOutcome.cancelled));
+    unawaited(done.future.then((_) => stopListening?.call()));
     final periodic = req.check;
     if (periodic != null && periodic.script.isNotEmpty && periodic.intervalMs > 0) {
       final every = periodic.intervalMs < 250 ? 250 : periodic.intervalMs;
@@ -671,25 +797,42 @@ class WebViewHost implements MealioHost {
 
   /// Clears every cookie in the shared store and the hidden page's local
   /// storage. webview_flutter cannot clear one site's cookies, only all.
-  Future<void> clearStoreSessions() async {
-    try {
-      await WebViewCookieManager().clearCookies();
-    } catch (_) {
-      // No WebView platform (tests); nothing to clear.
-    }
-    try {
-      await hidden.clearLocalStorage();
-    } catch (_) {
-      // Best effort; cookies are what hold the store login.
-    }
-    try {
-      await hidden.clearCache();
-    } catch (_) {
-      // Best effort.
-    }
+  /// Each platform call gets [storeStepTimeout], and none starts after
+  /// `cancel` fires.
+  Future<void> clearStoreSessions({CancelToken? cancel}) async {
+    await boundedStoreStep(() => WebViewCookieManager().clearCookies(), cancel);
+    await boundedStoreStep(hidden.clearLocalStorage, cancel);
+    await boundedStoreStep(hidden.clearCache, cancel);
+    if (cancel?.cancelled ?? false) return;
     // The signed-out store page must not stay up in the hidden WebView.
     _pageStore = null;
-    await _loadBlank(hidden);
+    await boundedStoreStep(() => _loadBlank(hidden), cancel);
+  }
+
+  /// Load a blank page in the hidden WebView and forget the store page. A
+  /// warm-up made on the old page is not offered.
+  @override
+  Future<void> resetPage() async {
+    _load?.end(const _LoadEnd(error: 'superseded'));
+    _pageStore = null;
+    _page = Object();
+    await boundedStoreStep(() => _loadBlank(hidden), null);
+  }
+}
+
+/// How long each step of a store sign-out may take: clearing cookies,
+/// reading and writing the stored epoch, resetting the page.
+const Duration storeStepTimeout = Duration(seconds: 10);
+
+/// Runs `step`, given [storeStepTimeout]. Null when it failed or ran out of
+/// time, and when `cancel` had fired (then `step` is not started). A step
+/// that never answers is left behind. Never throws.
+Future<T?> boundedStoreStep<T>(Future<T> Function() step, CancelToken? cancel) async {
+  if (cancel?.cancelled ?? false) return null;
+  try {
+    return await Future<T>.sync(step).timeout(storeStepTimeout);
+  } catch (_) {
+    return null;
   }
 }
 

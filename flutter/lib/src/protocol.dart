@@ -37,8 +37,9 @@ const int maxRecipes = 10;
 
 String _str(Object? v, [String fallback = '']) => v is String ? v : fallback;
 String? _strOrNull(Object? v) => v is String ? v : null;
-int _int(Object? v, int fallback) => v is num ? v.toInt() : fallback;
-int? _intOrNull(Object? v) => v is num ? v.toInt() : null;
+// 1e400 decodes to Infinity, which has no int (toInt throws): no number.
+int _int(Object? v, int fallback) => v is num && v.isFinite ? v.toInt() : fallback;
+int? _intOrNull(Object? v) => v is num && v.isFinite ? v.toInt() : null;
 double? _doubleOrNull(Object? v) => v is num ? v.toDouble() : null;
 bool _bool(Object? v, [bool fallback = false]) => v is bool ? v : fallback;
 
@@ -641,20 +642,43 @@ enum ItemStatus {
 /// A recipe that calls for a cart item, in a cart made from one or more
 /// recipes ([CartItem.recipes]).
 class ItemRecipe {
-  const ItemRecipe({required this.id, this.title, required this.quantity});
+  /// [share] is the exact share; leave it out for a whole one ([quantity]).
+  const ItemRecipe({required this.id, this.title, required this.quantity, double? share}) : _share = share;
 
   factory ItemRecipe.fromJson(Object? json) {
     final m = _mapOrNull(json) ?? const <String, Object?>{};
-    return ItemRecipe(id: _str(m['id']), title: _strOrNull(m['title']), quantity: _int(m['quantity'], 1));
+    final q = m['quantity'];
+    return ItemRecipe(
+      id: _str(m['id']),
+      title: _strOrNull(m['title']),
+      quantity: _int(q, 1),
+      share: q is num && q.isFinite ? q.toDouble() : null,
+    );
   }
 
   final String id;
   final String? title;
 
-  /// This recipe's share of the item's quantity.
+  /// This recipe's share of the item's quantity, as a whole number (as in
+  /// 0.5.0: the server's number truncated toward zero).
   final int quantity;
 
-  Map<String, Object?> toJson() => <String, Object?>{'id': id, 'title': title, 'quantity': quantity};
+  final double? _share;
+
+  /// This recipe's exact share of the item's quantity, as the server sends
+  /// it: part of a package (0.5), as TypeScript's `quantity: number`. Built
+  /// without one, it is [quantity].
+  double get share => _share ?? quantity.toDouble();
+
+  /// The share goes on the wire as JSON.stringify sends the number (2, 0.5).
+  Map<String, Object?> toJson() => <String, Object?>{'id': id, 'title': title, 'quantity': _wireNumber(share)};
+}
+
+/// A number as JSON.stringify writes it: a whole one as an int, a non-finite one as null.
+Object? _wireNumber(double d) {
+  if (!d.isFinite) return null;
+  if (d == d.truncateToDouble() && d.abs() < 9007199254740992.0) return d.toInt();
+  return d;
 }
 
 /// A recipe a cart was made from ([PreparedCart.recipes]).
@@ -792,6 +816,22 @@ class CartItem {
 List<CartItem> _items(Object? v, String group) =>
     _list(v).map((Object? j) => CartItem.fromJson(j, group: group)).toList();
 
+/// Something the server changed or ignored in what was sent. The cart still works.
+class CartWarning {
+  const CartWarning({required this.code, required this.message});
+
+  factory CartWarning.fromJson(Object? json) {
+    final m = _mapOrNull(json) ?? const <String, Object?>{};
+    return CartWarning(code: _str(m['code']), message: _str(m['message']));
+  }
+
+  /// `ingredients_dropped`, `lines_dropped`, `servings_ignored`, or a newer code.
+  final String code;
+  final String message;
+
+  Map<String, Object?> toJson() => <String, Object?>{'code': code, 'message': message};
+}
+
 class PreparedCart {
   const PreparedCart({
     required this.cartId,
@@ -803,6 +843,7 @@ class PreparedCart {
     this.ready = const <CartItem>[],
     this.needsChoice = const <CartItem>[],
     this.unavailable = const <CartItem>[],
+    this.warnings,
   });
 
   /// Reads `items`; a 0.1 server without it gets items rebuilt from the
@@ -825,6 +866,7 @@ class PreparedCart {
       ready: ready,
       needsChoice: needsChoice,
       unavailable: unavailable,
+      warnings: m['warnings'] is List ? _list(m['warnings']).map(CartWarning.fromJson).toList() : null,
     );
   }
 
@@ -853,6 +895,9 @@ class PreparedCart {
   @Deprecated('Use items')
   final List<CartItem> unavailable;
 
+  /// What the server changed or ignored in what was sent. Null from older servers.
+  final List<CartWarning>? warnings;
+
   Map<String, Object?> toJson() {
     final out = <String, Object?>{'cartId': cartId, 'store': store};
     _put(out, 'storeName', storeName);
@@ -865,6 +910,7 @@ class PreparedCart {
     out['needsChoice'] = needsChoice.map((CartItem i) => i.toJson()).toList();
     // ignore: deprecated_member_use_from_same_package
     out['unavailable'] = unavailable.map((CartItem i) => i.toJson()).toList();
+    _put(out, 'warnings', warnings?.map((CartWarning w) => w.toJson()).toList());
     return out;
   }
 }

@@ -71,6 +71,8 @@ enum TestSigner {
 final class FakeHost: MealioHost {
     var calls: [String] = []
     var lastLogin: LoginRequest?
+    /// The guard handed with the last page_script.
+    var lastScriptGuard: String?
 
     func openPage(store: String, url: String, timeoutMs: Int) async throws -> PageOpenOutcome {
         calls.append("open \(url)")
@@ -78,6 +80,7 @@ final class FakeHost: MealioHost {
     }
 
     func runScript(store: String, guardScript: String, script: String, until: [Matcher], timeoutMs: Int) async throws -> ScriptOutcome {
+        lastScriptGuard = guardScript
         calls.append("script")
         return ScriptOutcome(messages: [["type": .string(until.first?.type ?? "X"), "loggedIn": true]], timedOut: false)
     }
@@ -118,6 +121,8 @@ final class Recorder: @unchecked Sendable {
 final class StubURLProtocol: URLProtocol {
     /// (request, body) -> (status, response body)
     static var handler: ((URLRequest, Data?) -> (Int, Data))?
+    /// True: no request is ever answered, as a server that never replies.
+    static var hangs = false
 
     static func session() -> URLSession {
         let config = URLSessionConfiguration.ephemeral
@@ -129,6 +134,7 @@ final class StubURLProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        if StubURLProtocol.hangs { return }
         // URLSession moves httpBody into a stream before it reaches a URLProtocol.
         let body = request.httpBody ?? StubURLProtocol.read(request.httpBodyStream)
         let (status, data) = StubURLProtocol.handler?(request, body) ?? (500, Data())

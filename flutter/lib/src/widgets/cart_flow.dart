@@ -5,6 +5,7 @@
 
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 
 import '../cart_session.dart';
@@ -13,6 +14,7 @@ import '../errors.dart';
 import '../events.dart';
 import '../mealio_cart.dart';
 import '../protocol.dart';
+import '../runner.dart' show CancelToken;
 import '../theme.dart';
 import '../ui.dart';
 import '../webview_host.dart';
@@ -22,7 +24,8 @@ import 'location_picker.dart';
 
 /// Starts a cart for one recipe. The default is
 /// `MealioCart.instance.prepareCart`. The drop-in passes no `zip`: the user
-/// chooses their store.
+/// chooses their store. It is called inside [runCancellable], so a
+/// `MealioClient.prepareCart` it makes stops when the sheet closes.
 typedef PrepareCart = Future<CartSession> Function({
   String? store,
   required Recipe recipe,
@@ -43,6 +46,10 @@ typedef PrepareCarts = Future<CartSession> Function({
 /// `recipes` when given, else `recipe` as a list of one.
 List<Recipe> _recipeList(Recipe? recipe, List<Recipe>? recipes) =>
     recipes ?? (recipe == null ? const <Recipe>[] : <Recipe>[recipe]);
+
+/// How many times in a row the sheet starts its cart again after something
+/// outside it cancelled the prepare, before it shows the error screen.
+const int maxOutsideRestarts = 3;
 
 /// Lists the stores. The default is `MealioCart.instance.stores`.
 typedef LoadStores = Future<List<StoreInfo>> Function();
@@ -151,46 +158,84 @@ class MealioCartFlow extends StatefulWidget {
     ValueChanged<AddResult?>? onClose,
   }) async {
     assert(recipe != null || recipes != null, 'Pass recipe or recipes.');
+    final props = ValueNotifier<_FlowProps>(_FlowProps(
+      recipe: recipe,
+      recipes: recipes,
+      store: store,
+      zip: zip,
+      onAdded: onAdded,
+      onError: onError,
+      theme: theme,
+      prepareCart: prepareCart,
+      prepareCarts: prepareCarts,
+      loadStores: loadStores,
+      loadLocations: loadLocations,
+      saveStore: saveStore,
+      doneMessage: doneMessage,
+      doneAction: doneAction,
+      onClose: onClose,
+    ));
+    // Not disposed: the sheet still listens through its closing animation.
+    return _present(context, props);
+  }
+
+  /// [show], with props that may change while the sheet is up
+  /// ([MealioCartButton] passes its own as they change).
+  static Future<AddResult?> _present(BuildContext context, ValueListenable<_FlowProps> props) async {
     AddResult? added;
     AddResult? acted;
+    final watch = _AddWatch();
     final carry = mealioCarryScope(context);
     final r = await Navigator.of(context, rootNavigator: true).push<AddResult>(
       MealioSheetRoute<AddResult>(
         barrierLabel: MealioUi.of(context).tr('close'),
         // No theme unless one was passed: the sheet follows the phone in auto.
-        builder: (BuildContext sheetContext) => carry(
-          MealioCartFlow(
-            recipe: recipe,
-            recipes: recipes,
-            store: store,
-            zip: zip,
-            theme: theme,
-            prepareCart: prepareCart,
-            prepareCarts: prepareCarts,
-            loadStores: loadStores,
-            loadLocations: loadLocations,
-            saveStore: saveStore,
-            doneMessage: doneMessage,
-            // Held until the sheet is closed and reported, as on React Native.
-            doneAction: doneAction == null
-                ? null
-                : MealioDoneAction(label: doneAction.label, onPress: (AddResult a) => acted = a),
-            onAdded: (AddResult a) {
-              added = a;
-              onAdded?.call(a);
+        builder: (BuildContext sheetContext) => _ShowHooks(
+          watch: watch,
+          child: ValueListenableBuilder<_FlowProps>(
+            valueListenable: props,
+            builder: (BuildContext _, _FlowProps p, Widget? __) {
+              final doneAction = p.doneAction;
+              return carry(
+                MealioCartFlow(
+                  recipe: p.recipe,
+                  recipes: p.recipes,
+                  store: p.store,
+                  zip: p.zip,
+                  theme: p.theme,
+                  prepareCart: p.prepareCart,
+                  prepareCarts: p.prepareCarts,
+                  loadStores: p.loadStores,
+                  loadLocations: p.loadLocations,
+                  saveStore: p.saveStore,
+                  doneMessage: p.doneMessage,
+                  // Held until the sheet is closed and reported, as on React Native.
+                  doneAction: doneAction == null
+                      ? null
+                      : MealioDoneAction(label: doneAction.label, onPress: (AddResult a) => acted = a),
+                  onAdded: (AddResult a) {
+                    added = a;
+                    p.onAdded?.call(a);
+                  },
+                  onError: p.onError,
+                  onClose: (AddResult? a) => Navigator.of(sheetContext).pop(a),
+                ),
+              );
             },
-            onError: onError,
-            onClose: (AddResult? a) => Navigator.of(sheetContext).pop(a),
           ),
         ),
       ),
     );
+    // Hidden while adding: the add runs on, and its result still counts.
+    final adding = watch.adding;
+    if (r == null && added == null && adding != null) await adding;
     // A tap on the scrim or the back button pops with null; after a fill the
     // result still counts.
     final closed = r ?? added;
-    onClose?.call(closed);
+    final last = props.value;
+    last.onClose?.call(closed);
     final tapped = acted;
-    if (tapped != null) doneAction?.onPress(tapped);
+    if (tapped != null) last.doneAction?.onPress(tapped);
     return closed;
   }
 
@@ -216,19 +261,37 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
   _Phase _backTo = _Phase.list;
   bool _closeReported = false;
 
+  /// The prepare under way, so closing can stop it.
+  CancelToken? _preparing;
+
+  /// Restarts in a row after a prepare was cancelled from outside the sheet.
+  /// Reset by a prepare that works and by anything the user does.
+  int _outsideRestarts = 0;
+
+  /// An add under way. It runs to its end: nothing closes the sheet meanwhile.
+  bool _adding = false;
+
+  /// The cart of a failed add, so Try again keeps the user's picks.
+  CartSession? _failedAdd;
+
+  /// Who was signed in when the sheet opened ([_who]).
+  String? _openedFor;
+
   /// Set each build, for a sheet closed from `dispose`, which cannot look it up.
   MealioUi _ui = const MealioUi();
+
+  /// Where [MealioCartFlow.show] waits for an add the sheet was hidden during.
+  _AddWatch? _watch;
 
   @override
   void initState() {
     super.initState();
-    final h = WebViewHost.current;
-    if (h != null) {
-      _host = h;
-      h.flowOpened();
-      h.login.addListener(_onLogin);
-      _login = h.login.value;
-    }
+    _follow(WebViewHost.current);
+    _login = _host?.login.value;
+    WebViewHost.currentListenable.addListener(_onHostChanged);
+    // The current instance, whichever `configure` made it.
+    _openedFor = _who();
+    MealioCart.changes.addListener(_onUserChanged);
     _store = widget.store;
     // After this build: inherited widgets can't be read in initState, and a
     // listener may call setState.
@@ -245,20 +308,85 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
     super.didChangeDependencies();
     final route = ModalRoute.of<Object?>(context);
     if (route is MealioSheetRoute) route.onPop = _onPop;
+    _watch = context.getInheritedWidgetOfExactType<_ShowHooks>()?.watch;
+  }
+
+  @override
+  void didUpdateWidget(MealioCartFlow old) {
+    super.didUpdateWidget(old);
+    // The store prop changed while the sheet is up: a cart still loading
+    // moves to it, and Try again uses it. A finished list stays what it is.
+    if (old.store == widget.store) return;
+    if (_phase == _Phase.loading) {
+      _store = widget.store;
+      scheduleMicrotask(() {
+        if (mounted) unawaited(_start(widget.store));
+      });
+    } else if (_phase == _Phase.error) {
+      _store = widget.store;
+    }
   }
 
   @override
   void dispose() {
     // Removed without a pop we could see, for example in a partner's own route.
     _reportClose(_ui);
-    _run += 1;
-    final h = _host;
-    if (h != null) {
-      h.login.removeListener(_onLogin);
-      // Closing the sheet cancels a sign-in it was showing.
-      h.flowClosed();
-    }
+    // Nothing it was doing reports afterwards.
+    _stop();
+    WebViewHost.currentListenable.removeListener(_onHostChanged);
+    MealioCart.changes.removeListener(_onUserChanged);
+    // Closing the sheet cancels a sign-in it was showing.
+    _follow(null);
     super.dispose();
+  }
+
+  /// Register with the host the scope now has. A remounted `MealioScope`
+  /// brings a new host, and sign-ins for this sheet go to it.
+  void _follow(WebViewHost? h) {
+    final old = _host;
+    if (identical(old, h)) return;
+    if (old != null) {
+      old.login.removeListener(_onLogin);
+      old.flowClosed();
+    }
+    _host = h;
+    if (h != null) {
+      h.flowOpened();
+      h.login.addListener(_onLogin);
+    }
+  }
+
+  void _onHostChanged() {
+    // The scope attaches while it builds: move after that.
+    scheduleMicrotask(() {
+      if (!mounted) return;
+      _follow(WebViewHost.current);
+      _onLogin();
+    });
+  }
+
+  /// The user changed: what is on screen was theirs. An add finishes first.
+  void _onUserChanged() {
+    if (!mounted || _adding) return;
+    final now = _who();
+    if (now == _openedFor) return;
+    _failedAdd = null;
+    _close();
+  }
+
+  /// The signed-in user: their id, '' when users are not tracked (or the SDK
+  /// is not configured), null for nobody.
+  static String? _who() {
+    if (!MealioCart.isConfigured) return '';
+    final i = MealioCart.instance;
+    return i.hasUser ? i.userId ?? '' : null;
+  }
+
+  /// Stop what can be stopped: the prepare and any search.
+  void _stop() {
+    _run += 1;
+    _preparing?.cancel(MealioCancelReason.closed);
+    _cart?.cancelSearches(MealioCancelReason.closed);
   }
 
   void _onLogin() {
@@ -296,16 +424,19 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
   /// `_close`, nothing is reported after this.
   void _onPop() {
     if (!mounted) return;
-    _run += 1;
+    _stop();
     _reportClose(MealioUi.of(context));
   }
 
   Future<void> _openStores(_Phase from) async {
+    // An empty list is a load that failed: try again each time.
+    final retry = _stores?.isEmpty ?? true;
     setState(() {
       _backTo = from;
       _phase = _Phase.stores;
+      if (retry) _stores = null;
     });
-    if (_stores != null) return;
+    if (!retry) return;
     List<StoreInfo> list;
     try {
       final load = widget.loadStores ?? MealioCart.instance.stores;
@@ -334,8 +465,13 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
     unawaited(_start(id));
   }
 
-  Future<void> _start(String? storeId) async {
+  /// Start (or start again) the cart. `byUser` false is the sheet's own
+  /// restart after an outside cancel, which is capped ([maxOutsideRestarts]).
+  Future<void> _start(String? storeId, {bool byUser = true}) async {
+    if (byUser) _outsideRestarts = 0;
     final id = ++_run;
+    _preparing?.cancel();
+    final cancel = _preparing = CancelToken();
     setState(() {
       _phase = _Phase.loading;
       _step = MealioStep.connecting;
@@ -354,13 +490,25 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
       final one = widget.prepareCart;
       final CartSession c;
       if (many != null) {
-        c = await many(store: storeId, recipes: recipes, onStep: onStep);
+        c = await runCancellable(cancel, () => many(store: storeId, recipes: recipes, onStep: onStep));
       } else if (one != null && recipes.length == 1) {
-        c = await one(store: storeId, recipe: recipes.first, onStep: onStep);
+        c = await runCancellable(cancel, () => one(store: storeId, recipe: recipes.first, onStep: onStep));
       } else {
-        c = await MealioCart.instance.prepareCart(store: storeId, recipes: recipes, onStep: onStep);
+        c = await MealioCart.instance.prepareCart(store: storeId, recipes: recipes, onStep: onStep, cancel: cancel);
       }
       if (_run != id || !mounted) return;
+      final failed = _failedAdd;
+      if (failed != null) {
+        await c.restorePicks(failed, onStep: onStep, cancel: cancel);
+        if (_run != id || !mounted) return;
+        // restorePicks never throws. A cancel from outside the sheet while it
+        // ran restarts the cart like any other outside cancel.
+        if (cancel.cancelled) {
+          throw MealioException(MealioErrorCode.cancelled, 'Cancelled', reason: cancel.reason);
+        }
+        _failedAdd = null;
+      }
+      _outsideRestarts = 0;
       setState(() {
         _store = c.store.isEmpty ? storeId : c.store;
         _cart = c;
@@ -369,6 +517,21 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
       _emit(MealioListShown(store: _store ?? c.store, items: c.items.length));
     } catch (e) {
       if (_run != id || !mounted) return;
+      if (e is MealioException && e.code == MealioErrorCode.cancelled) {
+        // Cancelled by something other than this sheet (a store sign-out,
+        // cancelJobs, a new configure, resetSession during the session
+        // fetch) while it is still open: start again, without an error. At
+        // most [maxOutsideRestarts] times in a row; then the error screen,
+        // whose Try again starts over.
+        if (!identical(_preparing, cancel)) return;
+        if (_outsideRestarts < maxOutsideRestarts) {
+          _outsideRestarts += 1;
+          unawaited(_start(storeId, byUser: false));
+          return;
+        }
+        _fail(MealioException(MealioErrorCode.cancelled, '', reason: e.reason), 'somethingWrongSentence', MealioSheetStep.loading);
+        return;
+      }
       if (e is MealioException && (e.code == MealioErrorCode.storeRequired || e.code == MealioErrorCode.storeNotAllowed)) {
         _store = null;
         unawaited(_openStores(_Phase.error));
@@ -391,13 +554,27 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
 
   Future<void> _add() async {
     final c = _cart;
-    if (c == null || _phase == _Phase.adding) return;
+    if (c == null || _adding || c.searching) return;
+    _adding = true;
     final id = _run;
+    // Kept for an add the sheet is hidden during, after which none of these
+    // can be looked up.
+    final w = widget;
+    final ui = _ui;
+    final watch = _watch;
+    final done = Completer<void>();
+    watch?.adding = done.future;
     setState(() => _phase = _Phase.adding);
     _emit(MealioAddStarted(items: c.estimate().count));
     try {
       final r = await c.addToCart();
-      if (_run != id || !mounted) return;
+      if (_run != id || !mounted) {
+        // The partner hid the sheet: the add ran on, and it is still reported.
+        ui.emit(MealioCartAdded(store: r.store, added: r.added.length, failed: r.failed.length));
+        w.onAdded?.call(r);
+        if (watch == null) w.onClose(r);
+        return;
+      }
       setState(() {
         _result = r;
         _phase = _Phase.done;
@@ -405,8 +582,22 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
       _emit(MealioCartAdded(store: r.store, added: r.added.length, failed: r.failed.length));
       widget.onAdded?.call(r);
     } catch (e) {
-      if (_run != id || !mounted) return;
+      if (_run != id || !mounted) {
+        ui.emit(MealioErrorEvent(code: e is MealioException ? e.code : 'error', step: MealioSheetStep.adding));
+        w.onError?.call(e);
+        if (watch == null) w.onClose(null);
+        return;
+      }
+      _failedAdd = c;
       _fail(e, 'couldNotAdd', MealioSheetStep.adding);
+    } finally {
+      if (!done.isCompleted) done.complete();
+      _adding = false;
+      if (mounted) {
+        // Closing is back on, and a user change held off by the add lands now.
+        setState(() {});
+        _onUserChanged();
+      }
     }
   }
 
@@ -440,7 +631,13 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
   }
 
   void _close() {
-    _run += 1;
+    // Every way of closing lands here. An add cannot be stopped, so the sheet
+    // stays open, but a sign-in the add asked for can still be dismissed.
+    if (_adding) {
+      _login?.cancel();
+      return;
+    }
+    _stop();
     _reportClose(MealioUi.of(context));
     _login?.cancel();
     widget.onClose(_phase == _Phase.done ? _result : null);
@@ -565,6 +762,7 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
         theme: t,
         code: _errorCode,
         message: _errorMessage ?? ui.tr(_errorKey),
+        note: _failedAdd != null ? ui.tr('addFailedNote') : null,
         onRetry: () => unawaited(_start(_store)),
         onClose: _close,
       );
@@ -572,15 +770,72 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
 
     // A pop by the scrim or back button disposes this state, which cancels
     // a sign-in in progress (WebViewHost.flowClosed).
-    return SheetFrame(
-      theme: t,
-      kicker: _kicker(ui),
-      photos: _photos,
-      title: login != null ? login.title : _title(ui, storeName, named),
-      onClose: _close,
-      child: body,
+    // While adding, the back button and the scrim do nothing, and the X only
+    // dismisses a sign-in the add asked for.
+    return PopScope(
+      canPop: !_adding,
+      child: SheetFrame(
+        theme: t,
+        kicker: _kicker(ui),
+        photos: _photos,
+        title: login != null ? login.title : _title(ui, storeName, named),
+        onClose: _close,
+        closeEnabled: !_adding || login != null,
+        child: body,
+      ),
     );
   }
+}
+
+/// What [MealioCartFlow.show] builds the sheet from.
+class _FlowProps {
+  const _FlowProps({
+    this.recipe,
+    this.recipes,
+    this.store,
+    this.zip,
+    this.onAdded,
+    this.onError,
+    this.theme,
+    this.prepareCart,
+    this.prepareCarts,
+    this.loadStores,
+    this.loadLocations,
+    this.saveStore,
+    this.doneMessage,
+    this.doneAction,
+    this.onClose,
+  });
+
+  final Recipe? recipe;
+  final List<Recipe>? recipes;
+  final String? store;
+  final String? zip;
+  final ValueChanged<AddResult>? onAdded;
+  final ValueChanged<Object>? onError;
+  final MealioTheme? theme;
+  final PrepareCart? prepareCart;
+  final PrepareCarts? prepareCarts;
+  final LoadStores? loadStores;
+  final LoadLocations? loadLocations;
+  final SaveStore? saveStore;
+  final String? doneMessage;
+  final MealioDoneAction? doneAction;
+  final ValueChanged<AddResult?>? onClose;
+}
+
+/// An add under way in a sheet [MealioCartFlow.show] opened.
+class _AddWatch {
+  Future<void>? adding;
+}
+
+class _ShowHooks extends InheritedWidget {
+  const _ShowHooks({required this.watch, required super.child});
+
+  final _AddWatch watch;
+
+  @override
+  bool updateShouldNotify(_ShowHooks old) => !identical(watch, old.watch);
 }
 
 /// One row per store; the current one has an accent ring and "Current".
@@ -710,7 +965,13 @@ class MealioCartButton extends StatefulWidget {
     this.builder,
     this.doneMessage,
     this.doneAction,
+    this.onSignInRequired,
   }) : assert(recipe != null || recipes != null, 'Pass recipe or recipes.');
+
+  /// Called on tap while `MealioCart.setUser(null)` says nobody is signed in.
+  /// Send the user to your sign-in. With neither this nor the one given to
+  /// `MealioCart.configure`, the button is disabled then.
+  final VoidCallback? onSignInRequired;
 
   /// One recipe. Pass this or [recipes].
   final Recipe? recipe;
@@ -762,6 +1023,11 @@ class MealioCartButton extends StatefulWidget {
 
 class _MealioCartButtonState extends State<MealioCartButton> {
   bool _open = false;
+  bool _wasDisabled = true;
+
+  /// What the open sheet is built from. Follows this button's props, so a
+  /// change reaches a sheet already up and its Try again.
+  ValueNotifier<_FlowProps>? _sheet;
 
   // WARM THE LOGIN CHECK while the user reads the recipe. Only for a known
   // user with a store on file: the server answers "nothing to warm"
@@ -769,40 +1035,91 @@ class _MealioCartButtonState extends State<MealioCartButton> {
   @override
   void initState() {
     super.initState();
+    // Static, so a later `configure` still reaches this button.
+    MealioCart.changes.addListener(_onUserChanged);
+    _wasDisabled = _disabled;
     _warm();
   }
 
   @override
   void didUpdateWidget(MealioCartButton old) {
     super.didUpdateWidget(old);
-    if (old.store != widget.store || (old.disabled && !widget.disabled)) _warm();
+    final was = _wasDisabled;
+    _wasDisabled = _disabled;
+    if (old.store != widget.store || (was && !_disabled)) _warm();
+    final sheet = _sheet;
+    if (sheet != null) {
+      // Not during this build: the sheet is in another part of the tree.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (identical(_sheet, sheet) && mounted) sheet.value = _props();
+      });
+    }
   }
 
+  @override
+  void dispose() {
+    MealioCart.changes.removeListener(_onUserChanged);
+    super.dispose();
+  }
+
+  void _onUserChanged() {
+    if (!mounted) return;
+    setState(() => _wasDisabled = _disabled);
+    // A new user, or a button that just became enabled: warm for them.
+    _warm();
+  }
+
+  bool get _hasUser => !MealioCart.isConfigured || MealioCart.instance.hasUser;
+
+  /// Who to call on tap while nobody is signed in.
+  VoidCallback? get _signIn {
+    if (_hasUser) return null;
+    return widget.onSignInRequired ?? MealioCart.instance.onSignInRequired;
+  }
+
+  bool get _disabled => widget.disabled || (!_hasUser && _signIn == null);
+
   void _warm() {
-    if (widget.disabled || !MealioCart.isConfigured) return;
+    if (_disabled || !_hasUser || !MealioCart.isConfigured) return;
     MealioCart.instance.warm(store: widget.store).ignore();
   }
 
   Future<void> _tap() async {
-    if (_open) return;
+    final signIn = _signIn;
+    if (signIn != null) {
+      signIn();
+      return;
+    }
+    if (_open || !_hasUser) return;
     _open = true;
+    final sheet = _sheet = ValueNotifier<_FlowProps>(_props());
     try {
-      await MealioCartFlow.show(
-        context,
-        recipe: widget.recipe,
-        recipes: widget.recipes,
-        store: widget.store,
-        zip: widget.zip,
-        theme: widget.theme,
-        onAdded: widget.onAdded,
-        onError: widget.onError,
-        doneMessage: widget.doneMessage,
-        doneAction: widget.doneAction,
-        onClose: widget.onClose,
-      );
+      await MealioCartFlow._present(context, sheet);
     } finally {
       _open = false;
+      _sheet = null;
     }
+  }
+
+  /// This button's props as the sheet takes them. The callbacks read the
+  /// widget at call time, so the latest ones are called.
+  _FlowProps _props() {
+    final w = widget;
+    final action = w.doneAction;
+    return _FlowProps(
+      recipe: w.recipe,
+      recipes: w.recipes,
+      store: w.store,
+      zip: w.zip,
+      theme: w.theme,
+      onAdded: (AddResult r) => widget.onAdded?.call(r),
+      onError: (Object e) => widget.onError?.call(e),
+      doneMessage: w.doneMessage,
+      doneAction: action == null
+          ? null
+          : MealioDoneAction(label: action.label, onPress: (AddResult r) => (widget.doneAction ?? action).onPress(r)),
+      onClose: (AddResult? r) => widget.onClose?.call(r),
+    );
   }
 
   @override
@@ -813,7 +1130,7 @@ class _MealioCartButtonState extends State<MealioCartButton> {
     final label = given != null && given.isNotEmpty
         ? given
         : ui.tr(variant == MealioButtonVariant.compact ? 'addToCartShort' : 'addToCart');
-    final disabled = widget.disabled;
+    final disabled = _disabled;
     final onTap = disabled ? null : _tap;
     final custom = widget.builder;
     if (custom != null) {

@@ -47,6 +47,7 @@ MealioStoreSettings(visible = open, onClose = { open = false })
 | --- | --- |
 | `mealio-sdk` | The core: protocol, signature checks, allowlist, guard script, runner, client, cart session, WebView host, login screen. No Compose. |
 | `mealio-sdk-compose` | The drop-in: `MealioCartButton`, `MealioCartFlow`, `MealioCartList`, `MealioStoreSettings`, `MealioTheme`, `MealioThemeProvider`. |
+| `mealio-sdk-testing` | Tests only (`testImplementation`): `FakeMealio`, a scripted Mealio for JVM and Robolectric tests. See Testing your screens. |
 
 minSdk 24, compileSdk 34, Java 17, Kotlin 1.9.
 
@@ -60,7 +61,7 @@ dependencyResolutionManagement {
 
 // app/build.gradle.kts
 dependencies {
-    implementation("co.mealio:mealio-sdk-compose:0.5.0") // pulls in mealio-sdk
+    implementation("co.mealio:mealio-sdk-compose:0.6.0") // pulls in mealio-sdk
 }
 ```
 
@@ -91,6 +92,24 @@ class MyApp : Application() {
     }
 }
 ```
+
+If `sessionTokenProvider` throws or takes over 30 seconds, the call fails with
+`session_failed`, and your exception's message is the error's `message`.
+
+### Who is signed in
+
+```kotlin
+MealioCart.setUser(user?.id)                       // at start-up and on every sign-in or sign-out
+MealioCart.onSignInRequired = { openYourSignIn() } // optional
+```
+
+When the id changes, a cart still loading stops, the next call gets a new
+session, and if the old value was a user, the device signs out of the stores
+(an add under way finishes first; a failed sign-out is never thrown). While it
+is null there is no session and no warm-up, and `MealioCartButton` calls
+`onSignInRequired` when tapped (its own parameter, else `MealioCart.onSignInRequired`).
+With neither, the button is disabled. `MealioStoreSettings` does the same.
+Without `setUser`, nothing changes from before.
 
 ## 3. Add the button
 
@@ -134,7 +153,7 @@ The sheet's kicker reads "2 meals", and each item says which meals it is for
 ```kotlin
 val cart = MealioCart.prepareCart("heb", listOf(tacos, pasta))
 cart.recipes                       // [CartRecipe(id, title)], in the order sent
-cart.recipesFor(item.key)          // [ItemRecipe(id, title, quantity)]: each recipe's share
+cart.recipesFor(item.key)          // [ItemRecipe(id, title, quantity, share)]: each recipe's share
 forRecipes(cart, item.key)         // "For Tacos and Pasta", or null on a one-recipe cart
 ```
 
@@ -351,6 +370,27 @@ lifecycleScope.launch {
 }
 ```
 
+### When a prepare is cancelled
+
+A cancelled prepare or search throws `MealioException` with code
+`"cancelled"` and a `reason`, so a custom screen knows what to do next:
+
+```kotlin
+catch (e: MealioException) {
+    if (e.code == "cancelled") when (e.reason) {
+        CancelReason.USER_CHANGED -> prepareAgain()   // setUser moved to another user: prepare for them
+        CancelReason.CLOSED -> Unit                   // your screen closed it (token.cancel(CancelReason.CLOSED))
+        else -> Unit                                  // cancelJobs, a store sign-out, resetSession
+    }
+}
+```
+
+After a failed add, prepare a new cart and call `fresh.restorePicks(old)`.
+It is a suspend call: a product the user found with `search` is known to
+Mealio only on the cart it was found in, so the item's last search runs again
+on the new cart (it counts toward the search cap) and the same product is
+picked if it comes back. If not, the item keeps the new cart's own pick.
+
 ### Sign out of stores
 
 ```kotlin
@@ -358,7 +398,7 @@ MealioCart.signOutOfStore("heb")
 MealioCart.signOutOfAllStores()
 ```
 
-Both clear the store's cookies and web storage on the device and bump a
+Both stop a cart still loading, wait for an add under way to end, then clear the store's cookies and web storage on the device and bump a
 device "epoch" the SDK sends to Mealio with every job, so the server forgets
 any session it held for this device.
 
@@ -375,7 +415,7 @@ WebView in your app, not only the stores'.
     onError: (Exception) -> Unit = {}, modifier: Modifier = Modifier, enabled: Boolean = true,
     theme: MealioTheme = LocalMealioTheme.current, variant: MealioButtonVariant = MealioButtonVariant.SOLID,
     button: (@Composable (onClick: () -> Unit, enabled: Boolean, label: String) -> Unit)? = null,
-    doneMessage: String? = null, doneAction: MealioDoneAction? = null)
+    doneMessage: String? = null, doneAction: MealioDoneAction? = null, onSignInRequired: (() -> Unit)? = null)
 @Composable fun MealioCartFlow(visible: Boolean, recipe: Recipe, store: String? = null, zip: String? = null,
     onClose: (AddResult?) -> Unit, onAdded: (AddResult) -> Unit = {}, onError: (Exception) -> Unit = {},
     theme: MealioTheme = LocalMealioTheme.current, doneMessage: String? = null, doneAction: MealioDoneAction? = null)
@@ -384,7 +424,7 @@ WebView in your app, not only the stores'.
     modifier: Modifier = Modifier, onChange: () -> Unit = {}, onChangeStore: (() -> Unit)? = null, theme: MealioTheme = ...,
     onChangeLocation: (() -> Unit)? = null)
 @Composable fun MealioStoreSettings(visible: Boolean, onClose: () -> Unit, onChange: (StorePreferences) -> Unit = {},
-    theme: MealioTheme = LocalMealioTheme.current)
+    theme: MealioTheme = LocalMealioTheme.current, onSignInRequired: (() -> Unit)? = null)
 data class MealioTheme(accent, onAccent, background, surface, text, muted, border, radius, fontFamily, warnBackground, warnText)
 MealioTheme.Default; MealioTheme.Dark
 data class MealioDarkTheme(accent, onAccent, background, surface, text, muted, border, radius, fontFamily, warnBackground, warnText) // every value nullable
@@ -410,6 +450,12 @@ object MealioCart {
     val client: MealioClient
     suspend fun prepareCart(store: String?, recipe: Recipe, zip: String? = null, onStep: StepListener? = null): CartSession
     suspend fun prepareCart(store: String?, recipes: List<Recipe>, zip: String? = null, onStep: StepListener? = null): CartSession
+    suspend fun prepareCart(store: String?, recipes: List<Recipe>, zip: String?, cancel: CancelToken, onStep: StepListener? = null): CartSession
+    fun setUser(id: String?)                       // null: nobody is signed in
+    val user: StateFlow<MealioUser>
+    var onSignInRequired: (() -> Unit)?
+    fun cancelJobs()                               // stop every cart still loading and every search; an add runs on
+                                                   // configure() again does this to the old setup, and queues behind its add
     suspend fun stores(): List<StoreInfo>
     suspend fun storeLocations(store: String, zip: String): List<StoreLocation>   // a Kroger family chain's stores near a zip
     suspend fun storePreferences(): StorePreferences                              // defaultStore, location
@@ -432,11 +478,18 @@ class CartSession {
     fun select(key: String, productId: String, preferenceId: String? = null)
     fun deselect(key: String)                       // this run only; the usual is kept
     suspend fun search(key: String, query: String, onStep: StepListener? = null): List<Product>
+    suspend fun search(key: String, query: String, cancel: CancelToken, onStep: StepListener? = null): List<Product>
+    val searching: Boolean                          // keep Add off while true
+    fun cancelSearches(reason: String = CancelReason.CANCELLED)
+    suspend fun restorePicks(from: CartSession, cancel: CancelToken = CancelToken(), onStep: StepListener? = null)
+                                                    // after a failed add: same store, by item key; a searched pick is searched again here
+    val warnings: List<CartWarning>                 // what the server changed or ignored; empty from older servers
+    fun quantity(key: String): Int                  // never over the product's cap; what is sent
     fun selections(): List<Selection>               // one per item
     fun estimate(): Estimate                        // total (null if any item is unpriced), count, estimated, unpriced
     fun addedTotal(result: AddResult): Estimate     // same rule, over what the store took
     fun addedPrice(a: AddedItem): LinePrice?        // one added line's price, or null
-    suspend fun addToCart(onStep: StepListener? = null): AddResult
+    suspend fun addToCart(onStep: StepListener? = null): AddResult   // a second call while one runs waits for that one
     // deprecated 0.1: ready, needsChoice, unavailable, choose(), skip(), pending(), selectionFor()
 }
 
@@ -446,7 +499,7 @@ typealias StepListener = (Step, Instruction) -> Unit
 fun stepOf(ins: Instruction): Step
 data class StoreInfo(val id: String, val name: String, val via: String)
 data class CartRecipe(val id: String, val title: String?)
-data class ItemRecipe(val id: String, val title: String?, val quantity: Int)
+class ItemRecipe(val id: String, val title: String?, val quantity: Int, val share: Double)   // quantity as in 0.5.0 (whole); share is exact (0.5). Binary compatible with 0.5.0
 const val MAX_RECIPES = 10
 fun forRecipes(cart: CartSession, key: String): String?   // "For Tacos and Pasta"; null unless 2+ recipes
 fun forRecipes(cart: CartSession, key: String, text: TextTools): String?   // the same, in the partner's words
@@ -457,6 +510,9 @@ open class TextTools(overrides: Map<String, String> = emptyMap()) {
     fun plural(base: String, count: Int, vararg vars: Pair<String, Any>): String
 }
 class MealioException(val code: String, message: String, cause: Throwable? = null) : Exception
+class CancelToken { val cancelled: Boolean; fun cancel(); fun onCancel(fn: () -> Unit): () -> Unit }
+data class CartWarning(val code: String, val message: String)   // ingredients_dropped, lines_dropped, servings_ignored
+data class MealioUser(val tracked: Boolean, val id: String?) { val signedIn: Boolean }
 sealed class MealioEvent(val type: String)                // one per step: SheetOpened, StorePicked, LocationAsked, SigninShown, ListShown,
                                                           // ItemUnchecked, ItemChecked, AddStarted, CartAdded, Error, SheetClosed
 enum class MealioSheetStep(val wire: String) { LOADING, STORES, LOCATION, SIGNIN, LIST, ADDING, DONE, ERROR }
@@ -477,12 +533,22 @@ read back.
 
 Error codes are the ones in PROTOCOL.md: `bad_envelope`, `blocked`,
 `store_unavailable`, `login_cancelled`, `session_expired`, `network`,
-`unsupported`, plus `store_required` (no store given and no default yet),
+`unsupported`, plus `session_failed` (your `sessionTokenProvider` threw or took
+over 30 seconds; 0.5 and earlier said `session_expired` for this),
+`not_signed_in` (`setUser(null)`), `cancelled` (a `CancelToken` fired),
+`store_required` (no store given and no default yet),
 `location_required` (a Kroger family store with no location chosen, before any
 sign-in),
-`server` (Mealio answered with an error), `unknown_item` /
+`server` (Mealio answered with an error, or with something that is not JSON), `unknown_item` /
 `unknown_product` from `select`, and `bad_recipe` / `too_many_recipes` from
 `prepareCart` with no recipes or more than 10.
+
+Every request to Mealio has 30 seconds, then fails with `network`. One job
+at a time drives the hidden page: prepare, search, add and warm-up queue
+behind each other. An add cannot be cancelled; every wait in it is bounded,
+so it ends by itself. While it runs the sheet cannot be closed. The sheet
+and its running job survive an activity recreation (rotation, dark mode);
+after process death the sheet closes instead of starting a new cart.
 
 There is no separate hello call. `prepareCart`, `search` and `addToCart` each
 send `sdk: {platform, version, core, ops}` and `epoch` in their body.
@@ -491,6 +557,73 @@ Advanced: `MealioClient(config, host, transport)` lets you supply your own
 `Host` (WebViews) or `HttpTransport`. `MealioInlineLogin` is how
 `MealioCartFlow` receives the sign-in WebView; a custom sheet can attach to
 it the same way.
+
+## Testing your screens: `co.mealio:mealio-sdk-testing`
+
+A separate artifact, for tests only, so none of it can ship in a release app:
+
+```kotlin
+testImplementation("co.mealio:mealio-sdk-testing:0.6.0")
+testImplementation("org.json:json:20231013") // android.jar's org.json is a stub on the JVM
+```
+
+It is a scripted fake Mealio (package `co.mealio.sdk.testing`), so your JVM and Robolectric
+tests run the **real** `MealioClient`, `CartSession`, `MealioCart` and drop-in
+sheet with no network and no reflection. Scripts are the same plain data as
+`@mealio/sdk-core/testing` (`createFakeMealio`). It signs with the protocol
+test key, which only a client built with `fake.config()` / `fake.install()`
+trusts; `KEYS` in a production build never holds it.
+
+```kotlin
+val fake = FakeMealio(FakeScript(
+    items = listOf(
+        FakeItem("milk", options = listOf(Product("m1", "Milk", unitPrice = 3.0)), remembered = "m1"),
+        FakeItem("salt", options = listOf(Product("s1", "Salt")), remembered = "s1", startUnchecked = true),
+    ),
+    search = mapOf("oat milk" to listOf(Product("o1", "Oat milk", unitPrice = 4.0))),
+))
+
+// The core on its own:
+val cart = fake.client().prepareCart("heb", recipe)
+assertEquals("m1", cart.selectedId("milk")); assertNull(cart.selectedId("salt"))
+cart.select("salt", "s1")
+assertNull(cart.estimate().total)               // salt has no price: no partial total
+
+// Or MealioCart and MealioCartButton (no Context needed; Robolectric for Compose UI):
+fake.install()
+MealioCart.setUser("u1")
+// ... your screen ...
+FakeMealio.uninstall()                          // in @After
+```
+
+Under `runTest`, pass your test dispatcher to `install` as well as setting it
+as Main. The store sign-outs (`setUser` to a new user, `signOutOfAllStores`)
+do IO work, on `Dispatchers.IO` by default. On a real thread, virtual time can
+jump past the SDK's sign-out timeouts while that work runs, and the test flakes:
+
+```kotlin
+@Test fun signsOut() = runTest {
+    val main = StandardTestDispatcher(testScheduler)
+    Dispatchers.setMain(main)
+    fake.install(io = main)
+    MealioCart.setUser("ana"); MealioCart.setUser("ben")
+    MealioCart.signOutOfAllStores()
+    assertEquals(2, fake.storeEpoch)
+}
+```
+
+| | |
+|---|---|
+| `FakeMealio.fromJson(json)`, `FakeScript.fromJson(json)` | a script as JSON with the TypeScript field names, the same text `createFakeMealio` and Swift's `FakeMealio(json:)` take (`signIn: "cancelled"`, `errors: {"search": "network"}`, `add: {"fail": ...}`, `warm: {"signedIn": false}` or `null`). `protocol/fake-script.json` is one every kit runs |
+| `FakeScript` | `store`, `storeName`, `items`, `recipes`, `warnings`, `search` (query to products) or `searchWith`, `add` or `addFail`, `signIn` (a `LoginOutcome`, null = already signed in), `errors` (by `FakeKind`: `PREPARE`, `SEARCH`, `ADD`, `WARM`, `STORES`, `PREFERENCES`, `LOCATIONS`, `SESSION`), `stores`, `preferences`, `locations`, `warmSignedIn` |
+| `FakeItem` | `key`, `options`, `remembered`, `ingredient`, `quantity` (`Int`), `rememberedPreferenceId`, `rememberedUnavailable`, `startUnchecked`, `weightLb`, `recipes`, `unavailable`, `quantityExact` (`Double`, defaults to `quantity`; set it for TypeScript's other numbers: `1.5`, `3.0e9`. The cart sends it; a non-finite one is sent as null. A JSON script's quantity that is not a whole `Int` lands here, so `FakeItem("a", quantity = 2)` equals a script's `2`) |
+| `FakeError(code, message?, status?)` | with `status`: an HTTP error; without: a job that fails with `code` |
+| `fake.requests` / `fake.hostCalls` | what the client sent (`FakeRequest(kind, path, body, token)`) and what the store page was asked |
+| `fake.hold(kind)` | holds the next request of that kind until the returned function is called (test cancels and user switches) |
+| `fake.offered(cartId)` | products a cart offered; an add of anything else fails as `not_offered`, as on the server |
+| `fake.install(sessionTokenProvider, io)` | `io`: the dispatcher for the sign-outs' IO work, `Dispatchers.IO` by default; pass your test dispatcher under `runTest` |
+| `fake.storeEpoch` | bumped by each store sign-out while installed |
+| `fake.config()`, `fake.client()`, `fake.host`, `fake.transport`, `TEST_KEYS`, `signTestEnvelope()` | build your own client |
 
 ## ProGuard / R8
 
@@ -512,6 +645,33 @@ not have.
   only has it from API 33. If your app also bundles BouncyCastle and the build
   complains about duplicate `META-INF` files, add
   `packaging { resources { excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF" } }`.
+- **Native network blocking.** While Mealio runs a job (from right before
+  the job's first script until the job ends, done, failed or cancelled, or
+  the store changes; for the sign-in sheet, until it closes), the SDK's
+  WebViews refuse state-changing requests (`POST`, `PUT`, `PATCH`, `DELETE`)
+  and documents (main-frame and subframe navigations, any method) to
+  checkout, payment and the other blocked paths on that store's own hosts
+  and its store-owned
+  sign-in hosts (albertsons.com and albertsons.okta.com for the Albertsons
+  banners, kroger.com and login.kroger.com for the Kroger family) with an
+  empty 403. Shared identity providers (`SHARED_IDENTITY_HOSTS`, from
+  `protocol/shared-identity-hosts.json`: Google, Apple, Facebook, Microsoft,
+  Okta's own pages and other tenants, Auth0, mealio.co) are never blocked.
+  Nothing the page does (a navigation, a reload) turns blocking off. The
+  store's own page assets (scripts, styles, images, fonts: `GET`s that are
+  not documents, whatever their path) and every third-party host (payment
+  and captcha iframes included) are never blocked. A subframe document is
+  told by its `Accept: text/html` header.
+- **Known limit: redirects of fetch, XHR and subresources.** Android WebView
+  shows `shouldInterceptRequest` only the URL a request starts with, not the
+  redirects that follow. So a fetch to an ordinary path that the store
+  redirects to a checkout path is not refused natively (the in-page guard
+  still judges what the page asked for). Redirects of a navigation, in any
+  frame, reach `shouldOverrideUrlLoading` and are refused.
+- **Service worker requests are outside native blocking.** They do not pass
+  through a `WebViewClient`, and the SDK never sets the process-wide
+  `ServiceWorkerClient`, so any client your app sets stays yours. The in-page
+  guard and the allowlist checks still apply.
 - **Fetch methods.** `HttpURLConnection` has no `PATCH`; such a fetch returns
   `error: "bad_method"` to the server.
 
@@ -525,12 +685,12 @@ The Gradle wrapper jar is not checked in. In GitHub Actions:
 - uses: android-actions/setup-android@v3
 - uses: gradle/actions/setup-gradle@v3
   with: { gradle-version: "8.7" }
-- run: gradle :mealio-sdk:testDebugUnitTest :mealio-sdk:assembleRelease :mealio-sdk-compose:assembleRelease
+- run: gradle testDebugUnitTest assembleRelease
   working-directory: android
 ```
 
 Locally, run `gradle wrapper --gradle-version 8.7` once in `android/` and then
-`./gradlew :mealio-sdk:testDebugUnitTest :mealio-sdk:assembleRelease :mealio-sdk-compose:assembleRelease`.
+`./gradlew testDebugUnitTest assembleRelease` (every module: mealio-sdk, mealio-sdk-compose, mealio-sdk-testing).
 
 The unit tests run on the JVM (JUnit 4):
 
@@ -557,4 +717,8 @@ The unit tests run on the JVM (JUnit 4):
   against `guard-expected.js` / `bridge-expected.js`, which are the exact
   strings `packages/core/src/guard.ts` produces. If `guard.ts` changes,
   regenerate those two files from it, and copy `protocol/test-vectors.json`
-  again when the vectors change.
+  again when the vectors change. Where the WebView has DOCUMENT_START_SCRIPT, the guard is also
+  added with `addDocumentStartJavaScript` for every frame on the stores' hosts,
+  so it runs in iframes before the store's own scripts. Older WebViews keep
+  the per-script injection only (main frame, its DOM hooks reaching
+  same-origin frames).

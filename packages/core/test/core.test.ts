@@ -3,7 +3,7 @@ import vm from 'node:vm';
 import vectors from '../../../protocol/test-vectors.json';
 import sharedStrings from '../../../protocol/strings.json';
 import {
-  Allowlist, GUARD_SCRIPT, Runner, matches, bodyBlocked, parseUrl, openEnvelope, checkInstructions, EnvelopeError, MealioClient, CartSession, addedPrice, DEFAULT_STRINGS, fillText, safeListener, textTools,
+  Allowlist, GUARD_ARM_SCRIPT, Runner, matches, bodyBlocked, parseUrl, openEnvelope, checkInstructions, EnvelopeError, MealioClient, CartSession, addedPrice, DEFAULT_STRINGS, fillText, safeListener, textTools,
   type AddResult, type Host, type Envelope, type Matcher,
 } from '../src';
 
@@ -93,9 +93,28 @@ describe('guard script', () => {
     };
     win.window = win;
     vm.createContext(win);
-    vm.runInContext(GUARD_SCRIPT, win);
+    vm.runInContext(GUARD_ARM_SCRIPT, win);
     return { win, posted, fetched };
   }
+
+  it('checks beacons too', () => {
+    const beacons: string[] = [];
+    const posted: string[] = [];
+    const win: any = {
+      location: { href: 'https://www.heb.com/' },
+      navigator: { sendBeacon: (u: string) => { beacons.push(u); return true; } },
+      ReactNativeWebView: { postMessage: (s: string) => posted.push(s) },
+      URL, Date, JSON, Promise, Error, RegExp, String, Blob, // the guard captures Blob when it installs
+    };
+    win.window = win;
+    vm.createContext(win);
+    vm.runInContext(GUARD_ARM_SCRIPT, win);
+    expect(vm.runInContext(`navigator.sendBeacon('/analytics', 'x=1')`, win)).toBe(true);
+    expect(vm.runInContext(`navigator.sendBeacon('/checkout/place-order', 'x')`, win)).toBe(false);
+    expect(vm.runInContext(`navigator.sendBeacon('/graphql', '{"query":"mutation { confirmOrder { id } }"}')`, win)).toBe(false);
+    expect(vm.runInContext(`navigator.sendBeacon('/graphql', new Blob(['x']))`, win)).toBe(false);
+    expect(beacons).toEqual(['/analytics']);
+  });
 
   it('lets a normal request through', async () => {
     const { win, fetched } = sandbox();
@@ -114,7 +133,7 @@ describe('guard script', () => {
   it('is idempotent', () => {
     const { win } = sandbox();
     const f = win.fetch;
-    vm.runInContext(GUARD_SCRIPT, win);
+    vm.runInContext(GUARD_ARM_SCRIPT, win);
     expect(win.fetch).toBe(f);
   });
 });
@@ -573,6 +592,23 @@ describe('warm-up', () => {
 describe('security: request bodies and the runner fetch op', () => {
   it('flags every blocked body in the shared vectors', () => {
     for (const v of (vectors as any).blockedBodies) expect(bodyBlocked(v.body)).toBe(v.blocked);
+  });
+
+  it('judges the JSON strictness vectors as JSON.parse reads them', () => {
+    const list = (vectors as any).jsonBodies as { rule: string; body: string; blocked: boolean }[];
+    expect(new Set(list.map((v) => v.rule))).toEqual(new Set(['depth', 'hex', 'surrogate']));
+    for (const v of list) expect(bodyBlocked(v.body), `${v.rule}: ${v.body.slice(0, 60)}`).toBe(v.blocked);
+  });
+
+  it('reads a multipart part whatever quotes its name has (round 4)', () => {
+    const part = (name: string, value: string) => `--b\r\nContent-Disposition: form-data; name=${name}\r\n\r\n${value}\r\n--b--`;
+    const m = JSON.stringify({ query: 'mutation { placeOrder { id } }' });
+    for (const q of ['"', "'", '']) {
+      expect(bodyBlocked(part(`${q}operations${q}`, m))).toBe(true);
+      expect(bodyBlocked(part(`${q}query${q}`, 'mutation { placeOrder { id } }'))).toBe(true);
+      expect(bodyBlocked(part(`${q}operationName${q}`, 'PlaceOrder'))).toBe(true);
+      expect(bodyBlocked(part(`${q}operationsX${q}`, m))).toBe(false);
+    }
   });
 
   it('refuses a signed fetch whose body names an order, before it leaves the device', async () => {

@@ -33,8 +33,12 @@ public struct LoginRequest {
     public let store: String
     public let url: String
     public let title: String
-    /// GUARD_SCRIPT. Inject it before `check.script` every time.
+    /// GUARD_SCRIPT, the document-start copy: every frame of the sheet's
+    /// WebView gets it (WebViewHost's configuration already injects it).
     public let guardScript: String
+    /// GUARD_ARM_SCRIPT: installs the guard if missing and arms it. Inject it
+    /// into the top frame before `check.script` every time.
+    public let armGuardScript: String
     public let check: LoginCheck?
     public let doneWhen: [Matcher]
     /// A regex source. A main-frame URL matching it means signed in.
@@ -42,18 +46,23 @@ public struct LoginRequest {
     public let timeoutMs: Int
     /// Ask this for every top-frame navigation; cancel it when false.
     public let allowNavigation: (String) -> Bool
+    /// Close the sheet as `cancelled` when this fires.
+    public let cancel: CancelToken?
 
     public init(store: String, url: String, title: String, guardScript: String, check: LoginCheck?,
-                doneWhen: [Matcher], doneWhenUrl: String?, timeoutMs: Int, allowNavigation: @escaping (String) -> Bool) {
+                doneWhen: [Matcher], doneWhenUrl: String?, timeoutMs: Int, allowNavigation: @escaping (String) -> Bool,
+                cancel: CancelToken? = nil, armGuardScript: String = MealioScripts.guardArmScript) {
         self.store = store
         self.url = url
         self.title = title
         self.guardScript = guardScript
+        self.armGuardScript = armGuardScript
         self.check = check
         self.doneWhen = doneWhen
         self.doneWhenUrl = doneWhenUrl
         self.timeoutMs = timeoutMs
         self.allowNavigation = allowNavigation
+        self.cancel = cancel
     }
 }
 
@@ -94,7 +103,8 @@ public protocol MealioHost: AnyObject {
     /// Load `url` in the hidden WebView and wait for it to finish loading.
     func openPage(store: String, url: String, timeoutMs: Int) async throws -> PageOpenOutcome
 
-    /// Inject `guardScript` then `script` into the hidden page. Return every
+    /// Inject `guardScript` (GUARD_ARM_SCRIPT, which arms the guard) then
+    /// `script` into the hidden page. Return every
     /// JSON message posted after injection, stopping at the first that matches
     /// `until` or when `timeoutMs` passes.
     func runScript(store: String, guardScript: String, script: String, until: [Matcher], timeoutMs: Int) async throws -> ScriptOutcome
@@ -104,6 +114,29 @@ public protocol MealioHost: AnyObject {
 
     /// One HTTP request with the store's cookies.
     func fetch(store: String, request: FetchRequest, timeoutMs: Int, maxBytes: Int) async throws -> FetchOutcome
+
+    /// Drop whatever the hidden page shows (load about:blank, or a fresh
+    /// page). Called before a job when earlier exclusive work outlived its
+    /// cap. Optional: the default does nothing.
+    func resetPage()
+
+    /// The job is over (done, failed or cancelled). WebViewHost takes the
+    /// hidden page's network block off here (round 8: it went on at the
+    /// job's first script and stayed on across navigations). Optional: the
+    /// default does nothing.
+    func endJob()
+
+    /// Throws when this host cannot run a job safely. Called before every
+    /// job's first instruction. WebViewHost waits (bounded) for its network
+    /// block of checkout paths and refuses without it. Optional: the default
+    /// is always ready.
+    func ready() async throws
+}
+
+public extension MealioHost {
+    func resetPage() {}
+    func endJob() {}
+    func ready() async throws {}
 }
 
 /// Resumes a continuation exactly once, from any thread. Used by every wait

@@ -303,6 +303,24 @@ MealioCart.configure(sheet: MealioSheetOptions(showTotal: false,
 as a full screen cover, which has no swipe to close. In a `.sheet` of your own,
 `.full` is the tallest sheet the system allows.
 
+While items are being added the sheet cannot be closed: the close button is
+off and the swipe does nothing. The add always ends on its own.
+
+### Hosting the sheet from UIKit
+
+`MealioCartFlow` is a SwiftUI view, so wrap it in a `UIHostingController`.
+SwiftUI's dismiss cannot close a controller UIKit presented, so dismiss it
+yourself in `onClose`. Every close button calls `onClose` straight away.
+
+```swift
+var host: UIViewController?
+let flow = MealioCartFlow(recipe: recipe, store: "heb", onClose: { result in
+    host?.dismiss(animated: true)
+})
+host = UIHostingController(rootView: flow)
+present(host!, animated: true)
+```
+
 ## Install
 
 ### Swift Package Manager
@@ -314,7 +332,7 @@ Or in `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/stephengreer97/mealio_sdk.git", from: "0.5.0"),
+    .package(url: "https://github.com/stephengreer97/mealio_sdk.git", from: "0.6.0"),
 ],
 targets: [
     .target(name: "MyApp", dependencies: [.product(name: "MealioSDK", package: "mealio_sdk")]),
@@ -327,7 +345,7 @@ The repository root's `Package.swift` is the one Swift Package Manager reads;
 ### CocoaPods
 
 ```ruby
-pod 'MealioSDK', :git => 'https://github.com/stephengreer97/mealio_sdk.git', :tag => 'v0.5.0'
+pod 'MealioSDK', :git => 'https://github.com/stephengreer97/mealio_sdk.git', :tag => 'v0.6.0'
 ```
 
 ## Your server creates an SDK session
@@ -381,6 +399,26 @@ struct RecipeApp: App {
 - `attestationProvider:` returns an App Attest token, if you turned
   attestation on in the Mealio dashboard.
 - `baseURL:` for testing against a non-production Mealio.
+
+If your session function throws or takes over 30 seconds, calls fail with
+`session_failed`, and your error's message is the `message`. Every request to
+Mealio gets 30 seconds, then fails with `network`.
+
+### Signed-in users
+
+Tell the SDK who is signed in, at launch and whenever it changes:
+
+```swift
+MealioCart.setUser(user?.id)                      // nil while nobody is signed in
+MealioCart.onSignInRequired = { router.showSignIn() }
+```
+
+A change of user stops a cart being prepared, starts a new Mealio session and,
+when there was a user before, signs out of the stores (an add under way finishes
+first). While it is nil there is no session and no warm-up, and
+`MealioCartButton` and store settings call `onSignInRequired` instead of opening.
+Without `onSignInRequired` the button is disabled then. Each also takes its own
+`onSignInRequired:`. Until you call `setUser`, nothing changes.
 
 ## Building your own UI
 
@@ -457,6 +495,62 @@ entry may carry `imageUrl`, `ingredient`, `unitPrice`, `pricePerLb` and
 
 No partial totals: `estimate()` and `addedTotal(_:)` return `total: nil` when
 any counted item has no price. Show no number then, never a sum of the rest.
+Both sum whole cents line by line, so the list and done totals agree.
+
+`quantity(for:)` never exceeds the selected product's cap, and is what is sent.
+`session.warnings` lists what the server changed or ignored in your recipe
+(`ingredients_dropped`, `lines_dropped`, `servings_ignored`); debug builds log them.
+
+A prepare or search can be stopped with a `CancelToken`: it stops after the
+current step, never shows sign-in, and fails with `cancelled`. A job cancelled
+while it waits for another to finish fails at once. The `cancelled` error's
+`reason` says why: `.userChanged` (`setUser` changed the user: prepare again
+for the new user), `.closed` (pass `token.cancel(reason: .closed)` when your
+screen goes away), or `.cancelled` (anything else).
+`session.searching` is true while a search runs (keep Add off), and
+`session.cancelSearches()` stops them. An add cannot be cancelled, and a second
+`addToCart` while one runs gets the same result. After a failed add, prepare a
+new cart and call `await newSession.restorePicks(from: oldSession)` to keep the
+user's picks. A product the user found with search is searched for again on
+the new cart (it counts toward the search cap) and picked if it comes back;
+otherwise the item keeps the new cart's own pick.
+
+### Testing your own screens
+
+`FakeMealio` runs the real `MealioClient` and `CartSession` in your XCTest
+against a scripted fake Mealio, with no network. It is in the SDK's debug
+builds only (`#if DEBUG`), so your test runs have it and a release build of
+your app does not. It uses the SDK's public API and the protocol test key,
+which no production client trusts.
+
+```swift
+import MealioSDK
+import XCTest
+
+@MainActor
+func testMyListShowsTheRememberedMilk() async throws {
+    let fake = FakeMealio(script: [
+        "items": [["key": "milk", "remembered": "m1",
+                   "options": [["id": "m1", "name": "Milk", "unitPrice": 3]]]],
+        "search": ["oat milk": [["id": "o1", "name": "Oat milk", "unitPrice": 4]]],
+    ])
+    let cart = try await fake.client().prepareCart(recipe: recipe)
+    XCTAssertEqual(cart.selectedId(for: "milk"), "m1")
+}
+```
+
+The script is the same plain data as `createFakeMealio` in
+`@mealio/sdk-core/testing` (`FakeMealio(json:)` reads a shared JSON file):
+`items` (key, options, remembered, rememberedPreferenceId, startUnchecked,
+weightLb, unavailable...), `search` by query, `add` (`{"fail": code}`),
+`signIn` (`"signed_in"`, `"cancelled"`), `errors` by call (`prepare`,
+`search`, `add`, `session`...; a code, or `{code, message, status}`),
+`warnings`, `stores`, `preferences`, `locations`. Change it between calls with
+`fake.set(key, value)`. `fake.requests`, `fake.hostCalls`, `fake.offered(cartId)`
+and `fake.hold(.prepare)` let a test see and time what the client did. A held
+request ties up no thread (other calls are answered meanwhile), and dropping
+the fake releases its holds. `protocol/fake-script.json` is one script every
+platform's kit runs.
 
 ### Upgrading from 0.1
 
@@ -486,6 +580,66 @@ their password into the store's page; neither your app nor Mealio sees it.
   from iframes are ignored.
 - Closing the sign-in raises `login_cancelled` (via the server).
 
+### What protects the user's money
+
+- **Signed instructions.** Every instruction is signed by Mealio, and the SDK
+  checks every page load and fetch it makes against its own allowlist and
+  blocked paths.
+- **Native network blocking: the store's hosts, for the whole job.** A
+  `WKContentRuleList` blocks requests to the store's own hosts and its
+  store-owned sign-in hosts (and their subdomains, from the SDK's allowlist
+  with any signed widening: `albertsons.com` and `albertsons.okta.com` for an
+  Albertsons banner, `kroger.com` and `login.kroger.com` for the Kroger
+  family) whose path or query names checkout, payment, billing, a wallet, a
+  gift card, placing or confirming an order, or changing the account's
+  password or addresses. A path or query that percent-encodes a letter, `-`
+  or `_` is blocked too, since a server could decode it into one of those.
+  It covers every frame and these resource types only: `fetch` and `raw`
+  (fetch and XHR), `document` (pages, frames and form posts) and `popup`.
+  The store's own page assets (images, style sheets, scripts, fonts, media)
+  always load, whatever their path. Requests to any other host (a payment or
+  captcha frame) are never blocked by it, nor are shared identity providers
+  (Google, Apple, Facebook, Microsoft, generic Okta and Auth0 hosts,
+  `mealio.co`: the list in `protocol/shared-identity-hosts.json`), except a
+  tenant named for the store, such as `albertsons.okta.com`. It goes on the
+  hidden WebView once per job, right before Mealio's first script for that
+  job, and stays on across every navigation until the job ends (done,
+  failed or cancelled) or the hidden page is opened for another store. On
+  the sign-in sheet it goes on before the first sign-in check and stays on
+  until the sheet closes. Nothing the page does takes it off, so there is no
+  gap between one document and the next. The store page's own loading
+  before a job's first script is never blocked. WebKit applies the list
+  outside the page, so page code cannot turn it off. Each store's list is
+  compiled once (pages wait for it, at most 10 seconds), and if WebKit
+  cannot compile it every job fails with `unsupported` rather than run
+  without it.
+- **The in-page guard** is defense in depth only. It also stops requests whose
+  body names a checkout or order mutation, and caps the page's request rate,
+  but code already running in the store page can defeat any in-page check.
+
+### Known limits
+
+- **Redirects.** WebKit judges every hop of a redirect against the content
+  rules, so an ordinary request the store answers with a 3xx to a checkout
+  path is refused at that hop, for pages, frames, fetch and XHR. The
+  browser test `testTheNetworkBlockAlsoRefusesARedirectToACheckoutPath`
+  checks this against a local HTTP server on 127.0.0.1; where the simulator
+  will not load that page, the test is skipped and this stays unverified.
+  (Android differs: its WebView does not show the SDK redirects of fetch,
+  XHR or subresources, only of navigations.)
+- **Before a job's first script,** nothing is blocked natively: the store's
+  own boot code must run untouched. Only the signed allowlist limits what
+  the hidden page loads before then.
+- **The in-page guard** judges a form submission in the capture phase and
+  refuses a blocked one with `preventDefault` only, so the page's own
+  handlers always run; what a page then sends itself with `fetch` or XHR
+  (a JavaScript sign-in) is judged on its own. A form with no action posts
+  back to its page and is judged by its fields only, never the page URL
+  (`/login?returnUrl=/checkout` is not a checkout). `submit()` and
+  `requestSubmit()` throw only for a blocked explicit target or blocked
+  fields. A synchronous XHR whose body is a Blob is sent at once with only
+  its path judged, since its body cannot be read in time.
+
 To sign a user out of stores (for example from your app's settings):
 
 ```swift
@@ -507,6 +661,9 @@ All errors are `MealioError` with a `code` and a readable `message`:
 | `store_unavailable` | The store cannot be reached now |
 | `login_cancelled` | The user closed the login sheet |
 | `session_expired` | The SDK session token expired twice in a row; get a new one from your server |
+| `session_failed` | Your session function threw or took over 30 seconds; `message` is your error's |
+| `not_signed_in` | `setUser(nil)`: nobody is signed in, so there is no session |
+| `cancelled` | A prepare or search was stopped; `reason` is `.userChanged`, `.closed` or `.cancelled` |
 | `network` | Could not reach Mealio |
 | `unsupported` | An instruction this SDK version does not know (update the SDK) |
 | `server` | Mealio answered with an error, or something the SDK could not read |
@@ -531,10 +688,11 @@ xcodebuild -scheme MealioSDK -destination 'platform=iOS Simulator,name=iPhone 15
 
 `Tests/MealioSDKTests/Resources/test-vectors.json` is a copy of
 `protocol/test-vectors.json`, and `strings.json` there is a copy of
-`protocol/strings.json`. `guard-script.js` and `bridge-shim.js` there are the
-exact text of `GUARD_SCRIPT` and `BRIDGE_SHIM` from
-`packages/core/src/guard.ts`; the tests compare `MealioScripts` with them byte
-for byte. Regenerate all four whenever the protocol, strings or guard change.
+`protocol/strings.json`. `guard-script.js`, `guard-arm.js` and
+`bridge-shim.js` there are the exact text of `GUARD_SCRIPT`, `GUARD_ARM` and
+`BRIDGE_SHIM` from `packages/core/src/guard.ts`; the tests compare
+`MealioScripts` with them byte for byte. Regenerate them whenever the
+protocol, strings or guard change.
 When `protocol/strings.json` gains a key, add it to `MealioStringKey` and
 `DEFAULT_STRINGS` in `Sources/MealioSDK/MealioStrings.swift`; `StringsTests`
 fails until the two agree.

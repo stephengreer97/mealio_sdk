@@ -72,6 +72,9 @@ class FakeHost(
     private val onOpen: (suspend (String) -> PageLoad)? = null,
 ) : Host {
     val calls = mutableListOf<String>()
+    var jobsEnded = 0
+
+    override fun jobEnded() { jobsEnded += 1 }
 
     override suspend fun openPage(store: String, url: String, timeoutMs: Long): PageLoad {
         calls.add("open $url")

@@ -25,15 +25,21 @@ itself. See [PROTOCOL.md](../PROTOCOL.md).
 dependencies:
   mealio_sdk:
     git:
-      url: https://github.com/mealio/mealio-sdk.git
+      url: https://github.com/stephengreer97/mealio_sdk
       path: flutter
 ```
 
-Requirements: Dart 3.3+, Flutter 3.19+, Android minSdk 21+, iOS 12+.
+Requirements: Dart 3.3+, Flutter 3.19+, Android minSdk 24+, iOS 13.0+. The
+Android and iOS floors are those of the plugins the SDK uses, at the versions
+it resolves today: webview_flutter_android 4.x and shared_preferences_android
+need minSdk 24, and webview_flutter_wkwebview and shared_preferences_foundation
+need iOS 13.0.
 
-Android: make sure your release manifest has
-`<uses-permission android:name="android.permission.INTERNET" />` (Flutter
-only adds it to the debug manifest by default).
+Android: add
+`<uses-permission android:name="android.permission.INTERNET" />` to
+`android/app/src/main/AndroidManifest.xml`. Flutter puts it only in the debug
+and profile manifests, so without it a debug build works and a **release
+build** fails every call with `network` and shows blank store pages.
 
 ## 1. Server side: one endpoint
 
@@ -43,7 +49,8 @@ and your user's id, and returns the SDK session token it gets back. See
 `examples/partner-server` in this repo.
 
 The SDK calls your `sessionTokenProvider` when it needs a token, and calls it
-once more if Mealio answers 401.
+once more if Mealio answers 401. If it throws or takes over 30 seconds, the
+call fails with `session_failed`, carrying your error's message.
 
 ## 2. Configure once, place MealioScope, drop in the button
 
@@ -128,7 +135,7 @@ MealioCartButton(recipes: [tacos, pasta, soup], store: 'heb')
 await MealioCartFlow.show(context, recipes: [tacos, pasta, soup]);
 final session = await MealioCart.instance.prepareCart(recipes: [tacos, pasta, soup]);
 session.recipes;                     // [CartRecipe(id, title)], in the order sent
-session.recipesFor(item.key);        // [ItemRecipe(id, title, quantity)] for one item
+session.recipesFor(item.key);        // [ItemRecipe(id, title, quantity, share)] for one item; share is exact (0.5)
 ```
 
 More than 10 throws `too_many_recipes` and none throws `bad_recipe`, before
@@ -169,6 +176,34 @@ accessibility labels and the store settings sheet included. `mealioDefaultString
 lists every key. `{store}`-style placeholders are filled in; one that is unknown
 stays visible, so a typo shows. Keys ending `_one` and `_other` are the singular
 and plural of one message. "Cart by Mealio" does not change.
+
+With `flutter gen-l10n`, the default strings map to copy from is
+`mealioDefaultStrings` (lib/src/strings.dart). gen-l10n reads `{store}` in an
+ARB value as its own placeholder, so it must reach the SDK as text. Either
+declare it and pass the literal back:
+
+```json
+"mealioAddItemsOther": "Ajouter {count} articles à {store}",
+"@mealioAddItemsOther": {"placeholders": {"count": {}, "store": {}}}
+```
+
+```dart
+builder: (context, child) {
+  final l10n = AppLocalizations.of(context)!;
+  return MealioScope(
+    navigatorKey: navigatorKey,
+    strings: {'addItems_other': l10n.mealioAddItemsOther('{count}', '{store}')},
+    child: child!,
+  );
+},
+```
+
+or set `use-escaping: true` in `l10n.yaml` and quote the braces in the ARB
+(`"Ajouter '{count}' articles à '{store}'"`), which makes a plain getter. Do
+not use ICU plural syntax for these: give `_one` and `_other` their own ARB
+entries. Pass `strings` on `MealioScope` in `MaterialApp.builder` as above:
+that context is under your `Localizations`, so the words follow a locale
+change. `configure` is called once, before any locale is known.
 
 **Money.** `formatMoney` sets how every price reads. The default is `$12.50`.
 With it set, option prices come from the numeric `unitPrice` rather than the
@@ -266,8 +301,59 @@ final stores = await MealioCart.instance.stores(); // id, name, via
 for hosting in your own sheet. `MealioCartSheet.show(context, session)` (the
 0.1 sheet) still works and now shows the same list.
 
+After a failed add, `await next.restorePicks(failed)` carries the user's
+picks to a new cart. A product they found with `search` is searched again on
+the new cart (Mealio only knows it on the cart it was found in) and kept if it
+comes back; otherwise that item keeps the new cart's pick.
+
+A `cancelled` error carries `reason`: `user_changed` (prepare again for the
+new user), `closed` (the sheet closed) or `cancelled`.
+
 If your app already has classes named `Recipe` or `Product`, import with a
 prefix: `import 'package:mealio_sdk/mealio_sdk.dart' as mealio;`.
+
+## Users
+
+Tell the SDK who is signed in, at start and whenever it changes:
+
+```dart
+MealioCart.instance.setUser(user?.id); // null when nobody is signed in
+```
+
+A change stops any cart being prepared, starts a new session and signs the old
+user out of the stores, so a new user never sees the last one's cart. On
+Flutter that sign-out clears **every** WebView cookie in your app, not only the
+stores' (see below). An add
+already under way finishes first. While it is null there is no session and no
+warm-up, and `MealioCartButton` calls `onSignInRequired` (on the button, or
+given to `configure`), or is disabled without one. Store settings do the same.
+
+`onSignInRequired` gets no `BuildContext`. With Navigator 2 (go_router,
+or any `Router`), call your router directly, and give it the same
+`navigatorKey` as `MealioScope`:
+
+```dart
+final navigatorKey = GlobalKey<NavigatorState>();
+final router = GoRouter(
+  navigatorKey: navigatorKey,
+  routes: [/* ..., */ GoRoute(path: '/sign-in', builder: (_, __) => const SignInPage())],
+);
+
+MealioCart.configure(
+  publishableKey: 'pk_live_...',
+  sessionTokenProvider: () => myApi.fetchMealioSessionToken(),
+  onSignInRequired: () => router.push('/sign-in'),
+);
+
+runApp(MaterialApp.router(
+  routerConfig: router,
+  builder: (context, child) => MealioScope(navigatorKey: navigatorKey, child: child!),
+));
+```
+
+With a `RouterDelegate` of your own, do the same through it (for example
+`myDelegate.showSignIn()`, which updates its pages and calls
+`notifyListeners()`).
 
 ## Sign out of stores
 
@@ -277,9 +363,15 @@ await MealioCart.instance.signOutOfStore('heb');
 ```
 
 webview_flutter can only clear **all** WebView cookies, not one site's, so
-`signOutOfStore` signs the user out of every store (and clears any other
-WebView cookies in your app). Both bump a stored store-session epoch that the
-SDK reports to Mealio with its next cart.
+`signOutOfStore` signs the user out of every store. Both, and a `setUser`
+change away from a signed-in user, clear **every WebView cookie in your app**,
+including those of your own WebViews. Both bump a stored store-session epoch
+that the SDK reports to Mealio with its next cart.
+
+The epoch is kept in `SharedPreferences` under the key
+`mealio_sdk.store_epoch`. If your app calls `SharedPreferences.clear()`, that
+wipes it too and the count starts again at 0. If you clear preferences, keep
+this key.
 
 ## Errors
 
@@ -294,7 +386,10 @@ Every failure is a `MealioException(code, message)`.
 | `location_required` | A Kroger family store with no store chosen yet. The drop-in asks the user |
 | `store_required` | No store was given and the user has no default store yet (the sheet shows the store picker) |
 | `session_expired` | The SDK session token expired; get a new one from your server |
-| `network` | Could not reach Mealio |
+| `session_failed` | Your `sessionTokenProvider` threw or took over 30 seconds. `message` is your error's |
+| `not_signed_in` | `setUser(null)`: nobody is signed in, so nothing was asked of your server |
+| `cancelled` | A prepare or search was stopped. `reason` says why: `user_changed`, `closed` or `cancelled` |
+| `network` | Could not reach Mealio, or it did not answer within 30 seconds |
 | `unsupported` | An instruction `op` this SDK does not know |
 | `server` | Mealio answered with an error the protocol does not name |
 | `no_scope` | No `MealioScope` is mounted |
@@ -312,6 +407,50 @@ Every failure is a `MealioException(code, message)`.
   `window.__mealioNativePost = function(s){ __mealioNativeBridge.postMessage(s) };`
   plus `BRIDGE_SHIM` at every page start and again before every script. Store
   scripts post with `window.ReactNativeWebView.postMessage`, as on React Native.
+- **Guard, top frame only.** The other SDKs also put the request guard into
+  every frame at document start (WKUserScript with `forMainFrameOnly: false`,
+  `WebViewCompat.addDocumentStartJavaScript`). The Flutter SDK cannot, with
+  any webview_flutter it supports. `WebViewController` has only
+  `runJavaScript`, which runs in the top frame after the page has started.
+  webview_flutter_android exposes no document-start script call at all.
+  webview_flutter_wkwebview makes frame-wide WKUserScripts only for its own
+  JavaScript channels and console logs; its `WKUserScript` and
+  `WKUserContentController` classes are not exported, and the controller's
+  WKWebView is private, so reaching them means importing the plugin's
+  `lib/src` files, whose shape changes between the versions this package
+  accepts. So Flutter injects only the per-script copy (`guardArmScript`,
+  GUARD_ARM_SCRIPT) into the top frame right before each Mealio script. It
+  installs the guard and arms it; until then the store page runs untouched,
+  as it does on the other SDKs before arming. From the top frame the armed
+  guard arms the same-origin frames the page has, and installs itself, armed,
+  in each one the page adds (`appendChild`, `insertBefore`, `replaceChild`,
+  `append`, `prepend`, `before`, `after`, `replaceWith`, `replaceChildren`,
+  `insertAdjacentElement`, `insertAdjacentHTML`, `innerHTML`, `outerHTML`,
+  `setHTMLUnsafe`, `Range.insertNode` and `surroundContents`,
+  `document.write`, then a MutationObserver and each frame's load), and wraps
+  `Worker` and `SharedWorker`. It never enters a cross-origin frame. The
+  signature on every envelope stays the primary control.
+- **No native network blocking.** The iOS and Android SDKs also refuse
+  checkout paths natively, for every request the store page makes
+  (a WKContentRuleList on iOS, `shouldInterceptRequest` on Android), where
+  page code cannot turn it off. The Flutter SDK does not: webview_flutter
+  gives no way to see or refuse a page's subresource requests (fetch, XHR,
+  form posts, frames). Its `NavigationDelegate` sees only navigations, so the
+  SDK refuses blocked top-frame navigations there and nothing more. Flutter
+  relies on three things instead:
+  1. the Mealio signature on every instruction, checked before anything runs;
+  2. the SDK's own allowlist and blocked paths, which check every page load
+     and `fetch` op the SDK itself makes, and every sign-in navigation;
+  3. the in-page guard above, armed before each Mealio script.
+
+  The guard is best-effort defense in depth. It sees only what the page sends
+  through the calls it wraps (fetch, XHR, beacons, form submission, workers),
+  and code already running in the store page can get around any in-page
+  check. It captures the built-ins it decides with when it installs, and on
+  Flutter that is at Mealio's first script, so page code that ran before then
+  may already have replaced them. PROTOCOL.md "Guard script" lists what it
+  covers and what it does not. React Native is in the same position on
+  native blocking, for the same reason.
 - **Store sign-in.** A visible WebView that shares the hidden WebView's
   cookie store. While a cart flow sheet is open, `WebViewHost.login` (a
   `ValueNotifier<MealioLoginView?>`) hands it to that sheet, which shows it
@@ -324,6 +463,69 @@ Every failure is a `MealioException(code, message)`.
   bridge (truncated to `maxBytes` in JS). The server opens a store page first,
   so the request is same-origin with the store's cookies.
 
+## Testing your screens
+
+`package:mealio_sdk/testing.dart` lets a widget test pump a screen that holds
+`MealioScope` and `MealioCartButton`. There is no WebView under `flutter
+test`, so install the fake one first:
+
+```dart
+import 'package:mealio_sdk/testing.dart';
+
+setUp(() {
+  installMealioTestPlatform();        // fake WebView + in-memory SharedPreferences
+  configureMealioForTesting(           // MealioCart.configure, no network
+    onSignInRequired: () => signInShown = true,
+  );
+});
+
+testWidgets('recipe screen', (tester) async {
+  await tester.pumpWidget(const MyApp()); // with MealioScope and MealioCartButton
+  MealioCart.instance.setUser(null);
+  await tester.pump();
+  await tester.tap(find.byType(MealioCartButton));
+  expect(signInShown, isTrue);
+});
+```
+
+- `installMealioTestPlatform({preferences})` sets `WebViewPlatform.instance`
+  to `MealioFakeWebViewPlatform` (it draws an empty box and loads nothing) and
+  gives `SharedPreferences` an in-memory store. Call it in `setUp`.
+- `configureMealioForTesting({httpClient, sessionTokenProvider,
+  onSignInRequired})` configures the SDK with every request going to
+  `httpClient`. Without one, each request gets a 503 `server` error
+  (`mealioTestErrorResponse()`), so a tapped button opens the sheet on its
+  error screen and the warm-up does nothing.
+- `MealioFakeWebViewController.all` holds every WebView the SDK made, with the
+  loads and scripts it asked for.
+- `configureMealioForTesting(fake: MealioFake(script))` runs the real client
+  and the real sheet against a scripted Mealio. The script is plain data, the
+  same format as `@mealio/sdk-core/testing`: `items` (`MealioFakeItem` with
+  `options`, prices on each `Product`, `quantity` and `quantityExact` (a
+  script's `1.5` kept exactly), `remembered`, `startUnchecked`,
+  `weightLb`, `unavailable`), `search` results per query, `addFailure` or
+  `onAdd`, `signIn` (`signed_in`, `cancelled`, `timeout`), `errors` by call
+  (`MealioFakeError(code, status: ...)`), `warnings`, `stores`,
+  `preferences`, `locations`, `warm`. `MealioFakeScript.fromJson(jsonDecode(text))`
+  reads the same script as JSON, with the TypeScript kit's field names
+  (`"add": {"fail": "store_unavailable"}` for `addFailure`), so one script
+  file can serve every platform's tests. Its store page is a fake too, so no
+  WebView is driven. `fake.requests` and `fake.hostCalls` record what was
+  sent; `fake.hold('prepare')` holds a request until you release it. A
+  held request never times out, however long the test pumps. But do not
+  `pumpAndSettle` while one is held: the sheet's loading spinner keeps
+  scheduling frames, so it never settles. Pump frames instead
+  (`await tester.pump(const Duration(milliseconds: 100))`), release, then
+  settle. The
+  test key it signs with (`mealioTestKeys`) is trusted only by a test
+  configuration and refused in a release build. Without widgets:
+  `await fake.client().prepareCart(recipe: r)`.
+- To test the sheet with a list of your own, open it with
+  `MealioCartFlow.show(context, recipe: r, prepareCart: ...)` and return a
+  `CartSession` from `prepareCart`.
+
+The SDK's job queue works across separate `testWidgets` in one file.
+
 ## Development
 
 ```
@@ -335,6 +537,7 @@ flutter test
 
 `test/fixtures/test-vectors.json` is a copy of `protocol/test-vectors.json`;
 copy it again after running `node protocol/make-vectors.mjs`.
+`test/fixtures/fake-script.json` is a copy of `protocol/fake-script.json`.
 `test/fixtures/guard_script.js` and `bridge_shim.js` are the exact text
 `packages/core/src/guard.ts` produces; the tests check the Dart strings
 against them byte for byte.

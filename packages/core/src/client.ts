@@ -1,20 +1,20 @@
 // The partner-facing flow, platform neutral. A platform SDK supplies a Host
 // (WebViews + HTTP) and wraps this in its own idiom.
 
-import { Runner, type Host } from './runner';
+import { CancelToken, Runner, type CancelReason, type Host } from './runner';
 import { Allowlist } from './allowlist';
 import { openEnvelope, EnvelopeError } from './verify';
 import { MAX_RECIPES, SUPPORTED_OPS } from './protocol';
 import type {
-  AddedItem, AddResult, AllowlistPayload, CartItem, Envelope, Instruction, ItemRecipe, PreparedCart, PrepareCartInput, Product, SearchResult, Selection, StepRequest, StoreInfo, StoreLocation, StorePreferences,
+  AddedItem, AddResult, AllowlistPayload, CartItem, CartWarning, Envelope, Instruction, ItemRecipe, PreparedCart, PrepareCartInput, Product, SearchResult, Selection, StepRequest, StoreInfo, StoreLocation, StorePreferences,
 } from './protocol';
 
-export const SDK_CORE_VERSION = '0.2.0';
+export const SDK_CORE_VERSION = '0.6.0';
 export const DEFAULT_BASE_URL = 'https://mealio.co';
 
 export type MealioErrorCode =
   | 'bad_envelope' | 'blocked' | 'store_unavailable' | 'login_cancelled' | 'session_expired'
-  | 'network' | 'unsupported' | 'server' | string;
+  | 'session_failed' | 'not_signed_in' | 'cancelled' | 'network' | 'unsupported' | 'server' | string;
 
 /**
  * What the SDK is doing right now, for a progress screen. Inferred from the
@@ -34,12 +34,25 @@ export function stepOf(ins: Instruction): Step {
 }
 
 export class MealioError extends Error {
-  constructor(public code: MealioErrorCode, message: string) { super(message); this.name = 'MealioError'; }
+  /**
+   * Set when `code` is `cancelled`: why (see CancelReason). `user_changed`
+   * means a prepare for the new user is what the screen wants next.
+   */
+  reason?: CancelReason;
+  constructor(public code: MealioErrorCode, message: string, reason?: CancelReason) {
+    super(message);
+    this.name = 'MealioError';
+    if (reason) this.reason = reason;
+  }
 }
 
 export interface ClientConfig {
   publishableKey: string;
-  /** From POST /api/v1/sessions on the partner's server. Called again after session_expired. */
+  /**
+   * From POST /api/v1/sessions on the partner's server. Called again after
+   * session_expired. If it fails or takes over 30 seconds, the call fails with
+   * `session_failed`, with your error's message as `message`.
+   */
   getSessionToken: () => Promise<string>;
   platform: 'react-native' | 'ios' | 'android' | 'flutter' | 'web-test';
   sdkVersion: string;
@@ -50,6 +63,12 @@ export interface ClientConfig {
   getEpoch?: () => Promise<number>;
   fetchImpl?: typeof fetch;
   keys?: Record<string, string>;
+  /** Who is signed in to the app, or null for nobody. Leave it out to not track users. See setUser. */
+  userId?: string | null;
+  /** Clients that share one hidden page share one queue. Defaults to a queue of its own. */
+  queue?: JobQueue;
+  /** Log server warnings to the console. Debug builds only. */
+  debug?: boolean;
 }
 
 interface JobStart { job: string; envelope: Envelope }
@@ -60,6 +79,60 @@ export const WARM_FRESH_MS = 4 * 60_000;
 /** A finished warm-up the next prepare may start from. */
 interface Warmed { job: string; store: string; at: number; pageOpens: number; epoch: number }
 
+/** Every HTTP request, and your session function, gets this long. */
+export const REQUEST_TIMEOUT_MS = 30_000;
+
+/** `p`, or a rejection with `onLate()` once `ms` passes. */
+function deadline<T>(p: Promise<T>, ms: number, onLate: () => Error): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const late = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(onLate()), ms); });
+  return Promise.race([p, late]).finally(() => clearTimeout(timer));
+}
+
+/** How long runExclusive may hold the queue, whatever its work does. */
+export const EXCLUSIVE_CAP_MS = 60_000;
+
+/** How long each bounded step of a page reset or a store sign-out may take. */
+export const PAGE_RESET_MS = 10_000;
+
+/**
+ * One job at a time on the hidden page. Prepare, search, add and warm all run
+ * through here, and a new job waits for the one before it to end.
+ */
+export class JobQueue {
+  private tail: Promise<unknown> = Promise.resolve();
+  /** Cart calls waiting or running. A warm-up does not start while any are. */
+  pending = 0;
+  /**
+   * Exclusive work outlived EXCLUSIVE_CAP_MS and may still be touching the
+   * hidden page. The next job resets the page before it starts.
+   */
+  dirty = false;
+
+  /**
+   * Run `job` after every job before it. With `cancel`: cancelled while it
+   * waits, it settles at once with `cancelled` and never runs (its turn
+   * passes straight on).
+   */
+  run<T>(job: () => Promise<T>, cancel?: CancelToken): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      let state: 'waiting' | 'running' | 'gone' = 'waiting';
+      const off = cancel?.onCancel(() => {
+        if (state !== 'waiting') return;
+        state = 'gone';
+        reject(cancelledError(cancel));
+      });
+      const turn = this.tail.then(async () => {
+        if (state === 'gone') return;
+        state = 'running';
+        off?.();
+        try { resolve(await job()); } catch (e) { reject(e); }
+      });
+      this.tail = turn.catch(() => {});
+    });
+  }
+}
+
 export class MealioClient {
   private runner: Runner;
   private token: string | null = null;
@@ -68,27 +141,28 @@ export class MealioClient {
   private base: string;
   private f: typeof fetch;
   private warmed: Warmed | null = null;
-  /** Cart jobs (prepare, search, add) driving the hidden page right now. */
-  private running = 0;
+  private queue: JobQueue;
+  /** Tokens of the prepares and searches waiting or running. */
+  private active = new Set<CancelToken>();
+  /** undefined: users are not tracked. null: nobody is signed in. */
+  private user: string | null | undefined;
   private warming: Promise<void> | null = null;
+  private warmCancel: CancelToken | null = null;
   private lastWarmAt = 0;
 
-  constructor(private cfg: ClientConfig, host: Host) {
+  constructor(private cfg: ClientConfig, private host: Host) {
     this.runner = new Runner(host, new Allowlist(), cfg.keys);
     this.base = (cfg.baseUrl || DEFAULT_BASE_URL).replace(/\/$/, '');
-    this.f = cfg.fetchImpl || fetch;
+    // Bound, because a browser's fetch throws "Illegal invocation" when called as a method of another object.
+    this.f = cfg.fetchImpl || fetch.bind(globalThis);
+    this.queue = cfg.queue ?? new JobQueue();
+    this.user = cfg.userId;
   }
 
-  /** Start a cart: signs in to the store if needed, searches every ingredient. */
   /** The stores this app offers right now. No session needed. */
   async stores(): Promise<StoreInfo[]> {
-    try {
-      const res = await this.f(this.base + '/api/v1/stores', { headers: { 'x-mealio-publishable-key': this.cfg.publishableKey } });
-      const j = await res.json();
-      return Array.isArray(j?.stores) ? j.stores : [];
-    } catch {
-      throw new MealioError('network', 'Could not reach Mealio');
-    }
+    const { status, ok, json } = await this.request('/api/v1/stores', { headers: { 'x-mealio-publishable-key': this.cfg.publishableKey } });
+    return Array.isArray(answer<{ stores?: StoreInfo[] }>(status, ok, json).stores) ? json.stores : [];
   }
 
   /**
@@ -121,8 +195,10 @@ export class MealioClient {
    * instead of asking them.
    * `store` is optional: without it Mealio uses the user's default store, and
    * fails with `store_required` when they have none yet.
+   * Pass `cancel` to stop it: it stops after the current step, sends nothing
+   * more, never shows sign-in, and fails with `cancelled`.
    */
-  async prepareCart(input: PrepareCartInput, opts: { onStep?: StepListener } = {}): Promise<CartSession> {
+  async prepareCart(input: PrepareCartInput, opts: { onStep?: StepListener; cancel?: CancelToken } = {}): Promise<CartSession> {
     const recipes = input.recipes ?? (input.recipe ? [input.recipe] : []);
     if (recipes.length === 0) throw new MealioError('bad_recipe', 'Pass recipe, or recipes with at least one recipe.');
     if (recipes.length > MAX_RECIPES) throw new MealioError('too_many_recipes', `At most ${MAX_RECIPES} recipes in one cart.`);
@@ -130,14 +206,18 @@ export class MealioClient {
     const body = recipes.length === 1
       ? { store: input.store, zip: input.zip, recipe: recipes[0] }
       : { store: input.store, zip: input.zip, recipes };
+    const cancel = opts.cancel ?? new CancelToken();
     return this.cartJob(async () => {
-      await this.settleWarm();
       const about = await this.about();
+      stopIf(cancel);
       const warm = this.takeWarm(input.store ?? null, about.epoch);
-      const start = await this.post<JobStart>('/api/v1/sdk/carts', { ...body, ...about, ...(warm ? { warm } : {}) });
-      const result = await this.drive(start, opts.onStep) as unknown as PreparedCart;
+      const start = await this.post<JobStart>('/api/v1/sdk/carts', { ...body, ...about, ...(warm ? { warm } : {}) }, { cancel });
+      const result = await this.driveLoop(start, opts.onStep, { cancel }) as unknown as PreparedCart;
+      if (this.cfg.debug) {
+        for (const w of result.warnings ?? []) console.warn(`[mealio] ${w.code}: ${w.message}`);
+      }
       return new CartSession(this, result);
-    });
+    }, cancel);
   }
 
   /**
@@ -148,47 +228,151 @@ export class MealioClient {
    * ran in the last few minutes. MealioCartButton calls it when it appears.
    */
   warm(opts: { store?: string | null } = {}): Promise<void> {
-    if (this.warming) return this.warming;
+    if (this.user === null) return Promise.resolve();
+    if (this.warming && !this.warmCancel?.cancelled) return this.warming;
     // A cart is already driving the one hidden page: a warm-up now would load
     // over it mid-run. Nothing to gain either, the cart has the session.
-    if (this.running > 0) return Promise.resolve();
+    if (this.queue.pending > 0) return Promise.resolve();
     if (Date.now() - this.lastWarmAt < WARM_FRESH_MS) return Promise.resolve();
     this.lastWarmAt = Date.now();
-    this.warming = (async () => {
+    const cancel = new CancelToken();
+    this.warmCancel = cancel;
+    const warming: Promise<void> = this.queue.run(async () => {
       try {
+        stopIf(cancel);
+        await this.cleanPage();
         const about = await this.about();
-        const start = await this.post<JobStart | { warm: null }>('/api/v1/sdk/warm', { store: opts.store ?? undefined, ...about });
+        stopIf(cancel);
+        const start = await this.post<JobStart | { warm: null }>('/api/v1/sdk/warm', { store: opts.store ?? undefined, ...about }, { cancel });
         if (!('job' in start)) return;
-        const r = await this.drive(start, undefined, { warm: true }) as { store?: string; signedIn?: boolean | null };
+        const r = await this.driveLoop(start, undefined, { warm: true, cancel }) as { store?: string; signedIn?: boolean | null };
         this.warmed = r && r.signedIn === true && typeof r.store === 'string'
           ? { job: start.job, store: r.store, at: Date.now(), pageOpens: this.runner.pageOpens, epoch: about.epoch }
           : null;
       } catch {
         // A warm-up that fails costs the user nothing: the cart runs as it always has.
-        this.warmed = null;
-      } finally {
-        this.warming = null;
+        if (!cancel.cancelled) this.warmed = null;
       }
-    })();
-    return this.warming;
+    }, cancel).catch(() => { /* cancelled while it waited */ }).finally(() => {
+      if (this.warming === warming) this.warming = null;
+    });
+    this.warming = warming;
+    return warming;
   }
 
   /**
    * The signed-in user changed. Forget the session, so the next call asks your
-   * server for a new one. Signing out of the stores does this too.
+   * server for a new one. Signing out of the stores does this too. A warm-up
+   * under way stops, and its result is never offered to the next prepare.
    */
   resetSession(): void {
     this.sessionGen += 1;
     this.token = null;
+    this.warmCancel?.cancel('user_changed');
     this.clearWarm();
   }
 
-  /** The current token. One that arrives after a reset belongs to the last user. */
-  private async sessionToken(): Promise<string> {
+  /**
+   * Tell the SDK who is signed in to your app, or null for nobody. On a change
+   * it cancels any prepare or search and resets the session. An add runs on.
+   * While null, warm does nothing and calls that need a session fail with
+   * `not_signed_in`, without asking your server. Returns true when the old
+   * value was a user: the platform then signs out of the stores.
+   */
+  setUser(id: string | null): boolean {
+    const old = this.user;
+    if (id === old) return false;
+    this.user = id;
+    this.cancelJobs('user_changed');
+    this.resetSession();
+    return typeof old === 'string';
+  }
+
+  /**
+   * Cancel every prepare and search, waiting or running. An add is not
+   * touched. Each fails with `cancelled` and this `reason`. One waiting in the
+   * queue fails at once.
+   */
+  cancelJobs(reason: CancelReason = 'cancelled'): void {
+    for (const c of [...this.active]) c.cancel(reason);
+    this.warmCancel?.cancel(reason);
+  }
+
+  /**
+   * Run `fn` with the hidden page to itself, in the queue with the jobs. For
+   * work that must not land in the middle of one, like clearing store sessions.
+   * After REQUEST_TIMEOUT_MS the caller gets `network` and `fn`'s cancel token
+   * fires. The queue stays held until `fn` ends or EXCLUSIVE_CAP_MS passes,
+   * whichever is first; past the cap the queue moves on and the next job
+   * resets the hidden page (Host.resetPage) before it starts.
+   */
+  runExclusive<T>(fn: (cancel: CancelToken) => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      void this.queue.run(async () => {
+        await this.cleanPage();
+        const cancel = new CancelToken();
+        const timer = setTimeout(() => { cancel.cancel(); reject(new MealioError('network', 'That took too long')); }, REQUEST_TIMEOUT_MS);
+        let cap: ReturnType<typeof setTimeout> | undefined;
+        const work = Promise.resolve().then(() => fn(cancel)).then(resolve, reject).finally(() => clearTimeout(timer));
+        const capped = new Promise<void>((done) => {
+          cap = setTimeout(() => { this.queue.dirty = true; cancel.cancel(); done(); }, EXCLUSIVE_CAP_MS);
+        });
+        await Promise.race([work, capped]);
+        clearTimeout(cap);
+      });
+    });
+  }
+
+  /**
+   * Before a job: if exclusive work was cut off by its cap, load about:blank
+   * in the hidden page, bounded by PAGE_RESET_MS. A warm-up is no longer worth
+   * anything after that.
+   */
+  private async cleanPage(): Promise<void> {
+    if (!this.queue.dirty) return;
+    this.queue.dirty = false;
+    this.runner.pageOpens += 1;
+    if (!this.host.resetPage) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      Promise.resolve().then(() => this.host.resetPage!()).catch(() => {}),
+      new Promise<void>((r) => { timer = setTimeout(r, PAGE_RESET_MS); }),
+    ]);
+    clearTimeout(timer);
+  }
+
+  /**
+   * The current token. One that arrives after a reset belongs to the last user,
+   * so it is never kept. What happens then depends on the job:
+   * - `cancel` (prepare, search, warm): the job is over, `cancelled`. It never
+   *   asks for the next user's token.
+   * - `gen` (an add): the add belongs to the session of that generation. If the
+   *   session changed before the call or while waiting, `session_expired`.
+   * - neither: ask again, for whoever is signed in now.
+   */
+  private async sessionToken(opts: { cancel?: CancelToken; gen?: number } = {}): Promise<string> {
+    if (opts.cancel) stopIf(opts.cancel);
+    if (opts.gen !== undefined && opts.gen !== this.sessionGen) throw sessionChanged();
+    if (this.user === null) throw new MealioError('not_signed_in', 'Nobody is signed in');
     if (this.token) return this.token;
     const gen = this.sessionGen;
-    const token = await this.cfg.getSessionToken();
-    if (gen !== this.sessionGen) return this.sessionToken();
+    let token = '';
+    let failed: any = null;
+    try {
+      token = await deadline(Promise.resolve().then(() => this.cfg.getSessionToken()), REQUEST_TIMEOUT_MS,
+        () => new Error('getSessionToken did not answer in time'));
+    } catch (e: any) {
+      failed = e ?? new Error('Could not start a Mealio session');
+    }
+    // Cancelled while the token was on its way: that is the answer, even if
+    // the fetch failed too.
+    if (opts.cancel?.cancelled) stopIf(opts.cancel);
+    if (gen !== this.sessionGen) {
+      if (opts.cancel) throw new MealioError('cancelled', 'Cancelled', 'user_changed');
+      if (opts.gen !== undefined) throw sessionChanged();
+      return this.sessionToken();
+    }
+    if (failed) throw new MealioError('session_failed', failed?.message || 'Could not start a Mealio session');
     this.token = token;
     return token;
   }
@@ -197,11 +381,6 @@ export class MealioClient {
   clearWarm(): void {
     this.warmed = null;
     this.lastWarmAt = 0;
-  }
-
-  /** Every job drives the one hidden page: none may start while a warm-up is driving it. */
-  private async settleWarm(): Promise<void> {
-    if (this.warming) await this.warming;
   }
 
   /** The warm job id, once, if the page it left is still showing and it is still fresh. */
@@ -216,26 +395,41 @@ export class MealioClient {
   }
 
   /** Search the store again for one item ("minced garlic jar"). */
-  async search(cartId: string, key: string, query: string, opts: { onStep?: StepListener } = {}): Promise<SearchResult> {
+  async search(cartId: string, key: string, query: string, opts: { onStep?: StepListener; cancel?: CancelToken } = {}): Promise<SearchResult> {
+    const cancel = opts.cancel ?? new CancelToken();
     return this.cartJob(async () => {
-      await this.settleWarm();
-      const start = await this.post<JobStart>(`/api/v1/sdk/carts/${encodeURIComponent(cartId)}/search`, { key, query, ...(await this.about()) });
-      return await this.drive(start, opts.onStep) as unknown as SearchResult;
-    });
+      const about = await this.about();
+      stopIf(cancel);
+      const start = await this.post<JobStart>(`/api/v1/sdk/carts/${encodeURIComponent(cartId)}/search`, { key, query, ...about }, { cancel });
+      return await this.driveLoop(start, opts.onStep, { cancel }) as unknown as SearchResult;
+    }, cancel);
   }
 
-  /** Fill the store cart with the user's choices. */
+  /**
+   * Fill the store cart with the user's choices. It cannot be cancelled: once
+   * tapped it runs to its end under the session of the moment it was called,
+   * even if the user changes meanwhile; a 401 after such a change fails it with
+   * `session_expired`. Every wait in it is bounded, so it does end.
+   */
   async addToCart(cartId: string, selections: Selection[], opts: { onStep?: StepListener } = {}): Promise<AddResult> {
+    // The session is the one of the moment the add was asked for, not of the
+    // moment it leaves the queue: a user change while it waits cannot hand it
+    // the next user's token.
+    const gen = this.sessionGen;
+    const first = this.sessionToken({ gen });
+    first.catch(() => { /* read in the job */ });
     return this.cartJob(async () => {
-      await this.settleWarm();
-      const start = await this.post<JobStart>(`/api/v1/sdk/carts/${encodeURIComponent(cartId)}/add`, { selections, ...(await this.about()) });
-      return await this.drive(start, opts.onStep) as unknown as AddResult;
+      const pin: Pin = { token: await first, gen };
+      const start = await this.post<JobStart>(`/api/v1/sdk/carts/${encodeURIComponent(cartId)}/add`, { selections, ...(await this.about()) }, { pin });
+      return await this.driveLoop(start, opts.onStep, { pin }) as unknown as AddResult;
     });
   }
 
   /** Who is calling, carried on every job-starting call (this used to be a separate hello round trip). */
   private async about(): Promise<{ sdk: Record<string, unknown>; epoch: number }> {
-    const epoch = this.cfg.getEpoch ? await this.cfg.getEpoch() : 0;
+    const epoch = this.cfg.getEpoch
+      ? await deadline(this.cfg.getEpoch(), REQUEST_TIMEOUT_MS, () => new MealioError('network', 'Could not read the store sign-out state'))
+      : 0;
     return { sdk: { platform: this.cfg.platform, version: this.cfg.sdkVersion, core: SDK_CORE_VERSION, ops: SUPPORTED_OPS }, epoch };
   }
 
@@ -253,48 +447,81 @@ export class MealioClient {
   }
 
   /**
-   * A cart call, from before it waits on a warm-up until its job is done. The
-   * whole call counts as running, not just its drive: a warm-up started while
-   * the first request was in flight would otherwise load over the page.
+   * A cart call, queued. It counts as pending from the moment it is called, so
+   * a warm-up cannot slip in ahead of it. A cancelled call never starts.
    */
-  private async cartJob<T>(fn: () => Promise<T>): Promise<T> {
-    this.running += 1;
+  private async cartJob<T>(fn: () => Promise<T>, cancel?: CancelToken): Promise<T> {
+    this.queue.pending += 1;
+    if (cancel) this.active.add(cancel);
     try {
-      return await fn();
+      return await this.queue.run(async () => {
+        if (cancel) stopIf(cancel);
+        await this.cleanPage();
+        return fn();
+      }, cancel);
     } finally {
-      this.running -= 1;
+      this.queue.pending -= 1;
+      if (cancel) this.active.delete(cancel);
     }
   }
 
-  private async drive(start: JobStart, onStep?: StepListener, opts: { warm?: boolean } = {}): Promise<unknown> {
-    return this.driveLoop(start, onStep, !opts.warm);
-  }
-
-  private async driveLoop(start: JobStart, onStep: StepListener | undefined, allowLogin: boolean): Promise<unknown> {
+  private async driveLoop(start: JobStart, onStep: StepListener | undefined,
+    opts: { warm?: boolean; cancel?: CancelToken; pin?: Pin } = {}): Promise<unknown> {
     let env = start.envelope;
     let seq = 0;
     for (let guard = 0; guard < 200; guard += 1) {
       let out;
       try {
-        out = await this.runner.run(env, start.job, seq, onStep ? (ins) => onStep(stepOf(ins), ins) : undefined, { allowLogin });
+        out = await this.runner.run(env, start.job, seq, onStep ? (ins) => onStep(stepOf(ins), ins) : undefined, { allowLogin: !opts.warm, cancel: opts.cancel });
       } catch (e) {
         if (e instanceof EnvelopeError) throw new MealioError(e.why === 'unsupported_op' ? 'unsupported' : 'bad_envelope', e.message);
         throw e;
       }
+      if (opts.cancel) stopIf(opts.cancel);
       seq = out.payload.seq;
       if (out.terminal) {
         if (out.terminal.kind === 'done') return out.terminal.result;
         throw new MealioError(out.terminal.code, out.terminal.message);
       }
       const body: StepRequest = { seq, results: out.results };
-      const next = await this.post<{ envelope: Envelope }>(`/api/v1/sdk/jobs/${encodeURIComponent(start.job)}/step`, body);
+      const next = await this.post<{ envelope: Envelope }>(`/api/v1/sdk/jobs/${encodeURIComponent(start.job)}/step`, body, { cancel: opts.cancel, pin: opts.pin });
       env = next.envelope;
     }
     throw new MealioError('server', 'job did not finish');
   }
 
-  private async post<T>(path: string, body: unknown, retried = false): Promise<T> {
-    const token = await this.sessionToken();
+  /** One HTTP call, bounded: headers and body both inside REQUEST_TIMEOUT_MS. `json` is null if it was not JSON. */
+  private async request(path: string, init: RequestInit, cancel?: CancelToken): Promise<{ status: number; ok: boolean; json: any }> {
+    const ctl = new AbortController();
+    const send = async () => {
+      const res = await this.f(this.base + path, { ...init, signal: ctl.signal });
+      let json: any = null;
+      try { json = await res.json(); } catch { /* the caller decides what that means */ }
+      return { status: res.status, ok: res.ok, json };
+    };
+    // A cancel aborts the request in flight, so the job ends now, not when Mealio answers.
+    let off = () => {};
+    const stopped = new Promise<never>((_, reject) => {
+      off = cancel ? cancel.onCancel(() => { ctl.abort(); reject(cancelledError(cancel)); }) : off;
+    });
+    try {
+      return await Promise.race([deadline(send(), REQUEST_TIMEOUT_MS, () => { ctl.abort(); return new Error('timeout'); }), stopped]);
+    } catch (e) {
+      if (cancel?.cancelled) throw cancelledError(cancel);
+      throw new MealioError('network', 'Could not reach Mealio');
+    } finally {
+      off();
+    }
+  }
+
+  /**
+   * POST with the session. `cancel`: nothing is sent once it fires. `pin`: an
+   * add's own token. On a 401 it is renewed only while the session is still
+   * the one the add started in, else the add fails with `session_expired`.
+   */
+  private async post<T>(path: string, body: unknown, opts: { cancel?: CancelToken; pin?: Pin; retried?: boolean } = {}): Promise<T> {
+    const token = opts.pin ? opts.pin.token : await this.sessionToken({ cancel: opts.cancel });
+    if (opts.cancel) stopIf(opts.cancel);
     const headers: Record<string, string> = {
       'content-type': 'application/json',
       authorization: `Bearer ${token}`,
@@ -302,25 +529,42 @@ export class MealioClient {
       'x-mealio-sdk': `${this.cfg.platform}/${this.cfg.sdkVersion}`,
     };
     if (this.cfg.getAttestation) {
-      const a = await this.cfg.getAttestation().catch(() => null);
+      const a = await deadline(this.cfg.getAttestation(), REQUEST_TIMEOUT_MS, () => new Error('timeout')).catch(() => null);
       if (a) headers['x-mealio-attestation'] = a;
     }
-    let res: Response;
-    try {
-      res = await this.f(this.base + path, { method: 'POST', headers, body: JSON.stringify(body) });
-    } catch (e) {
-      throw new MealioError('network', 'Could not reach Mealio');
+    const { status, ok, json } = await this.request(path, { method: 'POST', headers, body: JSON.stringify(body) }, opts.cancel);
+    if (status === 401 && !opts.retried) {
+      if (opts.pin && opts.pin.gen !== this.sessionGen) throw sessionChanged();
+      if (this.token === token) this.token = null;
+      if (opts.pin) opts.pin.token = await this.sessionToken({ gen: opts.pin.gen });
+      return this.post<T>(path, body, { ...opts, retried: true });
     }
-    if (res.status === 401 && !retried) {
-      this.token = null;
-      return this.post<T>(path, body, true);
-    }
-    let json: any = null;
-    try { json = await res.json(); } catch { /* fall through */ }
-    if (res.status === 401) throw new MealioError('session_expired', 'The Mealio session expired');
-    if (!res.ok) throw new MealioError(json?.error?.code || 'server', json?.error?.message || `Mealio answered ${res.status}`);
-    return json as T;
+    if (status === 401) throw new MealioError('session_expired', 'The Mealio session expired');
+    return answer<T>(status, ok, json);
   }
+}
+
+/** The body of a good answer, or the error it stands for. */
+function answer<T>(status: number, ok: boolean, json: any): T {
+  if (!ok) throw new MealioError(json?.error?.code || 'server', json?.error?.message || `Mealio answered ${status}`);
+  // A captive portal or a proxy can answer 200 with a web page.
+  if (json === null || typeof json !== 'object') throw new MealioError('server', 'Mealio sent an answer that could not be read');
+  return json as T;
+}
+
+/** An add's token, fixed when it was asked for. Renewed only within its generation. */
+interface Pin { token: string; gen: number }
+
+function sessionChanged(): MealioError {
+  return new MealioError('session_expired', 'The signed-in user changed');
+}
+
+function cancelledError(cancel?: CancelToken): MealioError {
+  return new MealioError('cancelled', 'Cancelled', cancel?.reason ?? 'cancelled');
+}
+
+function stopIf(cancel: CancelToken): void {
+  if (cancel.cancelled) throw cancelledError(cancel);
 }
 
 /**
@@ -349,7 +593,7 @@ export interface Estimate { total: number | null; count: number; estimated: bool
  * price times quantity. `fallback` is the chosen Product, for servers whose
  * added entries carry no prices.
  */
-export function addedPrice(a: AddedItem, fallback?: Product | null): { amount: number; estimated: boolean } | null {
+export function addedPrice(a: Pick<AddedItem, 'quantity' | 'weightLb' | 'unitPrice' | 'pricePerLb' | 'estimated'>, fallback?: Product | null): { amount: number; estimated: boolean } | null {
   const perLb = typeof a.pricePerLb === 'number' ? a.pricePerLb : (typeof fallback?.pricePerLb === 'number' ? fallback.pricePerLb : null);
   const unit = typeof a.unitPrice === 'number' ? a.unitPrice : (typeof fallback?.unitPrice === 'number' ? fallback.unitPrice : null);
   const est = !!(a.estimated ?? fallback?.estimated);
@@ -363,11 +607,18 @@ export function addedPrice(a: AddedItem, fallback?: Product | null): { amount: n
   return { amount: round(unit * Math.max(1, a.quantity || 1)), estimated: est };
 }
 
+/** Whole cents, so adding lines up stays exact. The list and done totals both sum these. */
+const cents = (amount: number) => Math.round(amount * 100);
+
 export class CartSession {
   private picks = new Map<string, { productId: string; preferenceId: string | null }>();
   private extra = new Map<string, Product[]>();
   private qty = new Map<string, number>();
   private lb = new Map<string, number>();
+  private adding: Promise<AddResult> | null = null;
+  private searches = new Set<CancelToken>();
+  /** Per item, per product found with search(): the query that found it, for restorePicks on a new cart. */
+  private foundBy = new Map<string, Map<string, string>>();
 
   constructor(private client: MealioClient, public readonly cart: PreparedCart) {
     for (const it of this.items) {
@@ -384,6 +635,8 @@ export class CartSession {
   }
   /** The recipes this cart was made from. Older servers: none listed. */
   get recipes(): Array<{ id: string; title: string | null }> { return this.cart.recipes ?? []; }
+  /** What the server changed or ignored in what you sent. Empty from older servers. */
+  get warnings(): CartWarning[] { return this.cart.warnings ?? []; }
   /** The recipes that call for an item, for a "for Tacos, Pasta" line. Empty from older servers. */
   recipesFor(key: string): ItemRecipe[] { return this.find(key)?.recipes ?? []; }
   /** @deprecated */ get ready(): CartItem[] { return this.cart.ready; }
@@ -401,9 +654,13 @@ export class CartSession {
 
   selectedId(key: string): string | null { return this.picks.get(key)?.productId ?? null; }
 
-  /** Packages to add for an item: the recipe's quantity until the user changes it. */
+  /**
+   * Packages to add for an item: the recipe's quantity until the user changes
+   * it, never over the selected product's cap. What this returns is what is sent.
+   */
   quantity(key: string): number {
-    return this.qty.get(key) ?? Math.max(1, Math.floor(this.find(key)?.quantity || 1));
+    const n = this.qty.get(key) ?? Math.max(1, Math.floor(this.find(key)?.quantity || 1));
+    return Math.min(n, this.maxQuantity(key));
   }
 
   /** The most the user can add: the selected product's store cap, else 99. */
@@ -510,13 +767,78 @@ export class CartSession {
   /** Leave the item out of this run. Its remembered choice is kept. */
   deselect(key: string): void { this.picks.delete(key); }
 
+  /**
+   * Take the user's picks from an earlier cart, after a failed add. Works by
+   * item key, on the same store: what they unticked stays unticked, and a
+   * product still offered comes back with its quantity, weight and preference.
+   * A product no longer offered leaves the item as this cart set it.
+   *
+   * A product the user found with search() is known to the server only on the
+   * cart it was found in, so it is never sent to this cart directly. Instead
+   * the search that found the picked product (not merely the item's last
+   * search) runs again on this cart (it counts toward the search cap), and the
+   * product is picked if it comes back. If it does not, or the search fails,
+   * the item keeps this cart's own pick.
+   *
+   * Everything except those searches is done before this returns; the promise
+   * resolves when the searches end. It never rejects: it ends with whatever it
+   * could restore. Pass `cancel` to stop the searches (closing the screen).
+   * cancelJobs and setUser cancel that same token, so check
+   * `cancel.cancelled` afterwards: a cancel from outside is not a finished
+   * restore, and the caller handles it like any other cancelled job.
+   */
+  async restorePicks(from: CartSession, opts: { cancel?: CancelToken } = {}): Promise<void> {
+    if (from.store !== this.store) return;
+    const again: Array<{ key: string; productId: string; query: string }> = [];
+    for (const it of this.items) {
+      if (!from.find(it.key)) continue;
+      const productId = from.selectedId(it.key);
+      if (!productId) { this.deselect(it.key); continue; }
+      if (this.options(it.key).some((p) => p.id === productId)) { this.takePick(from, it.key, productId); continue; }
+      const query = from.foundBy.get(it.key)?.get(productId);
+      if (query) again.push({ key: it.key, productId, query });
+    }
+    for (const a of again) {
+      if (opts.cancel?.cancelled) return;
+      try { await this.search(a.key, a.query, { cancel: opts.cancel }); } catch { continue; }
+      if (this.options(a.key).some((p) => p.id === a.productId)) this.takePick(from, a.key, a.productId);
+    }
+  }
+
+  /** Select `productId` (offered on this cart) with `from`'s preference, quantity and weight for it. */
+  private takePick(from: CartSession, key: string, productId: string): void {
+    const product = this.options(key).find((p) => p.id === productId);
+    if (!product || !this.find(key)) return;
+    const pref = from.preferenceId(key);
+    this.select(key, productId, { preferenceId: product.preferences?.some((p) => p.id === pref) ? pref : null });
+    if (from.qty.has(key)) this.setQuantity(key, from.qty.get(key) as number);
+    if (from.lb.has(key)) this.setWeight(key, from.lb.get(key) as number);
+  }
+
+  /** True while a search runs. Keep Add disabled until it ends. */
+  get searching(): boolean { return this.searches.size > 0; }
+
+  /** Stop every search of this cart. Closing the sheet does this. */
+  cancelSearches(): void {
+    for (const c of [...this.searches]) c.cancel();
+  }
+
   /** Search the store for something else and add the results to this item's options. */
-  async search(key: string, query: string): Promise<Product[]> {
-    const r = await this.client.search(this.cart.cartId, key, query);
-    const prev = this.extra.get(key) || [];
-    const seen = new Set(prev.map((p) => p.id));
-    this.extra.set(key, [...r.options.filter((p) => !seen.has(p.id)), ...prev]);
-    return r.options;
+  async search(key: string, query: string, opts: { cancel?: CancelToken } = {}): Promise<Product[]> {
+    const cancel = opts.cancel ?? new CancelToken();
+    this.searches.add(cancel);
+    try {
+      const r = await this.client.search(this.cart.cartId, key, query, { cancel });
+      const prev = this.extra.get(key) || [];
+      const seen = new Set(prev.map((p) => p.id));
+      this.extra.set(key, [...r.options.filter((p) => !seen.has(p.id)), ...prev]);
+      const by = this.foundBy.get(key) ?? new Map<string, string>();
+      for (const p of r.options) if (!by.has(p.id)) by.set(p.id, query);
+      this.foundBy.set(key, by);
+      return r.options;
+    } finally {
+      this.searches.delete(cancel);
+    }
   }
 
   selections(): Selection[] {
@@ -526,12 +848,17 @@ export class CartSession {
       if (this.isWeight(it.key)) {
         return { key: it.key, productId: p.productId, quantity: 1, weightLb: this.weight(it.key), remember: true, preferenceId: p.preferenceId };
       }
-      return { key: it.key, productId: p.productId, quantity: Math.min(this.quantity(it.key), this.maxQuantity(it.key)), remember: true, preferenceId: p.preferenceId };
+      return { key: it.key, productId: p.productId, quantity: this.quantity(it.key), remember: true, preferenceId: p.preferenceId };
     });
   }
 
-  async addToCart(opts: { onStep?: StepListener } = {}): Promise<AddResult> {
-    return this.client.addToCart(this.cart.cartId, this.selections(), opts);
+  /** A second call while one is running returns the same promise. */
+  addToCart(opts: { onStep?: StepListener } = {}): Promise<AddResult> {
+    if (this.adding) return this.adding;
+    const adding = this.client.addToCart(this.cart.cartId, this.selections(), opts)
+      .finally(() => { this.adding = null; });
+    this.adding = adding;
+    return adding;
   }
 
   /** The selected product for an item, from its options. */
@@ -556,18 +883,14 @@ export class CartSession {
       const p = this.selected(it.key);
       if (!p || this.needsPreference(it.key)) continue;
       count += 1;
-      if (p.soldByWeight) {
-        estimated = true;
-        if (typeof p.pricePerLb === 'number') total += p.pricePerLb * this.weight(it.key);
-        else if (typeof p.unitPrice === 'number') total += p.unitPrice;
-        else unpriced += 1;
-        continue;
-      }
-      if (typeof p.unitPrice === 'number') total += p.unitPrice * Math.min(this.quantity(it.key), this.maxQuantity(it.key));
-      else unpriced += 1;
-      if (p.estimated) estimated = true;
+      // Priced line by line as the done screen will price it, so the two agree.
+      const line = addedPrice({ quantity: this.quantity(it.key), weightLb: p.soldByWeight ? this.weight(it.key) : undefined }, p);
+      if (p.soldByWeight) estimated = true;
+      if (!line) { unpriced += 1; continue; }
+      total += cents(line.amount);
+      if (line.estimated) estimated = true;
     }
-    return { total: unpriced > 0 ? null : Math.round(total * 100) / 100, count, estimated: estimated || unpriced > 0, unpriced };
+    return { total: unpriced > 0 ? null : total / 100, count, estimated: estimated || unpriced > 0, unpriced };
   }
 
   /**
@@ -581,10 +904,10 @@ export class CartSession {
     for (const a of result.added) {
       const p = addedPrice(a, this.selected(a.key));
       if (!p) { unpriced += 1; continue; }
-      total += p.amount;
+      total += cents(p.amount);
       if (p.estimated) estimated = true;
     }
-    return { total: unpriced > 0 ? null : Math.round(total * 100) / 100, count: result.added.length, estimated: estimated || unpriced > 0, unpriced };
+    return { total: unpriced > 0 ? null : total / 100, count: result.added.length, estimated: estimated || unpriced > 0, unpriced };
   }
 
   /** One added line's price (see addedPrice), with this session's product as the fallback. */

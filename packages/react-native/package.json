@@ -1,6 +1,6 @@
 {
   "name": "@mealio/react-native-cart",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Mealio Cart SDK for React Native: put an Add to my grocery cart button in your app.",
   "license": "SEE LICENSE IN LICENSE",
   "author": "Mealio <contact@mealio.co>",
@@ -19,6 +19,10 @@
   "files": [
     "dist",
     "src",
+    "jest.js",
+    "jest.d.ts",
+    "testing.js",
+    "testing.d.ts",
     "README.md",
     "LICENSE"
   ],
@@ -28,23 +32,28 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
     "prepack": "npm run build"
   },
   "dependencies": {
-    "@mealio/sdk-core": "0.5.0"
+    "@mealio/sdk-core": "0.6.0"
   },
   "peerDependencies": {
     "react": ">=18",
     "react-native": ">=0.74",
     "react-native-webview": ">=13.6",
     "@react-native-cookies/cookies": ">=6.2",
-    "@preeternal/react-native-cookie-manager": ">=7.0.0"
+    "@preeternal/react-native-cookie-manager": ">=7.0.0",
+    "react-native-safe-area-context": ">=4.0.0"
   },
   "peerDependenciesMeta": {
     "@react-native-cookies/cookies": {
       "optional": true
     },
     "@preeternal/react-native-cookie-manager": {
+      "optional": true
+    },
+    "react-native-safe-area-context": {
       "optional": true
     }
   },
@@ -54,7 +63,9 @@
     "react": "18.3.1",
     "react-native": "0.76.5",
     "react-native-webview": "13.12.5",
-    "typescript": "5.6.3"
+    "react-test-renderer": "18.3.1",
+    "typescript": "5.6.3",
+    "vitest": "2.1.8"
   },
   "react-native": "src/index.ts"
 }

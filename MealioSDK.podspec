@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'MealioSDK'
-  s.version          = '0.5.0'
+  s.version          = '0.6.0'
   s.summary          = 'Mealio Cart SDK: add a recipe to the user\'s own grocery store cart.'
   s.description      = <<-DESC
     The Mealio Cart SDK carries out signed instructions from Mealio's server on

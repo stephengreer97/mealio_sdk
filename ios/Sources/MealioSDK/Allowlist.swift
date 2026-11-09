@@ -42,12 +42,15 @@ public final class Allowlist {
         "payment",
         "billing",
         "wallet",
-        "place-?order",
-        "submit-?order",
-        "order-?confirm",
+        "place[-_]?order",
+        "submit[-_]?order",
+        "order[-_]?confirm",
         "gift-?card",
         "/account/(delete|close|security|password)",
         "/addresses?/(add|edit|delete|new)",
+        "/orders?/(submit|place)(/|\\?|$)",
+        "/cart/confirm",
+        "/purchase(/|\\?|$)",
     ]
 
     /// Hosts every store's login may return to.
@@ -128,11 +131,43 @@ public final class Allowlist {
     }()
 
     private static let operationNameRegex: NSRegularExpression = {
-        try! NSRegularExpression(pattern: #""operationName"\s*:\s*"([^"]*)""#, options: [])
+        // JS \s is ICU \s plus \v and U+FEFF.
+        try! NSRegularExpression(pattern: #""operationName"[\s\u000b\ufeff]*:[\s\u000b\ufeff]*"([^"]*)""#, options: [])
     }()
 
-    private static let mutationRegex: NSRegularExpression = {
-        try! NSRegularExpression(pattern: #"\bmutation\s+([A-Za-z_][A-Za-z0-9_]*)"#, options: [])
+    /// Strings, block strings and comments, which hold no GraphQL names.
+    private static let gqlNoiseRegex: NSRegularExpression = {
+        // Starts with a group: a raw string may not open with three quotes.
+        // JS `.` is any character but \n, \r, U+2028 and U+2029; ICU's `.`
+        // also stops at \v, \f and U+0085, so the escape is spelled out.
+        try! NSRegularExpression(pattern: #"(?:"""(?:\\"""|[\s\S])*?""")|"(?:[^"\\]|\\[^\n\r\u2028\u2029])*"|#[^\n\r]*"#, options: [])
+    }()
+
+    private static let gqlTokenRegex: NSRegularExpression = {
+        try! NSRegularExpression(pattern: #"[A-Za-z_][A-Za-z0-9_]*|\.\.\.|[{}():@]"#, options: [])
+    }()
+
+    private static let formFieldRegex: NSRegularExpression = {
+        try! NSRegularExpression(pattern: #"(?:^|&)(operationName|query|operations)=([^&]*)"#, options: [])
+    }()
+
+    /// MULTIPART_FIELD in allowlist.ts: a field of a multipart/form-data body
+    /// sent as raw text. Group 1 is the field's name, group 2 its value. JS's
+    /// `$` (no m flag) is the very end of the text, which ICU spells `\z`.
+    /// The name may be double-quoted, single-quoted or bare; a longer name
+    /// (`operationsX`) is a different field.
+    ///
+    /// This is the SPEC, not the implementation: run as a regex it takes time
+    /// quadratic in the body. `multipartFields` finds the same matches in one
+    /// pass; tests check it against this regex.
+    public static let multipartField = #"name=["']?(operationName|query|operations)(?=["';\s]|$)[^\r\n]*\r?\n(?:[^\r\n]+\r?\n)*\r?\n([\s\S]*?)(?=\r?\n--|$)"#
+    /// MULTIPART_FIELD as a regex, for tests that check `multipartFields`.
+    static let multipartFieldRegex: NSRegularExpression = {
+        // ICU spellings: `$` is `\z`, and JS \s adds \v and U+FEFF to ICU's.
+        let icu = multipartField
+            .replacingOccurrences(of: "|$)", with: "|\\z)")
+            .replacingOccurrences(of: #"["';\s]"#, with: #"["';\s\u000b\ufeff]"#)
+        return try! NSRegularExpression(pattern: icu, options: [])
     }()
 
     /// A URL split into scheme, host and path + query, or nil if it is not one
@@ -195,36 +230,305 @@ public final class Allowlist {
         }
     }
 
-    /// Does a request body name a blocked operation? Reads `operationName` the
-    /// way the server will (after JSON parsing, so `\u004f` escapes do not hide
-    /// it), for a single request or a batch, and the names of any mutations in
-    /// `query`. The guard script applies the same rule to requests a page script
-    /// makes; this applies it to the runner's own `fetch` op, which never passes
-    /// through the page.
-    public static func bodyBlocked(_ body: String?) -> Bool {
-        guard let body = body, !body.isEmpty else { return false }
-        var names: [String] = []
-        let ns = body as NSString
-        for m in operationNameRegex.matches(in: body, options: [], range: NSRange(location: 0, length: ns.length)) {
-            names.append(ns.substring(with: m.range(at: 1)))
+    /// The names a GraphQL document's mutations are judged by: each
+    /// mutation's own name, and its ROOT fields. A root field is a field in the
+    /// mutation's top selection set, in an inline fragment at that level
+    /// (`... on Mutation { x }`), or at the top of a fragment spread there
+    /// (followed through further spreads). Aliases, nested fields, arguments,
+    /// variables, directives, strings and comments are never names. A query,
+    /// subscription or fragment on its own gives none, so a mutation may select
+    /// `cart { checkoutUrl }` and a query may read `paymentMethods`. Mirrors
+    /// `mutationNames` in allowlist.ts.
+    public static func mutationNames(_ doc: String) -> [String] {
+        let dn = doc as NSString
+        let text = gqlNoiseRegex.stringByReplacingMatches(in: doc, options: [], range: NSRange(location: 0, length: dn.length), withTemplate: " ")
+        let tn = text as NSString
+        let tokens = gqlTokenRegex.matches(in: text, options: [], range: NSRange(location: 0, length: tn.length)).map { tn.substring(with: $0.range) }
+        var defs: [GraphQLDefinition] = []
+        var def: GraphQLDefinition?
+        // One entry per open selection set: true when it is at its definition's root.
+        var sets: [Bool] = []
+        var parens = 0
+        var inline = false, pushed = false
+        var expect = ""
+        for t in tokens {
+            let was = pushed
+            pushed = false
+            if t == "(" { parens += 1; continue }
+            if t == ")" { parens = max(0, parens - 1); continue }
+            if parens > 0 { continue }
+            if t == "@" { expect = "directive"; continue }
+            if t == "{" {
+                if def == nil {
+                    let d = GraphQLDefinition(kind: "query")
+                    def = d
+                    defs.append(d)
+                }
+                sets.append(sets.isEmpty || (inline && sets[sets.count - 1]))
+                inline = false
+                expect = ""
+                continue
+            }
+            if t == "}" {
+                _ = sets.popLast()
+                inline = false
+                expect = ""
+                if sets.isEmpty { def = nil }
+                continue
+            }
+            if sets.isEmpty {
+                // A definition's header: its keyword, its name, and nothing else counts.
+                if expect == "directive" {
+                    expect = ""
+                } else if def == nil && ["query", "mutation", "subscription", "fragment"].contains(t) {
+                    let d = GraphQLDefinition(kind: t)
+                    def = d
+                    defs.append(d)
+                } else if let d = def, d.name.isEmpty, t != "on", t != ":", t != "..." {
+                    d.name = t
+                }
+                continue
+            }
+            let root = sets[sets.count - 1]
+            if t == "..." { expect = "spread"; inline = true; continue }
+            if t == ":" {
+                if was, let d = def { _ = d.fields.popLast() }
+                continue
+            }
+            if expect == "directive" || expect == "type" { expect = ""; continue }
+            if expect == "spread" {
+                expect = ""
+                if t == "on" { expect = "type"; continue }
+                inline = false
+                if root, let d = def { d.spreads.append(t) }
+                continue
+            }
+            inline = false
+            if root, let d = def {
+                d.fields.append(t)
+                pushed = true
+            }
         }
-        if let data = body.data(using: .utf8),
-           let j = try? JSONSerialization.jsonObject(with: data, options: []) {
-            let list: [Any] = (j as? [Any]) ?? [j]
-            for item in list {
-                guard let o = item as? [String: Any] else { continue }
-                if let n = o["operationName"] as? String { names.append(n) }
-                if let q = o["query"] as? String {
-                    let qs = q as NSString
-                    for m in mutationRegex.matches(in: q, options: [], range: NSRange(location: 0, length: qs.length)) {
-                        names.append(qs.substring(with: m.range(at: 1)))
+        // A later fragment of the same name wins, as in the TS Map.
+        var fragments: [String: GraphQLDefinition] = [:]
+        for d in defs where d.kind == "fragment" { fragments[d.name] = d }
+        var names: [String] = []
+        for d in defs where d.kind == "mutation" {
+            if !d.name.isEmpty { names.append(d.name) }
+            var seen = Set<String>()
+            func walk(_ x: GraphQLDefinition) {
+                names.append(contentsOf: x.fields)
+                for s in x.spreads {
+                    if let f = fragments[s], !seen.contains(s) {
+                        seen.insert(s)
+                        walk(f)
                     }
                 }
             }
+            walk(d)
         }
+        return names
+    }
+
+    /// Does a request body name a blocked operation? Reads `operationName` the
+    /// way the server will (after JSON parsing, so `\u004f` escapes do not hide
+    /// it), for a single request or a batch, or form-encoded, and the names of
+    /// every mutation it carries (see `mutationNames`). A GraphQL multipart
+    /// upload's `operations` field is JSON and is judged like a JSON body,
+    /// form-encoded or as raw multipart text (`multipartField`). A leading
+    /// byte order mark is dropped first. A persisted query that sends only an
+    /// innocent name and a hash cannot be read here; the signature on the
+    /// envelope covers it. The guard script applies the same rule to requests a
+    /// page script makes; this applies it to the runner's own `fetch` op, which
+    /// never passes through the page.
+    ///
+    /// A body nested deeper than `bodyMaxDepth` inside `operations` fields is
+    /// blocked, and so is one longer than `bodyMaxText`.
+    public static func bodyBlocked(_ given: String?) -> Bool {
+        judged(given, depth: 0)
+    }
+
+    /// How many times a body may nest inside an `operations` field
+    /// (form-encoded or a raw multipart part) and still be read. One nested
+    /// deeper is blocked. BODY_MAX_DEPTH in allowlist.ts.
+    public static let bodyMaxDepth = 8
+
+    /// The longest body (UTF-16 code units, after a leading byte order mark is
+    /// dropped) that is read. A longer one is blocked, unread. BODY_MAX_TEXT.
+    public static let bodyMaxText = 1_048_576
+
+    private static func judged(_ given: String?, depth: Int) -> Bool {
+        guard var body = given else { return false }
+        // A leading byte order mark is dropped, as a server's JSON reader would.
+        if body.unicodeScalars.first == "\u{FEFF}" { body = String(body.unicodeScalars.dropFirst()) }
+        if body.isEmpty { return false }
+        if depth > bodyMaxDepth { return true }
+        let ns = body as NSString
+        // Store requests are far smaller. A body this big is refused unread:
+        // a text match could miss a blocked name hidden in escapes.
+        if ns.length > bodyMaxText { return true }
+        var names: [String] = []
+        var docs: [String] = []
+        for m in operationNameRegex.matches(in: body, options: [], range: NSRange(location: 0, length: ns.length)) {
+            names.append(ns.substring(with: m.range(at: 1)))
+        }
+        // Read as JSON.parse reads it (any depth, lone surrogates), keeping
+        // only the two levels this rule looks at.
+        if let j = StrictJSON.parse(body, keep: 2) {
+            let list: [JSONValue] = j.arrayValue ?? [j]
+            for item in list {
+                guard case .object(let o) = item else { continue }
+                if case .string(let n)? = o["operationName"] { names.append(n) }
+                if case .string(let q)? = o["query"] { docs.append(q) }
+            }
+        } else {
+            // Not JSON: form-encoded, raw multipart, or a bare GraphQL document.
+            docs.append(body)
+            for m in formFieldRegex.matches(in: body, options: [], range: NSRange(location: 0, length: ns.length)) {
+                let v = decodePercent(ns.substring(with: m.range(at: 2)).replacingOccurrences(of: "+", with: " "))
+                let field = ns.substring(with: m.range(at: 1))
+                if field == "query" {
+                    docs.append(v)
+                } else if field == "operations" {
+                    if judged(v, depth: depth + 1) { return true }
+                } else {
+                    names.append(v)
+                }
+            }
+            for (field, v) in multipartFields(body) {
+                if field == "query" {
+                    docs.append(v)
+                } else if field == "operations" {
+                    if judged(v, depth: depth + 1) { return true }
+                } else {
+                    names.append(v)
+                }
+            }
+        }
+        for d in docs { names.append(contentsOf: mutationNames(d)) }
         return names.contains { n in
             blockedOperationRegex.firstMatch(in: n, options: [], range: NSRange(location: 0, length: (n as NSString).length)) != nil
         }
+    }
+
+    /// JavaScript's `\s`, which MULTIPART_FIELD's lookahead uses (isJsSpace
+    /// in allowlist.ts). Swift's and ICU's differ.
+    static func isJsSpace(_ c: UInt16) -> Bool {
+        c == 0x20 || (c >= 0x09 && c <= 0x0d) || c == 0xa0 || c == 0x1680 || (c >= 0x2000 && c <= 0x200a)
+            || c == 0x2028 || c == 0x2029 || c == 0x202f || c == 0x205f || c == 0x3000 || c == 0xfeff
+    }
+
+    private static let partNameStrings = ["operationName", "query", "operations"]
+    private static let partNames: [[UInt16]] = partNameStrings.map { Array($0.utf16) }
+    private static let nameEq: [UInt16] = Array("name=".utf16)
+
+    /// Every match of MULTIPART_FIELD in a body, as (name, value) pairs, in
+    /// one linear pass. A line-for-line port of multipartFields in
+    /// allowlist.ts (UTF-16 offsets, as JS strings): see there for the steps
+    /// and the two caches that keep it linear.
+    static func multipartFields(_ text: String) -> [(String, String)] {
+        let ns = text as NSString
+        let body = Array(text.utf16)
+        let n = body.count
+        var out: [(String, String)] = []
+        func at(_ i: Int) -> UInt16 { i < n ? body[i] : 0 }
+        func startsWith(_ x: [UInt16], _ k: Int) -> Bool {
+            guard k + x.count <= n else { return false }
+            for i in 0..<x.count where body[k + i] != x[i] { return false }
+            return true
+        }
+        func indexOf(_ x: [UInt16], _ from: Int) -> Int {
+            var i = max(from, 0)
+            while i + x.count <= n {
+                if startsWith(x, i) { return i }
+                i += 1
+            }
+            return -1
+        }
+        let lf: UInt16 = 0x0a, cr: UInt16 = 0x0d
+        let valueEnd: [UInt16] = [lf, 0x2d, 0x2d] // "\n--"
+        // nextBreak(p) for p in [brkFrom, brkAt] is brkAt.
+        var brkFrom = -1, brkAt = -1
+        // valueStart(p) for p in [runFrom, runTo] is runValue (-1: no match).
+        var runFrom = -1, runTo = -1, runValue = -1
+        var from = 0
+        while true {
+            let c = indexOf(nameEq, from)
+            if c < 0 { break }
+            from = c + 1
+            var k = c + 5
+            if k < n && (body[k] == 0x22 || body[k] == 0x27) { k += 1 }
+            var nameIndex = -1
+            for (i, x) in partNames.enumerated() where startsWith(x, k) {
+                nameIndex = i
+                break
+            }
+            if nameIndex < 0 { continue }
+            let j = k + partNames[nameIndex].count
+            if j < n {
+                let ch = body[j]
+                if ch != 0x22 && ch != 0x27 && ch != 0x3b && !isJsSpace(ch) { continue }
+            }
+            // 2. The header line.
+            var q: Int
+            if j >= brkFrom && j <= brkAt {
+                q = brkAt
+            } else {
+                q = j
+                while q < n && body[q] != cr && body[q] != lf { q += 1 }
+                brkFrom = j
+                brkAt = q
+            }
+            var p: Int
+            if q < n && body[q] == lf {
+                p = q + 1
+            } else if q + 1 < n && body[q] == cr && body[q + 1] == lf {
+                p = q + 2
+            } else {
+                continue
+            }
+            // 3. Header lines, then the blank line.
+            var v: Int
+            if p >= runFrom && p <= runTo {
+                v = runValue
+            } else {
+                var s = p
+                v = -1
+                while true {
+                    if s >= n { break }
+                    let h = body[s]
+                    if h == lf { v = s + 1; break }
+                    if h == cr {
+                        if s + 1 < n && body[s + 1] == lf { v = s + 2 }
+                        break
+                    }
+                    var e = s
+                    while e < n && body[e] != cr && body[e] != lf { e += 1 }
+                    if e < n && body[e] == lf {
+                        s = e + 1
+                    } else if e + 1 < n && body[e] == cr && body[e + 1] == lf {
+                        s = e + 2
+                    } else {
+                        break
+                    }
+                }
+                runFrom = p
+                runTo = s
+                runValue = v
+            }
+            if v < 0 { continue }
+            // 4. The value.
+            var end = indexOf(valueEnd, v)
+            if end < 0 {
+                end = n
+            } else if end > v && at(end - 1) == cr {
+                end -= 1
+            }
+            // Through NSString: a lone surrogate stays as it is, as in a JS slice.
+            out.append((partNameStrings[nameIndex], ns.substring(with: NSRange(location: v, length: end - v))))
+            from = end
+        }
+        return out
     }
 
     /// Last two labels, with a short list of two-label public suffixes.
@@ -294,5 +598,19 @@ public final class Allowlist {
         if !own && !auth { return .refused(.host) }
         if Allowlist.isBlockedPath(rest) { return .refused(.blockedPath) }
         return .allowed
+    }
+}
+
+/// One definition of a GraphQL document, for `Allowlist.mutationNames`.
+private final class GraphQLDefinition {
+    let kind: String
+    var name = ""
+    /// Root fields, in order.
+    var fields: [String] = []
+    /// Fragment spreads at the root.
+    var spreads: [String] = []
+
+    init(kind: String) {
+        self.kind = kind
     }
 }

@@ -14,6 +14,11 @@ const found = {
   'android SDK_VERSION': /SDK_VERSION = "([^"]+)"/.exec(read('android/mealio-sdk/src/main/kotlin/co/mealio/sdk/MealioCart.kt'))?.[1],
   'cocoapods MealioSDK': /s\.version\s*=\s*'([^']+)'/.exec(read('MealioSDK.podspec'))?.[1],
   'ios MEALIO_SDK_VERSION': /MEALIO_SDK_VERSION = "([^"]+)"/.exec(read('ios/Sources/MealioSDK/MealioClient.swift'))?.[1],
+  // The core protocol version each port reports as `sdk.core` on every job.
+  'core SDK_CORE_VERSION': /SDK_CORE_VERSION = '([^']+)'/.exec(read('packages/core/src/client.ts'))?.[1],
+  'android SDK_CORE_VERSION': /SDK_CORE_VERSION = "([^"]+)"/.exec(read('android/mealio-sdk/src/main/kotlin/co/mealio/sdk/MealioClient.kt'))?.[1],
+  'flutter sdkCoreVersion': /sdkCoreVersion = '([^']+)'/.exec(read('flutter/lib/src/client.dart'))?.[1],
+  'ios SDK_CORE_VERSION': /SDK_CORE_VERSION = "([^"]+)"/.exec(read('ios/Sources/MealioSDK/MealioClient.swift'))?.[1],
 };
 const want = process.argv[2] ? process.argv[2].replace(/^v/, '') : found['@mealio/sdk-core'];
 const bad = Object.entries(found).filter(([, v]) => v !== want);

@@ -1,3 +1,105 @@
+## Unreleased
+
+- `ItemRecipe.share` (double) is the exact share the server sends (0.5);
+  `quantity` stays the 0.5.0 int. `toJson` sends the share. Testing kit:
+  `MealioFakeItem.quantityExact` keeps a script's fractional quantity (1.5)
+  and is what the fake cart sends.
+- Guard: installed unarmed and armed by the per-script copy
+  (`guardArmScript`, injected before each page script and each sign-in check
+  script), so the store's own boot traffic runs untouched until Mealio's
+  first script. It never installs in a cross-origin frame, and also covers
+  `setHTMLUnsafe`, `Range.insertNode`/`surroundContents` and `document.write`.
+  `LoginRequest.armGuard` is new.
+- Request bodies: `operations` nested more than 8 deep is blocked, and so is a
+  body over 1 MB (`bodyMaxDepth`, `bodyMaxText`).
+- Messages from the page are read with a depth limit of 512; deeper
+  containers are kept empty, never built. A 100k-deep message no longer
+  overflows the stack.
+- Testing kit: `MealioFakeScript.fromJson` is strict at every level (unknown
+  fields, missing required fields and wrong types throw a FormatException
+  naming the field, such as `script.items[0].key`), and `warm: {}` means
+  signed in, as in TypeScript.
+
+- `restorePicks` re-runs the search that found the picked product, not the
+  item's last search, and never throws: it ends with what it could restore.
+  A cancel from outside the sheet during it still starts the sheet again.
+- A cancelled prepare, search or warm-up settles at once, without waiting for
+  its HTTP request to answer, and the queue moves on.
+- `runExclusive`'s `CancelToken` fires at 30 seconds, when the caller gets
+  `network`, as in the TypeScript core.
+- `sdkCoreVersion` is 0.6.0.
+- Guard: multipart field names match quoted, single-quoted or bare
+  (`name=operations`). `Worker.prototype.constructor` and
+  `SharedWorker.prototype.constructor` are the guarded constructors. Frames
+  added with `append`, `prepend`, `before`, `after`, `replaceWith`,
+  `replaceChildren`, `insertAdjacentElement`, `insertAdjacentHTML`,
+  `innerHTML` and `outerHTML` get the guard at once. webview_flutter cannot
+  inject a script into subframes at document start (see the README).
+- Testing kit: `MealioFakeScript.fromJson` reads the TypeScript kit's script
+  JSON; protocol/fake-script.json runs in the tests. A request held with
+  `fake.hold` never times out.
+
+- `restorePicks` is async: a pick the user found with search is searched again
+  on the new cart and kept only if it comes back. A product the new cart was
+  not offered is never sent.
+- Nothing waits forever: each step of a store sign-out (cookies, the stored
+  epoch, the blank page) gets 10 seconds and stops on cancel. `runExclusive`
+  passes a `CancelToken` and holds the queue at most 60 seconds
+  (`exclusiveCap`); after that the next job loads a blank page first. A job
+  cancelled while it waits in the queue fails with `cancelled` at once.
+- The sheet starts again after an outside cancel at most 3 times in a row
+  (`maxOutsideRestarts`), then shows the error screen with Try again.
+  `resetSession` during the session fetch counts as an outside cancel.
+- A prepare or search cancelled by `cancelJobs` reports `cancelled`, even when
+  its session fetch then fails. `MealioException.reason` says why:
+  `user_changed`, `closed` or `cancelled` (`MealioCancelReason`).
+- Guard: a leading byte order mark is dropped before parsing, raw multipart
+  text bodies are judged by their `operations` part, same-origin frames get
+  the guard, and workers from blob: or data: URLs are refused.
+- `package:mealio_sdk/testing.dart`: `MealioFake` and `MealioFakeScript`, a
+  scripted Mealio for the real client and sheet (`configureMealioForTesting(fake: ...)`).
+
+- One job at a time on the hidden page: prepare, search, add and warm-up queue
+  as whole jobs. Every request has a 30 second timeout (`network`), and every
+  page step ends at its own timeout plus 5 seconds, injection included.
+- `MealioCart.instance.setUser(id)`, `onSignInRequired` on `configure` and
+  `MealioCartButton`. New error codes `session_failed`, `not_signed_in` and
+  `cancelled`.
+- Closing the sheet stops the cart being prepared or searched, and a stopped
+  cart never shows sign-in. While adding, the sheet cannot be closed.
+- After a failed add, Try again keeps the user's picks and the sheet says to
+  check the cart (`addFailedNote`). `CartSession.restorePicks`, `searching`,
+  `cancelSearches`, `warnings`; `addToCart` called twice returns one future.
+- Totals add up in whole cents; the quantity shown is the one sent.
+- Blocked requests also cover a mutation's name and its root fields (inline
+  fragments and fragment spreads at the root included; nested fields,
+  arguments and variables never count), snake_case and form-encoded bodies,
+  GraphQL multipart `operations`, and more order paths. Escaped strings and
+  block strings are skipped. The guard script reads Request objects and Blob
+  bodies; a body it cannot read goes through unless its path is blocked.
+- A user change while a prepare or search waits for its session token cancels
+  it: it never takes the next user's token. An add keeps the token it was
+  tapped under, also on a 401, which fails with `session_expired` after a
+  user change.
+- `runExclusive` holds the queue until its work really ends, even after it
+  reports a timeout.
+- `MealioCartButton` passes prop changes (store, recipes, zip) to its open
+  sheet and its Try again. A sheet hidden during an add still reports the add
+  through `onAdded` and `onClose`. A prepare cancelled by `cancelJobs` or a
+  store sign-out while the sheet is open starts again, with no error.
+- `restorePicks` keeps products the user found with search.
+- Calling `configure` again keeps the user from `setUser`, and widgets follow
+  the new instance (`MealioCart.changes`).
+- The hidden page takes a new bridge nonce for every script, so a late message
+  from the last script cannot answer the next.
+- `package:mealio_sdk/testing.dart`: `installMealioTestPlatform`,
+  `configureMealioForTesting` and a fake WebView platform for widget tests.
+  The job queue works across separate `testWidgets` in one file.
+- The hidden page: a stale or replaced page's finish no longer answers a load,
+  a timed-out load is stopped, a blocked page that starts on its own is
+  replaced with a blank one, and an open sheet follows a remounted
+  `MealioScope`.
+
 ## 0.5.0
 
 - The sheet shows a clear message for the monthly cart cap and per-user cart limits.

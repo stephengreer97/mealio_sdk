@@ -69,17 +69,30 @@ public func addedPrice(_ a: AddedItem, fallback: Product? = nil) -> AddedPrice? 
 
 // The body of addedPrice, under a name CartSession.addedPrice does not shadow.
 private func priceOfAdded(_ a: AddedItem, _ fallback: Product?) -> AddedPrice? {
-    let perLb = a.pricePerLb ?? fallback?.pricePerLb
-    let unit = a.unitPrice ?? fallback?.unitPrice
-    let est = a.estimated ?? fallback?.estimated ?? false
+    priceOfLine(quantity: a.quantity, weightLb: a.weightLb, unitPrice: a.unitPrice, pricePerLb: a.pricePerLb,
+                estimated: a.estimated, fallback)
+}
+
+/// One line's price, from its own fields, else from `fallback`. The list
+/// total and the done total both price lines with this, so the two agree.
+private func priceOfLine(quantity: Int, weightLb: Double?, unitPrice: Double?, pricePerLb: Double?,
+                         estimated: Bool?, _ fallback: Product?) -> AddedPrice? {
+    let perLb = pricePerLb ?? fallback?.pricePerLb
+    let unit = unitPrice ?? fallback?.unitPrice
+    let est = estimated ?? fallback?.estimated ?? false
     func round(_ n: Double) -> Double { (n * 100).rounded() / 100 }
-    if let lb = a.weightLb {
+    if let lb = weightLb {
         if let perLb = perLb { return AddedPrice(amount: round(perLb * lb), estimated: true) }
         if let unit = unit { return AddedPrice(amount: round(unit), estimated: true) }
         return nil
     }
     guard let unit = unit else { return nil }
-    return AddedPrice(amount: round(unit * Double(max(1, a.quantity))), estimated: est)
+    return AddedPrice(amount: round(unit * Double(max(1, quantity))), estimated: est)
+}
+
+/// Whole cents, so adding lines up stays exact.
+private func cents(_ amount: Double) -> Int {
+    Int((amount * 100).rounded())
 }
 
 /// "For Tacos and Pasta": which recipes call for an item, on a cart made from
@@ -135,10 +148,18 @@ public final class CartSession: ObservableObject {
     @Published private var picks: [String: Pick] = [:]
     /// Options found with `search`, by item key, newest first.
     @Published private var extra: [String: [Product]] = [:]
+    /// Per item, the search that found each product (product id -> query),
+    /// so a retry on a new cart can run the search that found the user's pick.
+    private var foundBy: [String: [String: String]] = [:]
     /// Quantities the user changed, by item key.
     @Published private var qty: [String: Int] = [:]
     /// Weights (lb) the user changed, by item key.
     @Published private var lb: [String: Double] = [:]
+    /// An add is under way. A second call waits for its result.
+    private var adding = false
+    private var addWaiters: [CheckedContinuation<Result<AddResult, Error>, Never>] = []
+    /// The searches under way, so closing the sheet can stop them.
+    @Published private var searches: [ObjectIdentifier: CancelToken] = [:]
 
     init(client: MealioClient, cart: PreparedCart) {
         self.client = client
@@ -169,6 +190,8 @@ public final class CartSession: ObservableObject {
     }
     /// The recipes this cart was made from. Older servers: none listed.
     public var recipes: [CartRecipe] { cart.recipes ?? [] }
+    /// What the server changed or ignored in what you sent. Empty from older servers.
+    public var warnings: [CartWarning] { cart.warnings ?? [] }
     /// The recipes that call for an item, for a "For Tacos and Pasta" line.
     /// Empty from older servers.
     public func recipes(for key: String) -> [ItemRecipe] { find(key)?.recipes ?? [] }
@@ -200,9 +223,11 @@ public final class CartSession: ObservableObject {
     public func selectedId(for key: String) -> String? { picks[key]?.productId }
     /// The preference picked with the selected product, if any.
     public func preferenceId(for key: String) -> String? { picks[key]?.preferenceId }
-    /// Packages to add for an item: the recipe's quantity until the user changes it.
+    /// Packages to add for an item: the recipe's quantity until the user
+    /// changes it, never over the selected product's cap. What this returns is
+    /// what is sent.
     public func quantity(for key: String) -> Int {
-        qty[key] ?? max(1, find(key)?.quantity ?? 1)
+        min(qty[key] ?? max(1, find(key)?.quantity ?? 1), maxQuantity(for: key))
     }
 
     /// The most the user can add: the selected product's store cap, else 99.
@@ -319,10 +344,80 @@ public final class CartSession: ObservableObject {
         picks[key] = nil
     }
 
-    /// Search the store for something else and add the results to this item's options.
+    /// Take the user's picks from an earlier cart, after a failed add. Works
+    /// by item key, on the same store: what they unticked stays unticked, and
+    /// a product this cart offers comes back with its quantity, weight and
+    /// preference.
+    ///
+    /// The server only knows a searched product on the cart it was found in,
+    /// so a pick the user found with `search` is never sent here as it was:
+    /// the search that found that product runs again on this cart (it counts
+    /// toward the search cap), and the same product is picked if it comes
+    /// back. If it does not, or the search fails, the item keeps this cart's
+    /// own pick.
+    ///
+    /// It never throws: it ends with whatever it could restore. Pass `cancel`
+    /// to stop the searches (no more run once it fires); `cancelSearches`
+    /// stops them too. Check `cancel.cancelled` afterwards to tell a stop
+    /// from the end.
+    public func restorePicks(from old: CartSession, cancel: CancelToken? = nil, onStep: StepListener? = nil) async {
+        guard old.store == store else { return }
+        var again: [(key: String, productId: String, query: String)] = []
+        for it in items {
+            guard old.find(it.key) != nil else { continue }
+            guard let productId = old.selectedId(for: it.key) else {
+                deselect(key: it.key)
+                continue
+            }
+            if restore(it.key, productId, from: old) { continue }
+            // Not offered here. Found with search there: run that search here.
+            if let q = old.foundBy[it.key]?[productId] { again.append((key: it.key, productId: productId, query: q)) }
+        }
+        for (key, productId, query) in again {
+            if cancel?.cancelled == true { return }
+            do {
+                _ = try await search(key: key, query: query, cancel: cancel, onStep: onStep)
+            } catch {
+                continue
+            }
+            _ = restore(key, productId, from: old)
+        }
+    }
+
+    /// Pick `productId` for `key` as the old cart had it, if this cart offers
+    /// it. Returns false (and changes nothing) when it does not.
+    private func restore(_ key: String, _ productId: String, from old: CartSession) -> Bool {
+        guard let product = options(for: key).first(where: { $0.id == productId }) else { return false }
+        let pref = old.preferenceId(for: key)
+        let keep = (product.preferences ?? []).contains { $0.id == pref }
+        try? select(key: key, productId: productId, preferenceId: keep ? pref : nil)
+        if let n = old.qty[key] { setQuantity(key: key, to: n) }
+        if let w = old.lb[key] { setWeight(key: key, to: w) }
+        return true
+    }
+
+    /// True while a search runs. Keep Add disabled until it ends.
+    public var searching: Bool { !searches.isEmpty }
+
+    /// Stop every search of this cart. Closing the sheet does this.
+    public func cancelSearches() {
+        for c in Array(searches.values) { c.cancel() }
+    }
+
+    /// Search the store for something else and add the results to this item's
+    /// options. Pass `cancel` to stop it; `cancelSearches` stops it too.
     @discardableResult
-    public func search(key: String, query: String, onStep: StepListener? = nil) async throws -> [Product] {
-        let r = try await client.search(cartId: cart.cartId, key: key, query: query, onStep: onStep)
+    public func search(key: String, query: String, cancel: CancelToken? = nil,
+                       onStep: StepListener? = nil) async throws -> [Product] {
+        let token = cancel ?? CancelToken()
+        let id = ObjectIdentifier(token)
+        searches[id] = token
+        defer { searches[id] = nil }
+        let r = try await client.search(cartId: cart.cartId, key: key, query: query, cancel: token, onStep: onStep)
+        var found = foundBy[key] ?? [:]
+        // The first search that found a product is the one restorePicks reruns.
+        for p in r.options where found[p.id] == nil { found[p.id] = query }
+        foundBy[key] = found
         let prev = extra[key] ?? []
         let seen = Set(prev.map(\.id))
         extra[key] = r.options.filter { !seen.contains($0.id) } + prev
@@ -342,7 +437,7 @@ public final class CartSession: ObservableObject {
             if isWeight(it.key) {
                 return Selection(key: it.key, productId: p.productId, quantity: 1, weightLb: weight(for: it.key), remember: true, preferenceId: p.preferenceId)
             }
-            return Selection(key: it.key, productId: p.productId, quantity: min(quantity(for: it.key), maxQuantity(for: it.key)), remember: true, preferenceId: p.preferenceId)
+            return Selection(key: it.key, productId: p.productId, quantity: quantity(for: it.key), remember: true, preferenceId: p.preferenceId)
         }
     }
 
@@ -360,32 +455,25 @@ public final class CartSession: ObservableObject {
     /// 0): a total that leaves an item out is wrong, so show no number at all
     /// ("Prices at checkout"). A weight item priced per lb counts as priced.
     public func estimate() -> CartEstimate {
-        var total = 0.0
+        var total = 0
         var count = 0
         var unpriced = 0
         var estimated = false
         for it in items {
             guard let p = selected(for: it.key), !needsPreference(it.key) else { continue }
             count += 1
-            if p.soldByWeight == true {
-                estimated = true
-                if let perLb = p.pricePerLb {
-                    total += perLb * weight(for: it.key)
-                } else if let unit = p.unitPrice {
-                    total += unit
-                } else {
-                    unpriced += 1
-                }
+            // Priced line by line as the done screen will price it, so the two agree.
+            let byWeight = p.soldByWeight == true
+            if byWeight { estimated = true }
+            guard let line = priceOfLine(quantity: quantity(for: it.key), weightLb: byWeight ? weight(for: it.key) : nil,
+                                         unitPrice: nil, pricePerLb: nil, estimated: nil, p) else {
+                unpriced += 1
                 continue
             }
-            if let unit = p.unitPrice {
-                total += unit * Double(min(quantity(for: it.key), maxQuantity(for: it.key)))
-            } else {
-                unpriced += 1
-            }
-            if p.estimated { estimated = true }
+            total += cents(line.amount)
+            if line.estimated { estimated = true }
         }
-        return CartEstimate(total: unpriced > 0 ? nil : (total * 100).rounded() / 100, count: count,
+        return CartEstimate(total: unpriced > 0 ? nil : Double(total) / 100, count: count,
                             estimated: estimated || unpriced > 0, unpriced: unpriced)
     }
 
@@ -394,7 +482,7 @@ public final class CartSession: ObservableObject {
     /// Prices come from the added entries, else (an older server) from the
     /// product selected in this session.
     public func addedTotal(_ result: AddResult) -> CartEstimate {
-        var total = 0.0
+        var total = 0
         var unpriced = 0
         var estimated = false
         for a in result.added {
@@ -402,10 +490,10 @@ public final class CartSession: ObservableObject {
                 unpriced += 1
                 continue
             }
-            total += p.amount
+            total += cents(p.amount)
             if p.estimated { estimated = true }
         }
-        return CartEstimate(total: unpriced > 0 ? nil : (total * 100).rounded() / 100, count: result.added.count,
+        return CartEstimate(total: unpriced > 0 ? nil : Double(total) / 100, count: result.added.count,
                             estimated: estimated || unpriced > 0, unpriced: unpriced)
     }
 
@@ -415,9 +503,28 @@ public final class CartSession: ObservableObject {
         priceOfAdded(a, selected(for: a.key))
     }
 
-    /// Fill the store cart with the current selections.
+    /// Fill the store cart with the current selections. A second call while
+    /// one is running waits for that same add.
     public func addToCart(onStep: StepListener? = nil) async throws -> AddResult {
-        try await client.addToCart(cartId: cart.cartId, selections: selections(), onStep: onStep)
+        if adding {
+            let shared = await withCheckedContinuation { (c: CheckedContinuation<Result<AddResult, Error>, Never>) in
+                addWaiters.append(c)
+            }
+            return try shared.get()
+        }
+        adding = true
+        let result: Result<AddResult, Error>
+        do {
+            let added = try await client.addToCart(cartId: cart.cartId, selections: selections(), onStep: onStep)
+            result = .success(added)
+        } catch {
+            result = .failure(error)
+        }
+        adding = false
+        let waiters = addWaiters
+        addWaiters = []
+        for w in waiters { w.resume(returning: result) }
+        return try result.get()
     }
 
     // MARK: 0.1 names

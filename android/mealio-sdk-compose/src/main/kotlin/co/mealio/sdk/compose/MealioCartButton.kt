@@ -13,9 +13,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -61,6 +63,9 @@ enum class MealioButtonVariant { SOLID, OUTLINE, COMPACT, ICON }
  *   call `onClick` when it is tapped.
  * @param doneMessage a line of your own on the done screen.
  * @param doneAction a button of your own on the done screen. Tapping it closes the sheet.
+ * @param onSignInRequired called on tap while [MealioCart.setUser] says nobody is
+ *   signed in. Send the user to your sign-in. Without it (or
+ *   MealioCart.onSignInRequired) the button is disabled then.
  */
 @Composable
 fun MealioCartButton(
@@ -78,9 +83,10 @@ fun MealioCartButton(
     button: (@Composable (onClick: () -> Unit, enabled: Boolean, label: String) -> Unit)? = null,
     doneMessage: String? = null,
     doneAction: MealioDoneAction? = null,
+    onSignInRequired: (() -> Unit)? = null,
 ) {
     val recipes = remember(recipe) { listOf(recipe) }
-    MealioCartButton(recipes, store, zip, label, onAdded, onClose, onError, modifier, enabled, theme, variant, button, doneMessage, doneAction)
+    MealioCartButton(recipes, store, zip, label, onAdded, onClose, onError, modifier, enabled, theme, variant, button, doneMessage, doneAction, onSignInRequired)
 }
 
 /** The button for several recipes in one cart, at most MAX_RECIPES. */
@@ -100,22 +106,35 @@ fun MealioCartButton(
     button: (@Composable (onClick: () -> Unit, enabled: Boolean, label: String) -> Unit)? = null,
     doneMessage: String? = null,
     doneAction: MealioDoneAction? = null,
+    onSignInRequired: (() -> Unit)? = null,
 ) {
     val ui = LocalMealioUi.current
     var open by rememberSaveable { mutableStateOf(false) }
+    val user by MealioCart.user.collectAsState()
+    val tap = buttonTap(user.signedIn, enabled, onSignInRequired ?: MealioCart.onSignInRequired)
+    val on = tap != ButtonTap.OFF
     // WARM THE LOGIN CHECK while the user reads the recipe. Only for a known
     // user with a store on file: the server answers "nothing to warm"
-    // otherwise. The client runs it at most once every few minutes.
-    LaunchedEffect(store, enabled) {
-        if (enabled) MealioCart.warm(store)
+    // otherwise. The client runs it at most once every few minutes. Also when
+    // the button turns on, or a new user signs in.
+    LaunchedEffect(store, on, user) {
+        if (on && user.signedIn) MealioCart.warm(store)
     }
     val text = label?.takeIf { it.isNotEmpty() }
         ?: ui.tr(if (variant == MealioButtonVariant.COMPACT) "addToCartShort" else "addToCart")
-    val onClick: () -> Unit = { open = true }
+    val signIn by rememberUpdatedState(onSignInRequired ?: MealioCart.onSignInRequired)
+    val onClick: () -> Unit = {
+        // Read at tap time: the user may have changed since the last draw.
+        when (buttonTap(MealioCart.user.value.signedIn, enabled, signIn)) {
+            ButtonTap.OPEN -> open = true
+            ButtonTap.SIGN_IN -> signIn?.invoke()
+            ButtonTap.OFF -> Unit
+        }
+    }
     if (button != null) {
-        button(onClick, enabled, text)
+        button(onClick, on, text)
     } else {
-        DrawnButton(theme, variant, text, enabled, onClick, modifier)
+        DrawnButton(theme, variant, text, on, onClick, modifier)
     }
     MealioCartFlow(
         visible = open,
@@ -129,6 +148,16 @@ fun MealioCartButton(
         doneMessage = doneMessage,
         doneAction = doneAction,
     )
+}
+
+internal enum class ButtonTap { OPEN, SIGN_IN, OFF }
+
+/** What a tap does: open the sheet, ask the app to sign the user in, or nothing (disabled). */
+internal fun buttonTap(signedIn: Boolean, enabled: Boolean, onSignInRequired: (() -> Unit)?): ButtonTap = when {
+    !enabled -> ButtonTap.OFF
+    signedIn -> ButtonTap.OPEN
+    onSignInRequired != null -> ButtonTap.SIGN_IN
+    else -> ButtonTap.OFF
 }
 
 @Composable

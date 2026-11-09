@@ -9,12 +9,15 @@ export const BLOCKED_PATTERNS: readonly string[] = [
   'payment',
   'billing',
   'wallet',
-  'place-?order',
-  'submit-?order',
-  'order-?confirm',
+  'place[-_]?order',
+  'submit[-_]?order',
+  'order[-_]?confirm',
   'gift-?card',
   '/account/(delete|close|security|password)',
   '/addresses?/(add|edit|delete|new)',
+  '/orders?/(submit|place)(/|\\?|$)',
+  '/cart/confirm',
+  '/purchase(/|\\?|$)',
 ];
 
 const BLOCKED_RE = new RegExp(BLOCKED_PATTERNS.join('|'), 'i');
@@ -179,20 +182,243 @@ export function isBlockedPath(pathAndQuery: string): boolean {
   return BLOCKED_RE.test(s) || BLOCKED_RE.test(decodePercent(s));
 }
 
-/** GraphQL operation names no request may carry (case-insensitive regex source). */
-export const BLOCKED_GRAPHQL_OPERATION = 'checkout|placeorder|submitorder|payment';
+/**
+ * Operation and field names no request may carry (case-insensitive regex
+ * source). Every SDK and the guard script use this exact list.
+ */
+export const BLOCKED_GRAPHQL_OPERATION = 'check_?out|place_?order|submit_?order|confirm_?order|create_?order|purchase|payment';
 const OPS_RE = new RegExp(BLOCKED_GRAPHQL_OPERATION, 'i');
+
+/**
+ * The names a GraphQL document's mutations are judged by: each mutation's own
+ * name, and its ROOT fields. A root field is a field in the mutation's top
+ * selection set, in an inline fragment at that level (`... on Mutation { x }`),
+ * or at the top of a fragment spread there (followed through further spreads).
+ * Aliases, nested fields, arguments, variables, directives, strings and
+ * comments are never names. A query, subscription or fragment on its own gives
+ * none, so a mutation may select `cart { checkoutUrl }` and a query may read
+ * `paymentMethods`.
+ */
+export function mutationNames(doc: string): string[] {
+  const text = doc.replace(/"""(?:\\"""|[\s\S])*?"""|"(?:[^"\\]|\\.)*"|#[^\n\r]*/g, ' ');
+  const tokens = text.match(/[A-Za-z_][A-Za-z0-9_]*|\.\.\.|[{}():@]/g) || [];
+  type Def = { kind: string; name: string; fields: string[]; spreads: string[] };
+  const defs: Def[] = [];
+  let def: Def | null = null;
+  // One entry per open selection set: true when it is at its definition's root.
+  const sets: boolean[] = [];
+  let parens = 0, inline = false, expect = '', pushed = false;
+  for (const t of tokens) {
+    const was = pushed;
+    pushed = false;
+    if (t === '(') { parens += 1; continue; }
+    if (t === ')') { parens = Math.max(0, parens - 1); continue; }
+    if (parens > 0) continue;
+    if (t === '@') { expect = 'directive'; continue; }
+    if (t === '{') {
+      if (!def) { def = { kind: 'query', name: '', fields: [], spreads: [] }; defs.push(def); }
+      sets.push(sets.length === 0 || (inline && sets[sets.length - 1]));
+      inline = false; expect = '';
+      continue;
+    }
+    if (t === '}') {
+      sets.pop();
+      inline = false; expect = '';
+      if (sets.length === 0) def = null;
+      continue;
+    }
+    if (sets.length === 0) {
+      // A definition's header: its keyword, its name, and nothing else counts.
+      if (expect === 'directive') expect = '';
+      else if (!def && /^(query|mutation|subscription|fragment)$/.test(t)) { def = { kind: t, name: '', fields: [], spreads: [] }; defs.push(def); }
+      else if (def && !def.name && t !== 'on' && t !== ':' && t !== '...') def.name = t;
+      continue;
+    }
+    const root = sets[sets.length - 1];
+    if (t === '...') { expect = 'spread'; inline = true; continue; }
+    if (t === ':') { if (was && def) def.fields.pop(); continue; }
+    if (expect === 'directive' || expect === 'type') { expect = ''; continue; }
+    if (expect === 'spread') {
+      expect = '';
+      if (t === 'on') { expect = 'type'; continue; }
+      inline = false;
+      if (root && def) def.spreads.push(t);
+      continue;
+    }
+    inline = false;
+    if (root && def) { def.fields.push(t); pushed = true; }
+  }
+  const fragments = new Map(defs.filter((d) => d.kind === 'fragment').map((d) => [d.name, d] as const));
+  const names: string[] = [];
+  for (const d of defs) {
+    if (d.kind !== 'mutation') continue;
+    if (d.name) names.push(d.name);
+    const seen = new Set<string>();
+    const walk = (x: Def) => {
+      names.push(...x.fields);
+      for (const s of x.spreads) {
+        const f = fragments.get(s);
+        if (f && !seen.has(s)) { seen.add(s); walk(f); }
+      }
+    };
+    walk(d);
+  }
+  return names;
+}
+
+/**
+ * A field of a multipart/form-data body sent as raw text (a string with the
+ * boundaries in it, not a FormData). Group 1 is the field's name, group 2 its
+ * value: everything after the part's blank line up to the next boundary line
+ * or the end. Parts named operationName, query and operations are judged as
+ * the form fields of the same names. The name may be double-quoted,
+ * single-quoted or bare (`name=operations`), as servers accept all three; a
+ * longer name (`operationsX`) is a different field.
+ *
+ * This is the SPEC, not the implementation: run as a regex it takes time
+ * quadratic in the body (a body of `name=query\n` lines rescans every line
+ * from every name). multipartFields finds exactly the same matches in one
+ * pass; every SDK ports multipartFields and tests it against this regex.
+ */
+export const MULTIPART_FIELD = String.raw`name=["']?(operationName|query|operations)(?=["';\s]|$)[^\r\n]*\r?\n(?:[^\r\n]+\r?\n)*\r?\n([\s\S]*?)(?=\r?\n--|$)`;
+
+/**
+ * JavaScript's `\s`, which MULTIPART_FIELD's lookahead uses. Other
+ * languages' `\s` differ (Kotlin's and Swift's), so ports test this set.
+ */
+export function isJsSpace(c: number): boolean {
+  return c === 0x20 || (c >= 0x09 && c <= 0x0d) || c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a)
+    || c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000 || c === 0xfeff;
+}
+
+const PART_NAMES = ['operationName', 'query', 'operations'];
+
+/**
+ * Every match of MULTIPART_FIELD (flag g) in a body, as [name, value] pairs,
+ * in one linear pass. Port it line for line:
+ *
+ * 1. Find the next `name=` at or after `from`. Skip one `"` or `'` after it.
+ *    The name is operationName, query or operations (tried in that order),
+ *    followed by the end, `"`, `'`, `;` or a JS space (isJsSpace). Otherwise
+ *    try the next `name=` one character later.
+ * 2. The header line runs to the first CR or LF. It must end in LF or CRLF.
+ * 3. Then any number of non-empty lines, each ending in LF or CRLF, then an
+ *    empty line (LF or CRLF). The value starts after it. A line ending in a
+ *    lone CR, or the end of the body, means no match.
+ * 4. The value runs to the first `\n--` or `\r\n--` at or after its start,
+ *    or to the end. The next search starts where the value ends.
+ *
+ * Two caches keep it linear. Step 2's first break is cached as a range: every
+ * later name before that break shares it. Step 3's outcome is cached for the
+ * run of lines it walked: a later header that ends inside that run reaches
+ * the same blank line (or the same failure), so the run is never walked twice.
+ */
+export function multipartFields(body: string): Array<[string, string]> {
+  const out: Array<[string, string]> = [];
+  const n = body.length;
+  // nextBreak(p) for p in [brkFrom, brkAt] is brkAt.
+  let brkFrom = -1, brkAt = -1;
+  // valueStart(p) for p in [runFrom, runTo] is runValue (-1: no match).
+  let runFrom = -1, runTo = -1, runValue = -1;
+  let from = 0;
+  for (;;) {
+    const c = body.indexOf('name=', from);
+    if (c < 0) break;
+    from = c + 1;
+    let k = c + 5;
+    if (body[k] === '"' || body[k] === "'") k += 1;
+    let name = '';
+    for (const x of PART_NAMES) if (body.startsWith(x, k)) { name = x; break; }
+    if (!name) continue;
+    const j = k + name.length;
+    if (j < n) {
+      const ch = body.charCodeAt(j);
+      if (ch !== 0x22 && ch !== 0x27 && ch !== 0x3b && !isJsSpace(ch)) continue;
+    }
+    // 2. The header line.
+    let q: number;
+    if (j >= brkFrom && j <= brkAt) q = brkAt;
+    else {
+      q = j;
+      while (q < n && body.charCodeAt(q) !== 0x0d && body.charCodeAt(q) !== 0x0a) q += 1;
+      brkFrom = j; brkAt = q;
+    }
+    let p: number;
+    if (q < n && body.charCodeAt(q) === 0x0a) p = q + 1;
+    else if (q + 1 < n && body.charCodeAt(q) === 0x0d && body.charCodeAt(q + 1) === 0x0a) p = q + 2;
+    else continue;
+    // 3. Header lines, then the blank line.
+    let v: number;
+    if (p >= runFrom && p <= runTo) v = runValue;
+    else {
+      let s = p;
+      v = -1;
+      for (;;) {
+        if (s >= n) break;
+        const h = body.charCodeAt(s);
+        if (h === 0x0a) { v = s + 1; break; }
+        if (h === 0x0d) { if (s + 1 < n && body.charCodeAt(s + 1) === 0x0a) v = s + 2; break; }
+        let e = s;
+        while (e < n && body.charCodeAt(e) !== 0x0d && body.charCodeAt(e) !== 0x0a) e += 1;
+        if (e < n && body.charCodeAt(e) === 0x0a) s = e + 1;
+        else if (e + 1 < n && body.charCodeAt(e) === 0x0d && body.charCodeAt(e + 1) === 0x0a) s = e + 2;
+        else break;
+      }
+      runFrom = p; runTo = s; runValue = v;
+    }
+    if (v < 0) continue;
+    // 4. The value.
+    let end = body.indexOf('\n--', v);
+    if (end < 0) end = n;
+    else if (end > v && body.charCodeAt(end - 1) === 0x0d) end -= 1;
+    out.push([name, body.slice(v, end)]);
+    from = end;
+  }
+  return out;
+}
 
 /**
  * Does a request body name a blocked operation? Reads `operationName` the way
  * the server will (after JSON parsing, so `\\u004f` escapes do not hide it),
- * for a single request or a batch, and the names of any mutations in `query`.
- * The guard script applies the same rule to requests a page script makes; this
- * applies it to the runner's own `fetch` op, which never passes through the page.
+ * for a single request or a batch, or form-encoded, and the names of every
+ * mutation it carries (see mutationNames). A GraphQL multipart upload's
+ * `operations` field is JSON and is judged like a JSON body, whether it comes
+ * form-encoded or as raw multipart text (multipartFields). A leading byte
+ * order mark is dropped first, as a server's JSON reader would. A persisted
+ * query that sends only an innocent name and a hash cannot be read here; the
+ * signature on the envelope covers it. The guard script applies the same rule
+ * to requests a page script makes; this applies it to the runner's own `fetch`
+ * op, which never passes through the page. A body nested deeper than
+ * BODY_MAX_DEPTH is blocked, and so is one longer than BODY_MAX_TEXT.
  */
 export function bodyBlocked(body: string | null | undefined): boolean {
-  if (typeof body !== 'string' || !body) return false;
+  return judged(body, 0);
+}
+
+/**
+ * How many times a body may nest inside an `operations` field (form-encoded
+ * or a raw multipart part) and still be read. One nested deeper is blocked.
+ */
+export const BODY_MAX_DEPTH = 8;
+
+/**
+ * The longest body (in UTF-16 code units, after a leading byte order mark is
+ * dropped) that is parsed. A longer one is blocked unread: store requests
+ * are far smaller, and a text match over megabytes could miss a name hidden
+ * in escapes.
+ */
+export const BODY_MAX_TEXT = 1048576;
+
+function judged(body: string | null | undefined, depth: number): boolean {
+  if (typeof body !== 'string') return false;
+  if (body.charCodeAt(0) === 0xfeff) body = body.slice(1);
+  if (!body) return false;
+  if (depth > BODY_MAX_DEPTH) return true;
+  // Store requests are far smaller. A body this big is refused unread: a text
+  // match could miss a blocked name hidden in escapes.
+  if (body.length > BODY_MAX_TEXT) return true;
   const names: string[] = [];
+  const docs: string[] = [];
   const raw = /"operationName"\s*:\s*"([^"]*)"/g;
   for (let m = raw.exec(body); m; m = raw.exec(body)) names.push(m[1]);
   try {
@@ -200,11 +426,24 @@ export function bodyBlocked(body: string | null | undefined): boolean {
     for (const o of Array.isArray(j) ? j : [j]) {
       if (!o || typeof o !== 'object') continue;
       if (typeof o.operationName === 'string') names.push(o.operationName);
-      if (typeof o.query === 'string') {
-        const q = /\bmutation\s+([A-Za-z_][A-Za-z0-9_]*)/g;
-        for (let m = q.exec(o.query); m; m = q.exec(o.query)) names.push(m[1]);
-      }
+      if (typeof o.query === 'string') docs.push(o.query);
     }
-  } catch { /* not JSON: the raw scan above stands */ }
+  } catch {
+    // Not JSON: form-encoded, raw multipart, or a bare GraphQL document.
+    docs.push(body);
+    const form = /(?:^|&)(operationName|query|operations)=([^&]*)/g;
+    for (let m = form.exec(body); m; m = form.exec(body)) {
+      const v = decodePercent(m[2].replace(/\+/g, ' '));
+      if (m[1] === 'query') docs.push(v);
+      else if (m[1] === 'operations') { if (judged(v, depth + 1)) return true; }
+      else names.push(v);
+    }
+    for (const [name, value] of multipartFields(body)) {
+      if (name === 'query') docs.push(value);
+      else if (name === 'operations') { if (judged(value, depth + 1)) return true; }
+      else names.push(value);
+    }
+  }
+  for (const d of docs) names.push(...mutationNames(d));
   return names.some((n) => OPS_RE.test(n));
 }

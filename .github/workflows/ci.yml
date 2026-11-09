@@ -5,11 +5,17 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      only:
+        description: 'Run one job only (typescript, android, flutter or ios). Empty runs all.'
+        required: false
+        default: ''
   # The release workflow runs the whole suite before it publishes anything.
   workflow_call:
 
 jobs:
   typescript:
+    if: ${{ !inputs.only || inputs.only == 'typescript' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,6 +32,7 @@ jobs:
       - run: node scripts/check-skill.mjs
 
   android:
+    if: ${{ !inputs.only || inputs.only == 'android' }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -37,11 +44,12 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: gradle/actions/setup-gradle@v3
-      - run: ./gradlew :mealio-sdk:testDebugUnitTest :mealio-sdk:assembleRelease :mealio-sdk-compose:assembleRelease
+      - run: ./gradlew testDebugUnitTest assembleRelease
       # The Maven Central artifacts (AAR, sources, javadoc, POM), unsigned, to the local repo.
       - run: ./gradlew publishToMavenLocal
 
   flutter:
+    if: ${{ !inputs.only || inputs.only == 'flutter' }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -57,6 +65,7 @@ jobs:
       - run: dart pub publish --dry-run
 
   ios:
+    if: ${{ !inputs.only || inputs.only == 'ios' }}
     runs-on: macos-15
     defaults:
       run:

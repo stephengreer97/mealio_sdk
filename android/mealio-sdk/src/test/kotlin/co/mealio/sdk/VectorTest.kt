@@ -1,6 +1,7 @@
 package co.mealio.sdk
 
 import kotlinx.coroutines.runBlocking
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -72,6 +73,60 @@ class VectorTest {
         for (c in cases) {
             val body = c.getString("body")
             assertEquals(body, c.getBoolean("blocked"), bodyBlocked(body))
+        }
+    }
+
+    @Test
+    fun jsonBodyCases() {
+        // 0.6 round 4: StrictJson reads exactly what JSON.parse reads (depth, \\u hex digits, lone surrogates).
+        val cases = Vectors.json.getJSONArray("jsonBodies").objects()
+        assertTrue(cases.isNotEmpty())
+        for (c in cases) {
+            val body = c.getString("body")
+            assertEquals("${c.optString("rule")}: ${body.take(80)}", c.getBoolean("blocked"), bodyBlocked(body))
+        }
+    }
+
+    /** Runs [f] on a 1 MB stack, as a WebView callback or a worker may have. */
+    private fun <T> onSmallStack(f: () -> T): T {
+        var r: Result<T>? = null
+        val t = Thread(null, { r = runCatching(f) }, "small", 1024L * 1024)
+        t.start()
+        t.join()
+        return r!!.getOrThrow()
+    }
+
+    @Test
+    fun bodyLimitCases() {
+        // 0.6 round 5: operations nested past BODY_MAX_DEPTH are blocked; past BODY_MAX_TEXT, the plain text decides.
+        val cases = Vectors.json.getJSONArray("bodyLimits").objects()
+        assertTrue(cases.isNotEmpty())
+        for (c in cases) {
+            val body = c.getString("prefix") + c.getString("fill").repeat(c.getInt("times")) + c.getString("suffix")
+            val label = "${c.getString("rule")} ${c.getString("fill").take(20)} x${c.getInt("times")} ${c.getString("suffix").take(40)}"
+            assertEquals(label, c.getBoolean("blocked"), onSmallStack { bodyBlocked(body) })
+        }
+    }
+
+    private fun depthOf(v: Any?): Int = when (v) {
+        is JSONObject -> 1 + (v.keys().asSequence().maxOfOrNull { depthOf(v.opt(it)) } ?: 0)
+        is JSONArray -> 1 + ((0 until v.length()).maxOfOrNull { depthOf(v.opt(it)) } ?: 0)
+        else -> 0
+    }
+
+    @Test
+    fun deepMessageCases() {
+        // 0.6 round 5: a page message keeps containers to depth 512; deeper ones come back empty.
+        val cases = Vectors.json.getJSONArray("deepMessages").objects()
+        assertTrue(cases.isNotEmpty())
+        for (c in cases) {
+            val n = c.getInt("times")
+            val raw = c.getString("prefix") + c.getString("open").repeat(n) + c.getString("close").repeat(n) + c.getString("suffix")
+            val m = onSmallStack { parseMessage(raw) }
+            val label = "${c.getString("open")} x$n"
+            assertTrue(label, m != null)
+            assertEquals(label, c.getInt("depth"), depthOf(m))
+            assertEquals(label, c.getInt("keep"), m!!.getInt("keep"))
         }
     }
 

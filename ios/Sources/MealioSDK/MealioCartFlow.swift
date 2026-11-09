@@ -145,11 +145,13 @@ public struct MealioCartFlow: View {
     private var named: Bool { model.cart?.storeName != nil || model.store != nil }
 
     public var body: some View {
+        let _ = model.latest(onAdded: onAdded, onError: onError)
         VStack(spacing: 0) {
             MealioGrabber(t: t)
             MealioFlowHeader(t: t, recipeTitle: kicker, photos: mealioRecipePhotos(recipes),
                              title: model.login?.title ?? headerTitle,
-                             onClose: { dismiss() })
+                             onClose: { requestClose() },
+                             closeDisabled: model.phase == .adding && model.login == nil)
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
@@ -159,10 +161,28 @@ public struct MealioCartFlow: View {
         .onAppear {
             model.open(recipes: recipes, store: store, zip: zip, onAdded: onAdded, onError: onError)
         }
+        .onChange(of: store) { next in model.storeChanged(next) }
+        .onChange(of: model.closeRequested) { asked in
+            if asked { requestClose() }
+        }
         .onDisappear {
-            // Close button, Done, or a swipe: all end here, exactly once.
+            // A swipe, or the partner hiding the sheet, ends here. A button
+            // reported already; this is then a no-op but for the done action.
             model.close(onClose)
         }
+    }
+
+    /// Every close button lands here. `onClose` fires now, from the button,
+    /// so it fires even where `dismiss` does nothing (a UIKit host: dismiss
+    /// your hosting controller in `onClose`). While adding nothing closes, but
+    /// a sign-in the add asked for can still be dismissed.
+    private func requestClose() {
+        guard model.canClose else {
+            model.login?.cancel()
+            return
+        }
+        model.closeFromButton(onClose)
+        dismiss()
     }
 
     private var headerTitle: String {
@@ -209,12 +229,13 @@ public struct MealioCartFlow: View {
                                   onBack: model.canGoBackToList ? { model.backToList() } : nil)
             case .location:
                 if let store = model.store {
+                    let visit = model.locationVisit
                     MealioLocationPicker(t: t, store: store, storeName: storeName,
                                          zip: model.locationZip, current: model.cart?.location?.id,
-                                         onPicked: { _ in model.locationPicked() },
+                                         onPicked: { _ in model.locationPicked(visit: visit) },
                                          back: locationBack)
                 } else {
-                    MealioErrorView(t: t, error: model.error, onRetry: { model.start() }, onClose: { dismiss() })
+                    MealioErrorView(t: t, error: model.error, onRetry: { model.retry() }, onClose: { requestClose() })
                 }
             case .list, .adding:
                 if let cart = model.cart {
@@ -227,18 +248,20 @@ public struct MealioCartFlow: View {
                 }
             case .done:
                 if let cart = model.cart, let result = model.result {
-                    MealioDoneView(t: t, cart: cart, result: result, storeName: storeName, onDone: { dismiss() },
+                    MealioDoneView(t: t, cart: cart, result: result, storeName: storeName, onDone: { requestClose() },
                                    message: doneMessage, actionLabel: doneAction?.label,
                                    onAction: {
                                        guard let action = doneAction else { return }
                                        model.afterClose { action.handler(result) }
-                                       dismiss()
+                                       requestClose()
                                    })
                 } else {
-                    MealioErrorView(t: t, error: model.error, onRetry: { model.start() }, onClose: { dismiss() })
+                    MealioErrorView(t: t, error: model.error, onRetry: { model.retry() }, onClose: { requestClose() })
                 }
             case .error:
-                MealioErrorView(t: t, error: model.error, onRetry: { model.start() }, onClose: { dismiss() })
+                MealioErrorView(t: t, error: model.error,
+                                note: model.failedAdd != nil ? ui.tr(.addFailedNote) : nil,
+                                onRetry: { model.retry() }, onClose: { requestClose() })
             }
         }
     }
@@ -261,8 +284,26 @@ final class MealioFlowModel: ObservableObject {
     @Published var store: String?
     /// Stores for the picker; nil until loaded.
     @Published var stores: [StoreInfo]?
+    /// The cart of an add that failed, so Try again keeps the user's picks.
+    @Published private(set) var failedAdd: CartSession?
+    /// Set when the sheet should close itself (the user changed).
+    @Published private(set) var closeRequested = false
 
     private var run = 0
+    /// Restarts after an outside cancel, in a row, for this opening. Reset by
+    /// a prepare that works and by any user action (Try again, a store pick).
+    private(set) var restarts = 0
+    static let maxRestarts = 3
+    /// The prepare under way, so closing can stop it.
+    private var preparing: CancelToken?
+    /// Bumped each time the location step opens, so a save that finishes after
+    /// the user left the step starts nothing.
+    private(set) var locationVisit = 0
+    /// The user the sheet was opened for (MealioCart's user generation).
+    private var openedFor = 0
+    private var userSub: AnyCancellable?
+    /// The user changed during an add: close once it ends.
+    private var closeAfterAdd = false
     private var hosting = false
     private weak var host: WebViewHost?
     private var loginSub: AnyCancellable?
@@ -272,6 +313,8 @@ final class MealioFlowModel: ObservableObject {
     private var onAdded: ((AddResult) -> Void)?
     private var onError: ((Error) -> Void)?
     private var runAfterClose: (() -> Void)?
+    /// The sheet was hidden mid-add: `onClose`, called when the add ends.
+    private var reportAfterAdd: ((AddResult?) -> Void)?
 
     // VERIFY: nonisolated so @StateObject's default value can build it; every
     // property default above is a plain constant.
@@ -286,6 +329,13 @@ final class MealioFlowModel: ObservableObject {
         self.zip = zip
         self.onAdded = onAdded
         self.onError = onError
+        failedAdd = nil
+        closeRequested = false
+        closeAfterAdd = false
+        restarts = 0
+        openedFor = MealioCart.users.generation
+        // VERIFY: as loginSub below, formed in this @MainActor method.
+        userSub = MealioCart.users.$generation.sink { [weak self] gen in self?.userChanged(gen) }
         MealioCart.emit(.sheetOpened(recipes: recipes.count))
         if let host = MealioCart.host {
             self.host = host
@@ -298,6 +348,39 @@ final class MealioFlowModel: ObservableObject {
         }
         start()
     }
+
+    /// Callbacks change with the partner's view: the latest are always the
+    /// ones called. Nothing here is published, so it is safe from `body`.
+    func latest(onAdded: ((AddResult) -> Void)?, onError: ((Error) -> Void)?) {
+        self.onAdded = onAdded
+        self.onError = onError
+    }
+
+    /// The partner's `store` changed while the sheet is up: a cart still
+    /// loading moves to it, and Try again uses it. A finished list stays.
+    func storeChanged(_ next: String?) {
+        guard hosting else { return }
+        if phase == .loading {
+            store = next
+            start()
+        } else if phase == .error {
+            store = next
+        }
+    }
+
+    /// What is on screen was the old user's. An add finishes first.
+    private func userChanged(_ gen: Int) {
+        guard hosting, gen != openedFor else { return }
+        failedAdd = nil
+        if phase == .adding {
+            closeAfterAdd = true
+        } else {
+            closeRequested = true
+        }
+    }
+
+    /// False while adding: an add cannot be stopped, so the sheet stays.
+    var canClose: Bool { phase != .adding }
 
     /// The sign-in coming up is the event. One replacing another is not.
     func loginChanged(_ value: LoginSheet?) {
@@ -323,6 +406,9 @@ final class MealioFlowModel: ObservableObject {
     func start() {
         run += 1
         let id = run
+        preparing?.cancel()
+        let cancel = CancelToken()
+        preparing = cancel
         phase = .loading
         step = .connecting
         cart = nil
@@ -333,11 +419,26 @@ final class MealioFlowModel: ObservableObject {
             do {
                 // No zip: which store the user shops at is theirs to say, so the
                 // partner's zip only fills the box on the location step.
-                let c = try await MealioCart.prepareCart(store: store, recipes: recipes, onStep: { s, _ in
+                let c = try await MealioCart.prepareCart(store: store, recipes: recipes, cancel: cancel, onStep: { s, _ in
                     guard let self = self, self.run == id else { return }
                     self.step = s
                 })
                 guard let self = self, self.run == id else { return }
+                if let old = self.failedAdd {
+                    // A searched pick is searched again on this cart; never sent as it was.
+                    await c.restorePicks(from: old, cancel: cancel, onStep: { [weak self] s, _ in
+                        guard let self = self, self.run == id else { return }
+                        self.step = s
+                    })
+                    guard self.run == id else { return }
+                    // restorePicks never throws. A cancel from outside the
+                    // sheet while it ran restarts like any outside cancel.
+                    if cancel.cancelled {
+                        throw MealioError(code: MealioError.Code.cancelled, message: "Cancelled", reason: cancel.reason ?? .cancelled)
+                    }
+                    self.failedAdd = nil
+                }
+                self.restarts = 0
                 self.store = c.store
                 self.cart = c
                 self.phase = .list
@@ -345,6 +446,21 @@ final class MealioFlowModel: ObservableObject {
             } catch {
                 guard let self = self, self.run == id else { return }
                 let code = (error as? MealioError)?.code
+                // Closing bumped `run`, so this was something else (a store
+                // sign-out, cancelJobs, a session reset): the sheet is still up,
+                // so prepare again, at most `maxRestarts` times in a row; then
+                // the error screen with Try again. A user change closes the
+                // sheet instead.
+                if code == MealioError.Code.cancelled {
+                    guard self.hosting, !self.closeRequested else { return }
+                    if self.restarts < MealioFlowModel.maxRestarts {
+                        self.restarts += 1
+                        self.start()
+                    } else {
+                        self.fail(error, step: .loading)
+                    }
+                    return
+                }
                 if code == MealioError.Code.storeRequired || code == MealioError.Code.storeNotAllowed {
                     // No store given, or one this app does not offer: let the user pick.
                     self.store = nil
@@ -362,11 +478,14 @@ final class MealioFlowModel: ObservableObject {
         }
     }
 
-    /// Show the store picker. Loads the stores the first time.
+    /// Show the store picker. Loads the stores the first time, and again
+    /// after a load that failed.
     func openStores(from: Phase) {
         backTo = from
         phase = .stores
-        guard stores == nil else { return }
+        // An empty list is a load that failed: try again each time.
+        if let loaded = stores, !loaded.isEmpty { return }
+        stores = nil
         Task { [weak self] in
             let list: [StoreInfo]
             do { list = try await MealioCart.stores() } catch { list = [] }
@@ -378,6 +497,7 @@ final class MealioFlowModel: ObservableObject {
     func openLocation(from: Phase) {
         if let store = store { MealioCart.emit(.locationAsked(store: store)) }
         backTo = from
+        locationVisit += 1
         phase = .location
     }
 
@@ -385,9 +505,11 @@ final class MealioFlowModel: ObservableObject {
     var locationZip: String? { cart?.location?.zip ?? zip }
 
     /// The user chose a store and it is saved: restart the cart there. Nothing
-    /// to restart if the sheet closed while the choice was saving.
-    func locationPicked() {
-        guard hosting else { return }
+    /// to restart if the sheet closed, or the user left the location step,
+    /// while the choice was saving. `visit` is the step the pick was made on.
+    func locationPicked(visit: Int? = nil) {
+        guard hosting, phase == .location, visit == nil || visit == locationVisit else { return }
+        restarts = 0
         start()
     }
 
@@ -395,6 +517,13 @@ final class MealioFlowModel: ObservableObject {
     func pick(_ id: String) {
         MealioCart.emit(.storePicked(store: id))
         store = id
+        restarts = 0
+        start()
+    }
+
+    /// The user tapped Try again.
+    func retry() {
+        restarts = 0
         start()
     }
 
@@ -405,23 +534,60 @@ final class MealioFlowModel: ObservableObject {
     }
 
     func add() {
-        guard let cart = cart, phase == .list else { return }
+        guard let cart = cart, phase == .list, !cart.searching else { return }
         let id = run
         phase = .adding
         MealioCart.emit(.addStarted(items: cart.estimate().count))
-        Task { [weak self] in
+        // Holds the model: a sheet hidden mid-add still reports when it ends.
+        Task {
+            let outcome: Result<AddResult, Error>
             do {
                 let r = try await cart.addToCart()
-                guard let self = self, self.run == id else { return }
-                self.result = r
-                self.phase = .done
-                MealioCart.emit(.cartAdded(store: r.store, added: r.added.count, failed: r.failed.count))
-                self.onAdded?(r)
+                outcome = .success(r)
             } catch {
-                guard let self = self, self.run == id else { return }
-                self.fail(error, step: .adding, fallback: MealioCart.text.tr(.couldNotAdd))
+                outcome = .failure(error)
             }
+            self.addEnded(outcome, cart: cart, run: id)
         }
+    }
+
+    private func addEnded(_ outcome: Result<AddResult, Error>, cart: CartSession, run id: Int) {
+        if let report = reportAfterAdd {
+            // The partner hid the sheet while adding. Nothing is drawn now,
+            // but the partner still hears how it went.
+            reportAfterAdd = nil
+            switch outcome {
+            case .success(let r):
+                MealioCart.emit(.cartAdded(store: r.store, added: r.added.count, failed: r.failed.count))
+                onAdded?(r)
+                report(r)
+            case .failure(let e):
+                MealioCart.emit(.error(code: (e as? MealioError)?.code ?? "error", step: .adding))
+                onError?(e)
+                report(nil)
+            }
+            return
+        }
+        guard run == id else { return }
+        switch outcome {
+        case .success(let r):
+            result = r
+            phase = .done
+            MealioCart.emit(.cartAdded(store: r.store, added: r.added.count, failed: r.failed.count))
+            onAdded?(r)
+        case .failure(let e):
+            failedAdd = cart
+            fail(e, step: .adding, fallback: MealioCart.text.tr(.couldNotAdd))
+        }
+        afterAdd()
+    }
+
+    /// The user changed while adding: now the sheet can close.
+    private func afterAdd() {
+        guard closeAfterAdd else { return }
+        closeAfterAdd = false
+        failedAdd = nil
+        closeRequested = true
     }
 
     /// Run `action` once the sheet has gone, after `onClose`. Waiting matters:
@@ -432,20 +598,56 @@ final class MealioFlowModel: ObservableObject {
         runAfterClose = action
     }
 
-    /// The sheet went away. Stops listening, cancels an open sign-in, and
-    /// reports once: the result when the cart was filled, nil otherwise.
-    func close(_ report: (AddResult?) -> Void) {
+    /// The sheet went away. Stops what can be stopped, cancels an open
+    /// sign-in, reports once (the result when the cart was filled, nil
+    /// otherwise), then runs the done action.
+    func close(_ report: @escaping (AddResult?) -> Void) {
+        closeNow(report)
+        runPendingAfterClose()
+    }
+
+    /// A close button: report now, so `onClose` fires even where dismissing
+    /// does nothing (a UIKit host). The done action waits for the sheet to go,
+    /// or a second, whichever is first.
+    func closeFromButton(_ report: @escaping (AddResult?) -> Void) {
+        closeNow(report)
+        if runAfterClose != nil {
+            after(1000) { [weak self] in self?.runPendingAfterClose() }
+        }
+    }
+
+    /// Hidden mid-add (the partner set `isPresented` false; the user cannot
+    /// close then), the add runs on and `report` waits for it. The sheet stops
+    /// hosting sign-in: one on screen moves to a modal, and one the add asks
+    /// for later is shown modally.
+    private func closeNow(_ report: @escaping (AddResult?) -> Void) {
         guard hosting else { return }
         hosting = false
+        let adding = phase == .adding
         run += 1
+        // Nothing it was doing reports afterwards. An add is not stopped.
+        preparing?.cancel(reason: .closed)
+        preparing = nil
+        cart?.cancelSearches()
         let outcome = phase == .done ? result : nil
         MealioCart.emit(.sheetClosed(step: sheetStep, added: outcome?.added.count ?? 0))
-        login?.cancel()
+        // Mid-add, a sign-in on screen belongs to the add, which runs on:
+        // the host moves it to a modal when this sheet stops hosting.
+        if !adding { login?.cancel() }
         loginSub?.cancel()
         loginSub = nil
+        userSub?.cancel()
+        userSub = nil
         login = nil
         host?.hostLogin(false)
+        if adding {
+            reportAfterAdd = report
+            return
+        }
         report(outcome)
+    }
+
+    private func runPendingAfterClose() {
         let after = runAfterClose
         runAfterClose = nil
         after?()
@@ -455,6 +657,11 @@ final class MealioFlowModel: ObservableObject {
         var shown = (e as? MealioError) ?? MealioError(code: "error", message: e.localizedDescription)
         if shown.message.isEmpty, let fallback = fallback {
             shown = MealioError(code: shown.code, message: fallback)
+        }
+        // After the restart cap, a cancel's own text ("Cancelled") means
+        // nothing to the user: show the normal error sentence.
+        if shown.code == MealioError.Code.cancelled {
+            shown = MealioError(code: shown.code, message: MealioCart.text.tr(.somethingWrongSentence), reason: shown.reason)
         }
         error = shown
         phase = .error
@@ -509,6 +716,8 @@ struct MealioFlowHeader: View {
     var photos: [URL] = []
     let title: String
     let onClose: () -> Void
+    /// While adding, nothing closes the sheet.
+    var closeDisabled = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -553,6 +762,8 @@ struct MealioFlowHeader: View {
                     .background(Circle().fill(t.surface))
             }
             .buttonStyle(.plain)
+            .disabled(closeDisabled)
+            .opacity(closeDisabled ? 0.4 : 1)
             .accessibilityLabel(MealioCart.text.tr(.close))
         }
         .padding(.horizontal, 20)
@@ -775,7 +986,8 @@ public struct MealioCartList: View {
     }
 
     private func footer(_ est: CartEstimate) -> some View {
-        let off = busy || est.count == 0
+        // Off while a search runs: what the user is looking for may change the list.
+        let off = busy || est.count == 0 || cart.searching
         let label = est.count > 0
             ? ui.plural("addItems", est.count, ["store": storeName])
             : ui.tr(.selectItems)
@@ -1194,14 +1406,16 @@ struct MealioItemRow: View {
         }
     }
 
-    private func pick(_ p: Product, preferenceId: String?) {
+    func pick(_ p: Product, preferenceId: String?) {
         guard !disabled else { return }
+        // An option tap that ticks the item is a check, as the box is.
+        if !cart.isSelected(item.key) { MealioCart.emit(.itemChecked(key: item.key)) }
         try? cart.select(key: item.key, productId: p.id, preferenceId: preferenceId)
     }
 
     private func runSearch() {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard q.count >= 2, !searching else { return }
+        guard q.count >= 2, !searching, !disabled else { return }
         searching = true
         searchNote = nil
         let cart = self.cart
@@ -1212,7 +1426,10 @@ struct MealioItemRow: View {
                 searchNote = found.isEmpty ? ui.tr(.nothingFound, ["query": q]) : nil
                 query = ""
             } catch {
-                searchNote = mealioProblem(error, ui.tr(.searchFailed))
+                // Stopped because the sheet closed: nothing to say.
+                if (error as? MealioError)?.code != MealioError.Code.cancelled {
+                    searchNote = mealioProblem(error, ui.tr(.searchFailed))
+                }
             }
             searching = false
         }
@@ -1982,6 +2199,8 @@ struct MealioStorePicker: View {
 struct MealioErrorView: View {
     let t: MealioTheme
     let error: MealioError?
+    /// After a failed add: some items may be in the cart already.
+    var note: String? = nil
     let onRetry: () -> Void
     let onClose: () -> Void
 
@@ -2001,6 +2220,13 @@ struct MealioErrorView: View {
                 .font(t.font(15))
                 .foregroundColor(t.text)
                 .fixedSize(horizontal: false, vertical: true)
+            if let note = note {
+                Text(note)
+                    .font(t.font(14))
+                    .foregroundColor(t.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("mealio-add-failed-note")
+            }
             Spacer(minLength: 0)
             MealioCTA(t: t, title: ui.tr(.tryAgain), action: onRetry)
             MealioCTA(t: t, title: ui.tr(.close), quiet: true, action: onClose)

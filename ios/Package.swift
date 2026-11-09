@@ -24,13 +24,18 @@ let package = Package(
             dependencies: ["MealioSDK"],
             path: "Tests/MealioSDKTests",
             resources: [
-                // test-vectors.json and strings.json are copies of the files in
-                // ../protocol.
-                // guard-script.js and bridge-shim.js are the exact text of
-                // GUARD_SCRIPT and BRIDGE_SHIM generated from the TS reference.
+                // test-vectors.json, strings.json, fake-script.json and
+                // shared-identity-hosts.json are copies of the files in
+                // ../protocol (IdentityTests checks the last against it).
+                // guard-script.js, guard-arm.js and bridge-shim.js are the
+                // exact text of GUARD_SCRIPT, GUARD_ARM and BRIDGE_SHIM
+                // generated from the TS reference.
                 .copy("Resources/test-vectors.json"),
                 .copy("Resources/strings.json"),
+                .copy("Resources/fake-script.json"),
+                .copy("Resources/shared-identity-hosts.json"),
                 .copy("Resources/guard-script.js"),
+                .copy("Resources/guard-arm.js"),
                 .copy("Resources/bridge-shim.js"),
             ]
         ),

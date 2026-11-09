@@ -92,6 +92,8 @@ class _MealioCartSheetState extends State<MealioCartSheet> {
   MealioUi _ui = const MealioUi();
 
   Future<void> _add() async {
+    // Two taps before a rebuild add once.
+    if (_adding) return;
     setState(() {
       _adding = true;
       _error = null;

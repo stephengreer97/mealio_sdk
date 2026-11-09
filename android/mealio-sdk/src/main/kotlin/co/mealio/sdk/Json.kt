@@ -102,3 +102,249 @@ internal fun jsonEquals(a: Any?, b: Any?): Boolean {
     }
     return false
 }
+
+/**
+ * JSON.parse's grammar exactly (RFC 8259: no comments, no single quotes, no
+ * bare words, no trailing text, whitespace only space, tab, CR and LF), for
+ * judging request bodies. Values are Map, List, String, Double, Boolean and
+ * null; a repeated key keeps its last value, as JSON.parse does. org.json is
+ * lenient, and a body it accepts but a server's JSON.parse would not must not
+ * be read as JSON.
+ *
+ * Like JSON.parse it has no nesting limit of its own: containers are kept on
+ * a heap stack, not the call stack, so a body nested a few thousand deep is
+ * read as JSON and judged as JSON. A `\u` escape takes ASCII hex digits only,
+ * and a lone surrogate (escaped or raw) is kept as it is.
+ *
+ * With [parse]'s `keep`, a container nested deeper than `keep` (the top value
+ * is depth 1) is still read for its grammar but never built: it comes back
+ * empty. Messages from the page are read that way (PROTOCOL.md, depth 512).
+ */
+internal object StrictJson {
+    /** What [parse] returns for text that is not JSON. */
+    val INVALID = Any()
+
+    private class Bad : RuntimeException(null, null, false, false)
+
+    /** An open container past the depth limit: read, never filled. */
+    private class Skipped(val isMap: Boolean)
+
+    private val SKIP_MAP = Skipped(true)
+    private val SKIP_LIST = Skipped(false)
+
+    fun parse(text: String, keep: Int = Int.MAX_VALUE): Any? = try {
+        P(if (keep == Int.MAX_VALUE) text else blankDeep(text, keep), keep).run()
+    } catch (e: Bad) {
+        INVALID
+    }
+
+    /**
+     * packages/core/src/matcher.ts parseJson's first pass, exactly: every
+     * container deeper than `keep` is replaced by an empty one of its own
+     * kind, found by bracket and string matching alone. What is inside it is
+     * never read for its grammar (mismatched brackets, `1,,` and all), so a
+     * message TS accepts is accepted here too. The grammar check that follows
+     * reads the rest.
+     */
+    internal fun blankDeep(text: String, keep: Int): String {
+        var out: StringBuilder? = null
+        var last = 0
+        var depth = 0
+        var inString = false
+        var i = 0
+        val n = text.length
+        while (i < n) {
+            val c = text[i]
+            if (inString) {
+                if (c == '\\') i++ else if (c == '"') inString = false
+                i++
+                continue
+            }
+            if (c == '"') { inString = true; i++; continue }
+            if (c == '[' || c == '{') {
+                depth++
+                if (depth <= keep) { i++; continue }
+                // Too deep: find where this container closes, and keep it empty.
+                var d = 1
+                var str = false
+                var j = i + 1
+                while (j < n && d > 0) {
+                    val k = text[j]
+                    if (str) {
+                        if (k == '\\') j++ else if (k == '"') str = false
+                    } else if (k == '"') str = true
+                    else if (k == '[' || k == '{') d++
+                    else if (k == ']' || k == '}') d--
+                    j++
+                }
+                if (d > 0) break // never closes: not JSON, and the grammar check says so
+                val sb = out ?: StringBuilder(n).also { out = it }
+                sb.append(text, last, i).append(if (c == '[') "[]" else "{}")
+                last = j
+                i = j
+                depth--
+                continue
+            }
+            if (c == ']' || c == '}') depth--
+            i++
+        }
+        val sb = out ?: return text
+        return sb.append(text, last, n).toString()
+    }
+
+    private class P(val s: String, val keep: Int) {
+        var i = 0
+
+        fun isMap(c: Any) = c is LinkedHashMap<*, *> || (c is Skipped && c.isMap)
+
+        fun ws() {
+            while (i < s.length && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) i++
+        }
+
+        fun word(w: String, v: Any?): Any? {
+            if (!s.startsWith(w, i)) throw Bad()
+            i += w.length
+            return v
+        }
+
+        /** At a key: the key, the colon, and the space before its value. */
+        fun key(): String {
+            if (i >= s.length || s[i] != '"') throw Bad()
+            val k = str()
+            ws()
+            if (i >= s.length || s[i] != ':') throw Bad()
+            i++
+            ws()
+            return k
+        }
+
+        fun run(): Any? {
+            // Open containers, innermost last, and for an object the key its next value goes under.
+            val open = ArrayList<Any>()
+            val keys = ArrayList<String?>()
+            ws()
+            value@ while (true) {
+                if (i >= s.length) throw Bad()
+                var v: Any? = when (s[i]) {
+                    '{' -> {
+                        i++
+                        ws()
+                        if (i < s.length && s[i] == '}') { i++; LinkedHashMap<String, Any?>() } else {
+                            open.add(if (open.size >= keep) SKIP_MAP else LinkedHashMap<String, Any?>())
+                            keys.add(key())
+                            continue@value
+                        }
+                    }
+                    '[' -> {
+                        i++
+                        ws()
+                        if (i < s.length && s[i] == ']') { i++; ArrayList<Any?>() } else {
+                            open.add(if (open.size >= keep) SKIP_LIST else ArrayList<Any?>())
+                            keys.add(null)
+                            continue@value
+                        }
+                    }
+                    '"' -> str()
+                    't' -> word("true", true)
+                    'f' -> word("false", false)
+                    'n' -> word("null", null)
+                    else -> num()
+                }
+                // A whole value: put it in its container, then close what ends here.
+                while (true) {
+                    if (open.isEmpty()) {
+                        ws()
+                        if (i != s.length) throw Bad()
+                        return v
+                    }
+                    val top = open[open.size - 1]
+                    @Suppress("UNCHECKED_CAST")
+                    if (top is LinkedHashMap<*, *>) (top as MutableMap<String, Any?>)[keys[keys.size - 1]!!] = v
+                    else if (top is ArrayList<*>) (top as MutableList<Any?>).add(v)
+                    ws()
+                    if (i >= s.length) throw Bad()
+                    val c = s[i++]
+                    if (c == ',') {
+                        ws()
+                        if (isMap(top)) keys[keys.size - 1] = key()
+                        continue@value
+                    }
+                    if (c != (if (isMap(top)) '}' else ']')) throw Bad()
+                    open.removeAt(open.size - 1)
+                    keys.removeAt(keys.size - 1)
+                    // The first container past the limit lands empty; those inside it are dropped with it.
+                    v = if (top is Skipped) (if (top.isMap) LinkedHashMap<String, Any?>() else ArrayList<Any?>()) else top
+                }
+            }
+        }
+
+        fun str(): String {
+            val sb = StringBuilder()
+            i++
+            while (true) {
+                if (i >= s.length) throw Bad()
+                val c = s[i++]
+                when {
+                    c == '"' -> return sb.toString()
+                    c < ' ' -> throw Bad()
+                    c == '\\' -> {
+                        if (i >= s.length) throw Bad()
+                        when (s[i++]) {
+                            '"' -> sb.append('"')
+                            '\\' -> sb.append('\\')
+                            '/' -> sb.append('/')
+                            'b' -> sb.append('\b')
+                            'f' -> sb.append('\u000C')
+                            'n' -> sb.append('\n')
+                            'r' -> sb.append('\r')
+                            't' -> sb.append('\t')
+                            'u' -> {
+                                if (i + 4 > s.length) throw Bad()
+                                var n = 0
+                                for (k in 0 until 4) {
+                                    val d = hex(s[i + k])
+                                    if (d < 0) throw Bad()
+                                    n = n * 16 + d
+                                }
+                                i += 4
+                                // A lone surrogate stays, as JSON.parse keeps it.
+                                sb.append(n.toChar())
+                            }
+                            else -> throw Bad()
+                        }
+                    }
+                    else -> sb.append(c)
+                }
+            }
+        }
+
+        /** ASCII hex only: Character.digit also takes fullwidth and other Unicode digits. */
+        fun hex(c: Char): Int = when (c) {
+            in '0'..'9' -> c - '0'
+            in 'a'..'f' -> c - 'a' + 10
+            in 'A'..'F' -> c - 'A' + 10
+            else -> -1
+        }
+
+        fun num(): Double {
+            val start = i
+            if (i < s.length && s[i] == '-') i++
+            if (i >= s.length) throw Bad()
+            if (s[i] == '0') i++
+            else if (s[i] in '1'..'9') while (i < s.length && s[i] in '0'..'9') i++
+            else throw Bad()
+            if (i < s.length && s[i] == '.') {
+                i++
+                if (i >= s.length || s[i] !in '0'..'9') throw Bad()
+                while (i < s.length && s[i] in '0'..'9') i++
+            }
+            if (i < s.length && (s[i] == 'e' || s[i] == 'E')) {
+                i++
+                if (i < s.length && (s[i] == '+' || s[i] == '-')) i++
+                if (i >= s.length || s[i] !in '0'..'9') throw Bad()
+                while (i < s.length && s[i] in '0'..'9') i++
+            }
+            return s.substring(start, i).toDouble()
+        }
+    }
+}

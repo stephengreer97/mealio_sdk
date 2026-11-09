@@ -363,16 +363,67 @@ enum class ItemStatus(val wire: String) {
     }
 }
 
-/** A recipe that calls for a cart item, in a cart made from one or more recipes. */
-data class ItemRecipe(
+/**
+ * A recipe that calls for a cart item, in a cart made from one or more recipes.
+ *
+ * [quantity] is the whole-number share, exactly as in 0.5.0 (the wire number
+ * truncated toward zero, as `toInt()`). [share] is the exact share as the
+ * server sends it, which can be part of a package (0.5), as TypeScript's
+ * `quantity: number`. Built from a whole number, [share] equals [quantity].
+ *
+ * Not a data class: it keeps every 0.5.0 signature (the three-argument
+ * constructor and `copy`, their default-argument forms, `component1..3`)
+ * while adding [share]; equals, hashCode, toString and `component4` cover it.
+ */
+class ItemRecipe private constructor(
     val id: String,
-    val title: String? = null,
-    /** This recipe's share of the item's quantity. */
-    val quantity: Int = 1,
+    val title: String?,
+    /** This recipe's share of the item's quantity, as a whole number (0.5.0). */
+    val quantity: Int,
+    /** This recipe's exact share of the item's quantity: [quantity] or, from the wire, the number as sent. */
+    val share: Double,
+    @Suppress("UNUSED_PARAMETER") marker: Unit,
 ) {
+    /** As in 0.5.0. [share] is [quantity]. */
+    constructor(id: String, title: String? = null, quantity: Int = 1) : this(id, title, quantity, quantity.toDouble(), Unit)
+
+    /** With an exact share (part of a package). */
+    constructor(id: String, title: String? = null, quantity: Int = 1, share: Double) : this(id, title, quantity, share, Unit)
+
+    operator fun component1(): String = id
+    operator fun component2(): String? = title
+    operator fun component3(): Int = quantity
+    operator fun component4(): Double = share
+
+    /** As in 0.5.0. A new [quantity] makes [share] that whole number; otherwise [share] is kept. */
+    fun copy(id: String = this.id, title: String? = this.title, quantity: Int = this.quantity): ItemRecipe =
+        ItemRecipe(id, title, quantity, if (quantity == this.quantity) share else quantity.toDouble(), Unit)
+
+    /** With an exact share. */
+    fun copy(id: String = this.id, title: String? = this.title, quantity: Int = this.quantity, share: Double): ItemRecipe =
+        ItemRecipe(id, title, quantity, share, Unit)
+
+    override fun equals(other: Any?): Boolean =
+        this === other || (other is ItemRecipe && id == other.id && title == other.title && quantity == other.quantity &&
+            share.compareTo(other.share) == 0)
+
+    override fun hashCode(): Int {
+        var h = id.hashCode()
+        h = 31 * h + (title?.hashCode() ?: 0)
+        h = 31 * h + quantity
+        h = 31 * h + share.hashCode()
+        return h
+    }
+
+    override fun toString(): String = "ItemRecipe(id=$id, title=$title, quantity=$quantity, share=$share)"
+
     companion object {
-        fun fromJson(o: JSONObject): ItemRecipe =
-            ItemRecipe(o.str("id") ?: "", o.str("title"), o.num("quantity")?.toInt() ?: 1)
+        fun fromJson(o: JSONObject): ItemRecipe {
+            val n = o.num("quantity")
+            // quantity exactly as 0.5.0 read it; share the number as sent.
+            val q = n?.toInt() ?: 1
+            return ItemRecipe(o.str("id") ?: "", o.str("title"), q, n?.takeIf { it.isFinite() } ?: q.toDouble(), Unit)
+        }
     }
 }
 
@@ -464,7 +515,63 @@ data class PreparedCart(
     val recipes: List<CartRecipe> = emptyList(),
     /** The exact store, on a Kroger family cart. The user can change it. Null from older servers. */
     val location: StoreLocation? = null,
+    /** What the server changed or ignored in what was sent. Empty from older servers. */
+    val warnings: List<CartWarning> = emptyList(),
 ) {
+    /** 0.5's constructor (before `warnings`), kept for Java and for code built against 0.5. */
+    constructor(
+        cartId: String,
+        store: String,
+        ready: List<CartItem>,
+        needsChoice: List<CartItem>,
+        unavailable: List<CartItem>,
+        items: List<CartItem>,
+        storeName: String?,
+        recipes: List<CartRecipe>,
+        location: StoreLocation?,
+    ) : this(cartId, store, ready, needsChoice, unavailable, items, storeName, recipes, location, emptyList())
+
+    /**
+     * The default-argument form of 0.5's constructor, which Kotlin code built
+     * against 0.5 calls: bit i of `mask` set means parameter i was left out.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    @Deprecated("Kept for binary compatibility", level = DeprecationLevel.HIDDEN)
+    constructor(
+        cartId: String,
+        store: String,
+        ready: List<CartItem>,
+        needsChoice: List<CartItem>,
+        unavailable: List<CartItem>,
+        items: List<CartItem>?,
+        storeName: String?,
+        recipes: List<CartRecipe>?,
+        location: StoreLocation?,
+        mask: Int,
+        marker: kotlin.jvm.internal.DefaultConstructorMarker?,
+    ) : this(
+        cartId, store, ready, needsChoice, unavailable,
+        if (mask and 0x20 != 0 || items == null) ready + needsChoice + unavailable else items,
+        if (mask and 0x40 != 0) null else storeName,
+        if (mask and 0x80 != 0 || recipes == null) emptyList() else recipes,
+        if (mask and 0x100 != 0) null else location,
+        emptyList(),
+    )
+
+    /** 0.5's copy, kept for code built against it. */
+    @Deprecated("Kept for binary compatibility", level = DeprecationLevel.HIDDEN)
+    fun copy(
+        cartId: String = this.cartId,
+        store: String = this.store,
+        ready: List<CartItem> = this.ready,
+        needsChoice: List<CartItem> = this.needsChoice,
+        unavailable: List<CartItem> = this.unavailable,
+        items: List<CartItem> = this.items,
+        storeName: String? = this.storeName,
+        recipes: List<CartRecipe> = this.recipes,
+        location: StoreLocation? = this.location,
+    ): PreparedCart = PreparedCart(cartId, store, ready, needsChoice, unavailable, items, storeName, recipes, location, warnings)
+
     companion object {
         fun fromJson(o: JSONObject): PreparedCart {
             fun group(name: String) = o.arr(name)?.objects()?.map { CartItem.fromJson(it, name) } ?: emptyList()
@@ -483,7 +590,22 @@ data class PreparedCart(
                 storeName = o.str("storeName"),
                 recipes = o.arr("recipes")?.objects()?.map { CartRecipe.fromJson(it) } ?: emptyList(),
                 location = o.obj("location")?.let { StoreLocation.fromJson(it) },
+                warnings = o.arr("warnings")?.objects()?.mapNotNull { CartWarning.fromJson(it) } ?: emptyList(),
             )
+        }
+    }
+}
+
+/** Something the server changed or ignored in what was sent. The cart still works. */
+data class CartWarning(
+    /** ingredients_dropped, lines_dropped, servings_ignored, or a newer code. */
+    val code: String,
+    val message: String,
+) {
+    companion object {
+        fun fromJson(o: JSONObject): CartWarning? {
+            val code = o.str("code") ?: return null
+            return CartWarning(code, o.str("message") ?: "")
         }
     }
 }

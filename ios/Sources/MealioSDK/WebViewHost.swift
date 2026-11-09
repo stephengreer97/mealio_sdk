@@ -13,6 +13,18 @@
 // - show_login: while a MealioCartFlow sheet is open, the sign-in WebView is
 //   published in `login` and the flow draws it inside its own sheet (one sheet
 //   for the whole flow). With no flow open, the host presents its own sheet.
+// - While a job runs, the page carries a WKContentRuleList that blocks every
+//   checkout path on the store's own hosts and store-owned sign-in hosts
+//   (never a shared identity provider) for fetch, XHR, frames, pages and
+//   popups in every frame, never the store's images, styles, scripts or
+//   fonts (NetworkBlock.swift). Round 8: it goes on right before the job's
+//   first server script (the hidden page) or the first check script
+//   (sign-in) and stays on across navigations until the job ends
+//   (`endJob`), the hidden page is opened for another store, or the sign-in
+//   closes. Nothing the page does takes it off. Other hosts are never
+//   blocked by it, nor is a store page's boot before a job's first script.
+//   No page loads or runs a script without its store's list compiled, and
+//   jobs are refused if WebKit cannot compile the rules.
 
 #if canImport(UIKit) && canImport(WebKit)
 import Combine
@@ -42,14 +54,36 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
     /// MealioCart sets it to the allowlist check `page_open` uses, widened to
     /// the store's sign-in hosts (a store sign-in can bounce the storefront
     /// through its identity host), so a redirect inside the hidden page cannot
-    /// leave the store's own hosts or its sign-in hosts.
-    var hiddenNavigationPolicy: ((_ store: String, _ url: String) -> Bool)?
+    /// leave the store's own hosts or its sign-in hosts. Until then the bundled
+    /// allowlist answers, so a navigation is never let through unchecked.
+    var hiddenNavigationPolicy: (_ store: String, _ url: String) -> Bool = WebViewHost.bundledPolicy
 
-    private var hidden: WKWebView?
+    nonisolated static func bundledPolicy(_ store: String, _ url: String) -> Bool {
+        let allowlist = Allowlist()
+        return allowlist.check(store, url, .page).ok || allowlist.check(store, url, .login).ok
+    }
+
+    /// The hosts whose checkout paths the network block refuses for a store:
+    /// its own hosts and its store-owned sign-in hosts, never a shared
+    /// identity provider (SharedIdentity.nativeBlockHosts, round 7).
+    /// MealioCart sets it to the client's allowlist, with any signed
+    /// widening; until then the bundled allowlist answers.
+    var storeHosts: (_ store: String) -> [String] = WebViewHost.bundledHosts
+
+    nonisolated static func bundledHosts(_ store: String) -> [String] {
+        Allowlist().hostsFor(store).map(SharedIdentity.nativeBlockHosts) ?? []
+    }
+
+    private(set) var hidden: WKWebView?
+    /// The block list on the hidden page now (added at the job's first
+    /// script, on until the job ends or the store changes), and its id.
+    private var hiddenRules: WKContentRuleList?
+    private var hiddenRulesKey = ""
     private var hiddenStore = ""
-    private var pendingLoad: ResumeOnce<PageOpenOutcome>?
-    private var loadTimer: Task<Void, Never>?
-    private var scriptListener: ((JSONMessage) -> Void)?
+    /// The load one job is waiting for. Events and its timer settle it and no other.
+    var pageWait: JobWaiter<PageOpenOutcome>?
+    /// The script one job is waiting on, with what it has posted so far.
+    var scriptWait: ScriptWait?
     private var cachedUserAgent: String?
 
     /// The sign-in in progress, while a cart flow sheet is hosting it.
@@ -57,12 +91,23 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
     /// Open cart flow sheets that will draw the sign-in themselves.
     private var flowHosts = 0
 
-    /// A cart flow sheet opened (`true`) or closed (`false`).
+    /// A cart flow sheet opened (`true`) or closed (`false`). When the last
+    /// one closes with a sign-in on screen (the sheet was hidden mid-add), the
+    /// sign-in moves to a modal of its own instead of being cancelled.
     func hostLogin(_ on: Bool) {
         flowHosts = max(0, flowHosts + (on ? 1 : -1))
+        if !on, flowHosts == 0, let shown = login {
+            login = nil
+            shown.moveToModal(presenter)
+        }
     }
 
-    private lazy var fetchSession: URLSession = {
+    private(set) var madeFetchSession: URLSession?
+
+    /// Made on first use. URLSession keeps its delegate until it is
+    /// invalidated, so `tearDown` invalidates it.
+    var fetchSession: URLSession {
+        if let s = madeFetchSession { return s }
         // The SDK's own cookie handling: nothing is stored by URLSession, the
         // Cookie header is built from the WebView's store for each request.
         let c = URLSessionConfiguration.ephemeral
@@ -71,33 +116,67 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
         c.httpCookieAcceptPolicy = .never
         c.urlCache = nil
         c.requestCachePolicy = .reloadIgnoringLocalCacheData
-        return URLSession(configuration: c, delegate: RedirectGuard(), delegateQueue: nil)
-    }()
+        let s = URLSession(configuration: c, delegate: RedirectGuard(), delegateQueue: nil)
+        madeFetchSession = s
+        return s
+    }
 
     /// - Parameter presenter: Returns the view controller to present the login
     ///   sheet from. Defaults to the key window's top-most view controller.
     public init(presenter: Presenter? = nil) {
         self.presenter = presenter ?? { WebViewHost.topViewController() }
         super.init()
+        // WebKit compiles the probe list now, off the jobs' path.
+        BlockedPathRules.shared.prepare(hosts: NetworkBlock.probeHosts)
+    }
+
+    /// Jobs run only when WebKit compiles the network block. MealioHost.
+    public func ready() async throws {
+        try await BlockedPathRules.shared.ready()
+    }
+
+    /// The compiled list for a store's own hosts (nil: it has none).
+    func blockList(for store: String, waitingAtMost ms: Int = NetworkBlock.waitMs) async throws -> WKContentRuleList? {
+        try await BlockedPathRules.shared.list(hosts: storeHosts(store), waitingAtMost: ms)
     }
 
     // MARK: - Configuration shared by both WebViews
 
-    static func makeConfiguration(handler: WKScriptMessageHandler) -> WKWebViewConfiguration {
+    /// Tests only: serves their pages from a local scheme handler, so no
+    /// test WebView ever reaches a store.
+    static var testConfiguration: ((WKWebViewConfiguration) -> Void)?
+
+    /// No block list here: it is added only while a job runs (`armRules`,
+    /// LoginSheet.inject). `rules` is for tests that want a page blocked
+    /// from its first load.
+    static func makeConfiguration(handler: WKScriptMessageHandler, rules: WKContentRuleList? = nil) -> WKWebViewConfiguration {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = WKWebsiteDataStore.default()
         let content = WKUserContentController()
         content.addUserScript(WKUserScript(source: Bridge.nativePostScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         content.addUserScript(WKUserScript(source: MealioScripts.bridgeShim, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        // The guard in EVERY frame, before any of the frame's own scripts run,
+        // UNARMED: its hooks pass everything through, so the store's own boot
+        // code (workers, /payment config fetches) runs untouched, and in a
+        // cross-origin frame (a captcha, an identity provider) it installs
+        // nothing. Each server script is preceded by `guardArmScript`, which
+        // arms it in the page and its same-origin frames until the page
+        // navigates. The in-page hooks stay as a second layer (a frame a
+        // script adds and uses in the same tick).
+        content.addUserScript(WKUserScript(source: MealioScripts.guardScript, injectionTime: .atDocumentStart, forMainFrameOnly: false))
         content.add(handler, name: Bridge.messageHandlerName)
+        if let rules = rules { content.add(rules) }
         config.userContentController = content
+        testConfiguration?(config)
         return config
     }
 
-    private func hiddenWebView() -> WKWebView {
+    /// The hidden page, made on first use with no block list.
+    func hiddenWebView() -> WKWebView {
         if let web = hidden { return web }
         let handler = ScriptHandler { [weak self] body in self?.hiddenMessage(body) }
-        let web = WKWebView(frame: CGRect(x: 0, y: 0, width: 1, height: 1), configuration: WebViewHost.makeConfiguration(handler: handler))
+        let web = WKWebView(frame: CGRect(x: 0, y: 0, width: 1, height: 1),
+                            configuration: WebViewHost.makeConfiguration(handler: handler))
         web.navigationDelegate = self
         web.isUserInteractionEnabled = false
         web.alpha = 0.01
@@ -112,80 +191,148 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
         return web
     }
 
+    /// A job's script is about to run on the hidden page: its store's block
+    /// list goes on, once per job (a list for other hosts comes off first).
+    /// It stays on across navigations until `endJob` or a store change.
+    private func armRules(_ list: WKContentRuleList?, on web: WKWebView) {
+        let key = list?.identifier ?? ""
+        if hiddenRulesKey == key, hiddenRules != nil || list == nil { return }
+        disarmRules(on: web)
+        if let list = list {
+            web.configuration.userContentController.add(list)
+            hiddenRules = list
+            hiddenRulesKey = key
+        }
+    }
+
+    /// The job ended or the store changed: the block list comes off.
+    private func disarmRules(on web: WKWebView?) {
+        if hiddenRules != nil {
+            web?.configuration.userContentController.removeAllContentRuleLists()
+        }
+        hiddenRules = nil
+        hiddenRulesKey = ""
+    }
+
     private func hiddenMessage(_ body: Any) {
-        guard let msg = parseMessage(body) else { return }
-        scriptListener?(msg)
+        guard let msg = parseMessage(body), let wait = scriptWait else { return }
+        wait.messages.append(msg)
+        if matchesAny(msg, wait.until) {
+            wait.waiter.settle(ScriptOutcome(messages: wait.messages, timedOut: false))
+        }
     }
 
     /// Drop the hidden page (after a sign-out, so nothing of the old session
-    /// stays in memory). The next page_open makes a fresh one.
+    /// stays in memory). The next page_open makes a fresh one. A job waiting
+    /// on the page is answered now instead of waiting out its timer.
+    /// MealioHost: before a job, after exclusive work outlived its cap.
+    public func resetPage() {
+        resetHiddenPage()
+    }
+
+    /// The job ended (done, failed or cancelled): the hidden page's block
+    /// list comes off, until the next job's first script. MealioHost.
+    public func endJob() {
+        disarmRules(on: hidden)
+    }
+
     public func resetHiddenPage() {
-        pendingLoad?.resume(PageOpenOutcome(ok: false, error: "load_failed"))
-        loadTimer?.cancel()
-        scriptListener = nil
+        pageWait?.settle(PageOpenOutcome(ok: false, error: "load_failed"))
+        pageWait = nil
+        if let wait = scriptWait {
+            wait.waiter.settle(ScriptOutcome(messages: wait.messages, timedOut: false, error: "page_reset"))
+        }
+        scriptWait = nil
         if let web = hidden {
             web.stopLoading()
             web.navigationDelegate = nil
             web.configuration.userContentController.removeScriptMessageHandler(forName: Bridge.messageHandlerName)
             web.removeFromSuperview()
         }
+        disarmRules(on: hidden)
         hidden = nil
+    }
+
+    /// This host is being replaced (MealioCart.configure ran again). Drops the
+    /// hidden page, closes any sign-in, and lets go of the fetch session.
+    func tearDown() {
+        resetHiddenPage()
+        login?.cancel()
+        login = nil
+        madeFetchSession?.invalidateAndCancel()
+        madeFetchSession = nil
     }
 
     // MARK: - page_open
 
     public func openPage(store: String, url: String, timeoutMs: Int) async throws -> PageOpenOutcome {
         guard let target = URL(string: url) else { return PageOpenOutcome(ok: false, error: "load_failed") }
+        // Never a load whose store's block list is not compiled, ready for
+        // the first script. Before a job's first script it is not on the
+        // page: the store's own boot requests run untouched until then. Once
+        // on, it stays on through this load (same job, same store).
+        do {
+            _ = try await blockList(for: store, waitingAtMost: min(max(timeoutMs, 0), NetworkBlock.waitMs))
+        } catch {
+            return PageOpenOutcome(ok: false, error: "no_network_block")
+        }
         let web = hiddenWebView()
+        // Another store: Mealio no longer drives the old one's page.
+        if store != hiddenStore { disarmRules(on: web) }
         hiddenStore = store
-        // A load still waiting from before is superseded.
-        pendingLoad?.resume(PageOpenOutcome(ok: false, error: "load_failed"))
-        loadTimer?.cancel()
-
-        let outcome: PageOpenOutcome = await withCheckedContinuation { cont in
-            let once = ResumeOnce(cont)
-            pendingLoad = once
+        // A load still waiting from before is superseded. Its timer is its own.
+        pageWait?.settle(PageOpenOutcome(ok: false, error: "superseded"))
+        let waiter = JobWaiter<PageOpenOutcome>()
+        pageWait = waiter
+        let outcome = await waiter.wait {
             web.load(URLRequest(url: target))
-            loadTimer = after(timeoutMs) { [weak web] in
-                if once.resume(PageOpenOutcome(ok: false, finalUrl: web?.url?.absoluteString, error: "timeout")) {
+            waiter.timer = after(timeoutMs) { [weak web, weak waiter] in
+                if waiter?.settle(PageOpenOutcome(ok: false, finalUrl: web?.url?.absoluteString, error: "timeout")) == true {
                     web?.stopLoading()
                 }
             }
         }
-        loadTimer?.cancel()
-        loadTimer = nil
-        if pendingLoad?.isDone == true { pendingLoad = nil }
+        if pageWait === waiter { pageWait = nil }
         return outcome
     }
 
     // MARK: - page_script
 
     public func runScript(store: String, guardScript: String, script: String, until: [Matcher], timeoutMs: Int) async throws -> ScriptOutcome {
+        guard hidden?.url != nil else {
+            return ScriptOutcome(messages: [], timedOut: false, error: "no_page")
+        }
+        // The job drives the page from here: the store's block list goes on
+        // first (once per job), with the guard's arming. No list, no script.
+        let list: WKContentRuleList?
+        do {
+            list = try await blockList(for: store, waitingAtMost: min(max(timeoutMs, 0), NetworkBlock.waitMs))
+        } catch {
+            return ScriptOutcome(messages: [], timedOut: false, error: "no_network_block")
+        }
         guard let web = hidden, web.url != nil else {
             return ScriptOutcome(messages: [], timedOut: false, error: "no_page")
         }
-        let box = MessageBox()
-        var timer: Task<Void, Never>?
-        let outcome: ScriptOutcome = await withCheckedContinuation { cont in
-            let once = ResumeOnce(cont)
-            // Listen before injecting, so a message the guard or the script
-            // posts straight away is not missed.
-            scriptListener = { msg in
-                box.messages.append(msg)
-                if matchesAny(msg, until) {
-                    once.resume(ScriptOutcome(messages: box.messages, timedOut: false))
-                }
-            }
-            timer = after(timeoutMs) {
-                once.resume(ScriptOutcome(messages: box.messages, timedOut: true))
+        armRules(list, on: web)
+        // One script at a time; one still waiting from before is superseded.
+        if let old = scriptWait {
+            old.waiter.settle(ScriptOutcome(messages: old.messages, timedOut: false, error: "superseded"))
+        }
+        let wait = ScriptWait(until: until)
+        scriptWait = wait
+        let outcome = await wait.waiter.wait {
+            // Listening starts here, before injecting, so a message the guard
+            // or the script posts straight away is not missed.
+            wait.waiter.timer = after(timeoutMs) { [weak wait] in
+                guard let wait = wait else { return }
+                wait.waiter.settle(ScriptOutcome(messages: wait.messages, timedOut: true))
             }
             // Results and JS exceptions are ignored, as React Native's
             // injectJavaScript ignores them. Scripts report through messages.
             web.evaluateJavaScript(guardScript, completionHandler: nil)
             web.evaluateJavaScript(script, completionHandler: nil)
         }
-        timer?.cancel()
-        scriptListener = nil
+        if scriptWait === wait { scriptWait = nil }
         return outcome
     }
 
@@ -195,7 +342,18 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
         guard let url = URL(string: request.url) else {
             throw MealioError(code: MealioError.Code.blocked, message: "The login URL is not valid")
         }
-        let sheet = LoginSheet(request: request)
+        // Cancelled while it was queued behind the runner's check: never show it.
+        if request.cancel?.cancelled == true {
+            return LoginOutcome(outcome: .cancelled, messages: [])
+        }
+        // Never a sign-in page whose store's block list is not compiled. It
+        // goes on before the first check script, not before the page's own
+        // boot, and stays on until the sheet closes.
+        let rules = try await blockList(for: request.store)
+        if request.cancel?.cancelled == true {
+            return LoginOutcome(outcome: .cancelled, messages: [])
+        }
+        let sheet = LoginSheet(request: request, rules: rules)
         if flowHosts > 0 {
             // Inside the open flow sheet: publish it, the flow draws it.
             let publish: @MainActor (LoginSheet?) -> Void = { [weak self, weak sheet] shown in
@@ -211,7 +369,9 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
         guard let from = presenter() else {
             throw MealioError(code: MealioError.Code.unsupported, message: "No view controller to present the store login from")
         }
-        return await sheet.run(url: url, mode: .modal(from))
+        let outcome = await sheet.run(url: url, mode: .modal(from))
+        if let failure = sheet.failure { throw failure }
+        return outcome
     }
 
     // MARK: - fetch
@@ -263,6 +423,10 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
             let timedOut = (error as? URLError)?.code == .timedOut
             return FetchOutcome(ok: false, error: timedOut ? "timeout" : "no_response")
         }
+        // RedirectGuard stopped a redirect: its 3xx is not handed back, as on React Native.
+        if RedirectGuard.stopped(status: http.statusCode, location: http.value(forHTTPHeaderField: "Location"), from: url) {
+            return FetchOutcome(ok: false, error: "redirect_blocked")
+        }
 
         var headers: [String: String] = [:]
         var rawFields: [String: String] = [:]
@@ -272,7 +436,7 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
             rawFields[name] = value
             // Like a browser fetch, cookies the store sets are not handed back
             // to the server. They go into the WebView's cookie store instead.
-            if name.lowercased() == "set-cookie" { continue }
+            if WebViewHost.privateHeaders.contains(name.lowercased()) { continue }
             headers[name.lowercased()] = value
         }
         await WebViewHost.storeCookies(HTTPCookie.cookies(withResponseHeaderFields: rawFields, for: http.url ?? url))
@@ -287,6 +451,9 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
         let body = String(decoding: bytes, as: UTF8.self)
         return FetchOutcome(ok: true, status: http.statusCode, headers: headers, body: body, truncated: truncated)
     }
+
+    /// Response headers never handed back to the server.
+    static let privateHeaders: Set<String> = ["set-cookie", "set-cookie2"]
 
     private func userAgent() async -> String? {
         if let ua = cachedUserAgent { return ua }
@@ -402,16 +569,16 @@ extension WebViewHost: WKNavigationDelegate {
             return
         }
         let s = url.absoluteString
-        if s == "about:blank" || (hiddenNavigationPolicy?(hiddenStore, s) ?? true) {
+        if s == "about:blank" || hiddenNavigationPolicy(hiddenStore, s) {
             decisionHandler(.allow)
         } else {
             decisionHandler(.cancel)
-            pendingLoad?.resume(PageOpenOutcome(ok: false, finalUrl: s, error: "blocked"))
+            pageWait?.settle(PageOpenOutcome(ok: false, finalUrl: s, error: "blocked"))
         }
     }
 
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        pendingLoad?.resume(PageOpenOutcome(ok: true, finalUrl: webView.url?.absoluteString))
+        pageWait?.settle(PageOpenOutcome(ok: true, finalUrl: webView.url?.absoluteString))
     }
 
     public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -427,7 +594,7 @@ extension WebViewHost: WKNavigationDelegate {
         // navigation (a JS redirect). Wait for that one instead.
         let ns = error as NSError
         if ns.domain == NSURLErrorDomain && ns.code == NSURLErrorCancelled { return }
-        pendingLoad?.resume(PageOpenOutcome(ok: false, finalUrl: hidden?.url?.absoluteString, error: "load_failed"))
+        pageWait?.settle(PageOpenOutcome(ok: false, finalUrl: hidden?.url?.absoluteString, error: "load_failed"))
     }
 }
 
@@ -457,9 +624,25 @@ final class LoginSheet: NSObject, WKNavigationDelegate, WKUIDelegate, UIAdaptive
     private var finished = false
     /// A navigation matching doneWhenUrl is loading; finish when it lands.
     private var doneUrlLoading = false
+    /// Stops listening to the job's cancel token.
+    private var stopListening: (() -> Void)?
+    /// Why the sheet could not be shown, when it could not. The run then
+    /// fails with this instead of waiting out its timeout.
+    private(set) var failure: MealioError?
+    /// The store's block list, added before the first check script.
+    private let rules: WKContentRuleList?
+    /// It is on the sheet's page now (until the sheet closes; round 8: a
+    /// navigation never takes it off).
+    private var rulesOn = false
 
-    init(request: LoginRequest) {
+    /// How long a modal presentation may take to start before it counts as refused.
+    static let presentCheckMs = 1000
+
+    /// `rules`: the store's checkout-path block list. WebViewHost always
+    /// passes it when the store has hosts of its own.
+    init(request: LoginRequest, rules: WKContentRuleList? = nil) {
         self.request = request
+        self.rules = rules
         if let source = request.doneWhenUrl, !source.isEmpty {
             // A JS regex source with no flags. Most sources mean the same in
             // ICU; one that does not compile is ignored.
@@ -489,6 +672,13 @@ final class LoginSheet: NSObject, WKNavigationDelegate, WKUIDelegate, UIAdaptive
             once = ResumeOnce(cont)
             switch mode {
             case .modal(let presenter):
+                // UIKit refuses to present from a controller that is off screen
+                // or already presenting, and only logs it. Fail now instead.
+                guard presenter.viewIfLoaded?.window != nil, presenter.presentedViewController == nil else {
+                    failure = LoginSheet.notShown
+                    finish(.cancelled)
+                    return
+                }
                 let screen = LoginViewController(title: request.title, webView: webView) { [weak self] in
                     self?.finish(.cancelled)
                 }
@@ -496,6 +686,13 @@ final class LoginSheet: NSObject, WKNavigationDelegate, WKUIDelegate, UIAdaptive
                 nav.presentationController?.delegate = self
                 self.nav = nav
                 presenter.present(nav, animated: true)
+                timers.append(after(LoginSheet.presentCheckMs) { [weak self, weak nav] in
+                    guard let self = self, !self.finished else { return }
+                    if nav?.presentingViewController == nil {
+                        self.failure = LoginSheet.notShown
+                        self.finish(.cancelled)
+                    }
+                })
             case .inline(let publish):
                 unpublish = { publish(nil) }
                 publish(self)
@@ -513,12 +710,53 @@ final class LoginSheet: NSObject, WKNavigationDelegate, WKUIDelegate, UIAdaptive
                     }
                 })
             }
+            // The job was cancelled (the sheet closed, the user changed): close.
+            if let token = request.cancel {
+                stopListening = token.onCancel { [weak self] in self?.finish(.cancelled) }
+            }
         }
     }
 
-    /// GUARD_SCRIPT, then the check script.
+    /// The flow sheet that drew this sign-in went away (hidden mid-add): show
+    /// it in a modal sheet instead, once the flow sheet has finished leaving.
+    /// It is retried for a short while, since UIKit refuses to present from a
+    /// controller that is still dismissing; if it never can, the sign-in ends
+    /// as cancelled, as a closed one would.
+    func moveToModal(_ presenter: @escaping @MainActor () -> UIViewController?, tries: Int = 12) {
+        guard !finished, nav == nil else { return }
+        // Off the flow: it no longer draws or takes down this sign-in.
+        unpublish = nil
+        if let from = presenter(), from.viewIfLoaded?.window != nil, from.presentedViewController == nil,
+           !from.isBeingDismissed, !from.isBeingPresented {
+            let screen = LoginViewController(title: request.title, webView: webView) { [weak self] in
+                self?.finish(.cancelled)
+            }
+            let nav = UINavigationController(rootViewController: screen)
+            nav.presentationController?.delegate = self
+            self.nav = nav
+            from.present(nav, animated: true)
+            return
+        }
+        guard tries > 0 else {
+            failure = LoginSheet.notShown
+            finish(.cancelled)
+            return
+        }
+        timers.append(after(250) { [weak self] in self?.moveToModal(presenter, tries: tries - 1) })
+    }
+
+    static let notShown = MealioError(code: MealioError.Code.unsupported,
+                                      message: "Could not show the store sign-in: the presenting view controller is not on screen or is already presenting")
+
+    /// The store's block list (once: it stays on), GUARD_ARM_SCRIPT, then the
+    /// check script, each its own evaluation in the top frame. (GUARD_SCRIPT
+    /// is already in every frame at document start.)
     private func inject() {
-        webView.evaluateJavaScript(request.guardScript, completionHandler: nil)
+        if let rules = rules, !rulesOn {
+            webView.configuration.userContentController.add(rules)
+            rulesOn = true
+        }
+        webView.evaluateJavaScript(request.armGuardScript, completionHandler: nil)
         if let check = request.check {
             webView.evaluateJavaScript(check.script, completionHandler: nil)
         }
@@ -539,6 +777,8 @@ final class LoginSheet: NSObject, WKNavigationDelegate, WKUIDelegate, UIAdaptive
     private func finish(_ kind: LoginOutcomeKind) {
         guard !finished else { return }
         finished = true
+        stopListening?()
+        stopListening = nil
         timers.forEach { $0.cancel() }
         timers.removeAll()
         webView.stopLoading()
@@ -650,6 +890,18 @@ final class LoginViewController: UIViewController {
         view.backgroundColor = .systemBackground
         navigationItem.largeTitleDisplayMode = .never
         navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .close, target: self, action: #selector(closeTapped))
+        attach()
+    }
+
+    /// A sign-in moved here from the flow sheet may have been taken off this
+    /// view by SwiftUI tearing the old sheet down: put it back.
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        if webView.superview !== view { attach() }
+    }
+
+    private func attach() {
+        webView.removeFromSuperview()
         webView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(webView)
         NSLayoutConstraint.activate([
@@ -688,9 +940,45 @@ final class ScriptHandler: NSObject, WKScriptMessageHandler {
     }
 }
 
-/// Messages collected by one runScript.
-final class MessageBox {
+/// One job's wait: a page load or a script. Only its own timer and the
+/// events meant for it settle it, once.
+@MainActor
+final class JobWaiter<T> {
+    private var once: ResumeOnce<T>?
+    /// This wait's own timer, cancelled when it settles.
+    var timer: Task<Void, Never>?
+
+    init() {}
+
+    /// Wait until settled. `start` runs once the wait can be settled.
+    func wait(_ start: () -> Void) async -> T {
+        await withCheckedContinuation { (cont: CheckedContinuation<T, Never>) in
+            once = ResumeOnce(cont)
+            start()
+        }
+    }
+
+    /// Returns true if this call settled it.
+    @discardableResult
+    func settle(_ value: T) -> Bool {
+        guard let once = once, once.resume(value) else { return false }
+        timer?.cancel()
+        timer = nil
+        return true
+    }
+}
+
+/// The script one runScript is waiting on, and the messages it has posted.
+@MainActor
+final class ScriptWait {
+    let until: [Matcher]
     var messages: [JSONMessage] = []
+    let waiter: JobWaiter<ScriptOutcome>
+
+    init(until: [Matcher]) {
+        self.until = until
+        self.waiter = JobWaiter<ScriptOutcome>()
+    }
 }
 
 /// Run `body` on the main actor after `ms` milliseconds, unless cancelled first.
@@ -710,6 +998,13 @@ final class RedirectGuard: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
         completionHandler(RedirectGuard.allows(from: task.originalRequest?.url, to: request.url) ? request : nil)
+    }
+
+    /// A 3xx this guard refused to follow: the response is the redirect itself.
+    static func stopped(status: Int, location: String?, from: URL) -> Bool {
+        guard (300..<400).contains(status), let location = location, !location.isEmpty,
+              let to = URL(string: location, relativeTo: from)?.absoluteURL else { return false }
+        return !allows(from: from, to: to)
     }
 
     static func allows(from: URL?, to: URL?) -> Bool {

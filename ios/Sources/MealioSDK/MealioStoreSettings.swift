@@ -11,15 +11,66 @@ public extension View {
     ///
     ///     .mealioStoreSettings(isPresented: $showStore)
     ///
-    /// `onChange` is called each time the user's store changes.
+    /// `onChange` is called each time the user's store changes. While
+    /// `MealioCart.setUser(nil)` says nobody is signed in, it does not open:
+    /// `onSignInRequired` (else `MealioCart.onSignInRequired`) is called instead.
     @MainActor
     func mealioStoreSettings(isPresented: Binding<Bool>,
-                             onChange: ((StorePreferences) -> Void)? = nil) -> some View {
+                             onChange: ((StorePreferences) -> Void)? = nil,
+                             onSignInRequired: (() -> Void)? = nil) -> some View {
+        modifier(MealioStoreSettingsPresenter(isPresented: isPresented, onChange: onChange,
+                                              onSignInRequired: onSignInRequired))
+    }
+}
+
+/// Presents store settings, only while someone is signed in.
+@MainActor
+struct MealioStoreSettingsPresenter: ViewModifier {
+    @Binding var isPresented: Bool
+    let onChange: ((StorePreferences) -> Void)?
+    let onSignInRequired: (() -> Void)?
+    @ObservedObject private var users: MealioUsers
+    /// What is actually presented: the partner's flag, while someone is signed in.
+    @State private var shown = false
+
+    init(isPresented: Binding<Bool>, onChange: ((StorePreferences) -> Void)?, onSignInRequired: (() -> Void)?) {
+        self._isPresented = isPresented
+        self.onChange = onChange
+        self.onSignInRequired = onSignInRequired
+        self._users = ObservedObject(wrappedValue: MealioCart.users)
+    }
+
+    func body(content: Content) -> some View {
+        let onChange = self.onChange
+        let onSignInRequired = self.onSignInRequired
         // VERIFY: same as mealioCartFlow, the sheet content closure is formed
-        // in a @MainActor function, so the MealioStoreSettings init call is fine.
-        mealioPresent(isPresented: isPresented) {
-            MealioStoreSettings(onChange: onChange)
+        // in a @MainActor context, so the MealioStoreSettings init call is fine.
+        return content
+            .mealioPresent(isPresented: $shown) {
+                MealioStoreSettings(onChange: onChange, onSignInRequired: onSignInRequired)
+            }
+            .onAppear { asked(isPresented) }
+            .onChange(of: isPresented) { open in asked(open) }
+            // Closed by a swipe or its own button: tell the partner's flag.
+            .onChange(of: shown) { open in
+                if !open && isPresented { isPresented = false }
+            }
+            .onChange(of: users.hasUser) { has in
+                if !has {
+                    shown = false
+                    isPresented = false
+                }
+            }
+    }
+
+    /// The partner asked to open (or close) it.
+    private func asked(_ open: Bool) {
+        if open && !users.hasUser {
+            isPresented = false
+            (onSignInRequired ?? MealioCart.onSignInRequired)?()
+            return
         }
+        if shown != open { shown = open }
     }
 }
 
@@ -28,6 +79,7 @@ public extension View {
 @MainActor
 public struct MealioStoreSettings: View {
     private let onChange: ((StorePreferences) -> Void)?
+    private let onSignInRequired: (() -> Void)?
 
     @State private var stores: [StoreInfo]?
     @State private var prefs: StorePreferences?
@@ -38,9 +90,13 @@ public struct MealioStoreSettings: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var systemScheme
 
-    /// - Parameter onChange: Called each time the user's store changes.
-    public init(onChange: ((StorePreferences) -> Void)? = nil) {
+    /// - Parameters:
+    ///   - onChange: Called each time the user's store changes.
+    ///   - onSignInRequired: Called, and the sheet closes, when it opens while
+    ///     nobody is signed in. Defaults to `MealioCart.onSignInRequired`.
+    public init(onChange: ((StorePreferences) -> Void)? = nil, onSignInRequired: (() -> Void)? = nil) {
         self.onChange = onChange
+        self.onSignInRequired = onSignInRequired
     }
 
     private var t: MealioTheme { MealioCart.resolvedTheme(for: systemScheme) }
@@ -57,7 +113,14 @@ public struct MealioStoreSettings: View {
         }
         .background(t.background.ignoresSafeArea())
         .mealioSheetSize()
-        .task { await load() }
+        .task {
+            guard MealioCart.hasUser else {
+                (onSignInRequired ?? MealioCart.onSignInRequired)?()
+                dismiss()
+                return
+            }
+            await load()
+        }
     }
 
     @ViewBuilder

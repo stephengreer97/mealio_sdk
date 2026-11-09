@@ -115,6 +115,78 @@ final class VectorTests: XCTestCase {
         XCTAssertEqual(MealioScripts.guardScript, try Fixtures.text("guard-script", "js"))
     }
 
+    /// The per-script copy is the document-start copy plus the arm call
+    /// (GUARD_ARM_SCRIPT = GUARD_SCRIPT + "\n" + GUARD_ARM).
+    func testGuardArmScriptIsTheGuardThenTheArmCall() throws {
+        XCTAssertEqual(MealioScripts.guardArm, try Fixtures.text("guard-arm", "js"))
+        XCTAssertEqual(MealioScripts.guardArmScript, MealioScripts.guardScript + "\n" + MealioScripts.guardArm)
+    }
+
+    /// Round 6: the guard scans raw multipart with the linear multipartFields
+    /// (as Allowlist does), not the MULTIPART_FIELD regex.
+    func testTheGuardJudgesRawMultipartWithTheLinearScan() {
+        XCTAssertTrue(MealioScripts.guardScript.contains("function multipartFields(body)"))
+        XCTAssertFalse(MealioScripts.guardScript.contains("var PART = "))
+    }
+
+    func testABodyWithOnlyAByteOrderMarkIsNotBlocked() {
+        XCTAssertFalse(Allowlist.bodyBlocked("\u{FEFF}"))
+        XCTAssertTrue(Allowlist.bodyBlocked("\u{FEFF}{\"query\":\"mutation { placeOrder { id } }\"}"))
+    }
+
+    // MARK: round 4: JSON as JSON.parse reads it, multipart names in any quotes
+
+    func testJudgesTheJSONStrictnessVectorsAsJSONParseReadsThem() throws {
+        let list = try XCTUnwrap(try Fixtures.vectors()["jsonBodies"]?.arrayValue)
+        XCTAssertEqual(Set(list.compactMap { $0["rule"]?.stringValue }), ["depth", "hex", "surrogate"])
+        for v in list {
+            let body = try XCTUnwrap(v["body"]?.stringValue)
+            let rule = v["rule"]?.stringValue ?? ""
+            XCTAssertEqual(Allowlist.bodyBlocked(body), try XCTUnwrap(v["blocked"]?.boolValue), "\(rule): \(body.prefix(60))")
+        }
+    }
+
+    func testReadsAMultipartPartWhateverQuotesItsNameHas() {
+        func part(_ name: String, _ value: String) -> String {
+            "--b\r\nContent-Disposition: form-data; name=\(name)\r\n\r\n\(value)\r\n--b--"
+        }
+        let m = #"{"query":"mutation { placeOrder { id } }"}"#
+        for q in ["\"", "'", ""] {
+            XCTAssertTrue(Allowlist.bodyBlocked(part("\(q)operations\(q)", m)), q)
+            XCTAssertTrue(Allowlist.bodyBlocked(part("\(q)query\(q)", "mutation { placeOrder { id } }")), q)
+            XCTAssertTrue(Allowlist.bodyBlocked(part("\(q)operationName\(q)", "PlaceOrder")), q)
+            XCTAssertFalse(Allowlist.bodyBlocked(part("\(q)operationsX\(q)", m)), q)
+        }
+    }
+
+    func testJSONValueParseAcceptsExactlyWhatJSONParseAccepts() {
+        // Nesting far past Foundation's 512 levels.
+        let deep = String(repeating: "[", count: 3000) + String(repeating: "]", count: 3000)
+        XCTAssertNotNil(JSONValue.parse(deep))
+        // A lone or reversed surrogate is JSON; Swift holds it as U+FFFD.
+        XCTAssertEqual(JSONValue.parse(#""a\ud800z""#), .string("a\u{FFFD}z"))
+        XCTAssertEqual(JSONValue.parse(#""\udc00\ud800""#), .string("\u{FFFD}\u{FFFD}"))
+        XCTAssertEqual(JSONValue.parse(#""\ud83d\ude00""#), .string("\u{1F600}"))
+        XCTAssertEqual(JSONValue.parse(#""\u004F\u004f""#), .string("OO"))
+        // \u takes four ASCII hex digits only.
+        XCTAssertNil(JSONValue.parse("\"\\u\u{0660}\u{0660}4F\""))
+        XCTAssertNil(JSONValue.parse("\"\\u\u{FF10}\u{FF10}4F\""))
+        XCTAssertNil(JSONValue.parse(#""\u04F""#))
+        // What JSON.parse refuses.
+        for bad in ["", " ", "[1,]", "{\"a\":1,}", "01", "1.", ".5", "+1", "-", "1e", "'a'", "\"\t\"", "[1]x",
+                    "\u{FEFF}{}", "{\u{A0}}", "NaN", "Infinity", "tru", "nul", "{a:1}", "\"\\x41\"", "[1 2]"] {
+            XCTAssertNil(JSONValue.parse(bad), bad)
+        }
+        // What it accepts.
+        XCTAssertEqual(JSONValue.parse(" \t\r\n{\"a\":1,\"a\":2} "), ["a": 2])
+        XCTAssertEqual(JSONValue.parse("-0"), .int(0))
+        XCTAssertEqual(JSONValue.parse("2.0"), .int(2))
+        XCTAssertEqual(JSONValue.parse("1e400"), .double(.infinity))
+        XCTAssertEqual(JSONValue.parse(#""\/\b\f\n\r\t\"\\""#), .string("/\u{08}\u{0C}\n\r\t\"\\"))
+        // Bytes as a fetch Response's json() reads them: a UTF-8 BOM is dropped.
+        XCTAssertEqual(JSONValue.parse(Data([0xEF, 0xBB, 0xBF]) + Data("[1]".utf8)), [1])
+    }
+
     func testBridgeShimMatchesTheReferenceByteForByte() throws {
         XCTAssertEqual(MealioScripts.bridgeShim, try Fixtures.text("bridge-shim", "js"))
     }

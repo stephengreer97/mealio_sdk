@@ -161,7 +161,11 @@ export type ItemStatus = 'remembered' | 'choose' | 'remembered_unavailable' | 'u
 export interface ItemRecipe {
   id: string;
   title: string | null;
-  /** This recipe's share of the item's quantity. */
+  /**
+   * This recipe's share of the item's quantity, exactly as sent (it may be
+   * fractional). Kotlin and Dart keep their `quantity` an integer, as in
+   * 0.5.0, and name this exact value `share`; TypeScript needs no second field.
+   */
   quantity: number;
 }
 
@@ -199,6 +203,13 @@ export interface CartItem {
   chosen?: Product | null;
 }
 
+/** Something the server changed or ignored in what was sent. The cart still works. */
+export interface CartWarning {
+  /** ingredients_dropped, lines_dropped, servings_ignored, or a newer code. */
+  code: string;
+  message: string;
+}
+
 export interface PreparedCart {
   cartId: string;
   store: string;
@@ -214,6 +225,8 @@ export interface PreparedCart {
   ready: CartItem[];
   needsChoice: CartItem[];
   unavailable: CartItem[];
+  /** Absent from older servers. */
+  warnings?: CartWarning[];
 }
 
 export interface SearchResult {

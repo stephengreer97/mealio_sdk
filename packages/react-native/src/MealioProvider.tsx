@@ -7,18 +7,21 @@
 // Both WebViews share the platform's cookie store, so a sign-in is the session
 // the hidden WebView uses.
 
-import React, { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react';
-import { Modal, Platform, Pressable, SafeAreaView, StyleSheet, Text, useColorScheme, View, type ImageSourcePropType } from 'react-native';
-import { WebView, type WebViewMessageEvent, type WebViewNavigation } from 'react-native-webview';
+import React, { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Dimensions, Modal, Platform, Pressable, StatusBar, StyleSheet, Text, useColorScheme, useWindowDimensions, View, type ImageSourcePropType } from 'react-native';
+import type { WebView, WebViewMessageEvent, WebViewNavigation } from 'react-native-webview';
 import {
-  MealioClient, MealioError, matchesAny, parseMessage, safeListener, textTools,
+  CancelToken as CancelTokenClass, GUARD_SCRIPT, JobQueue, MealioClient, MealioError, PAGE_RESET_MS, matchesAny, parseJson, parseMessage, safeListener, textTools,
   type MealioEventListener, type MealioStrings, type TextTools,
-  type CartSession, type Host, type JsonMessage, type Matcher, type PrepareCartInput, type StepListener, type StoreInfo, type StoreLocation, type StorePreferences,
+  type CancelToken, type CartSession, type Host, type JsonMessage, type Matcher, type PrepareCartInput, type StepListener, type StoreInfo, type StoreLocation, type StorePreferences,
 } from '@mealio/sdk-core';
 import { money, resolveTheme, type MealioColorScheme, type MealioTheme } from './theme';
 import { MealioStoreSettings } from './MealioStoreSettings';
+import { loadInsetView, loadWebView } from './optional';
 
-export const SDK_VERSION = '0.5.0';
+export const SDK_VERSION = '0.6.0';
+
+declare const __DEV__: boolean | undefined;
 
 export interface MealioSheetOptions {
   /** Show the total and the done screen prices. Defaults to true. Options keep their own prices. */
@@ -43,10 +46,33 @@ export interface EpochStorage {
   set(n: number): Promise<void>;
 }
 
+/**
+ * A fake Mealio for tests: what createFakeMealio from
+ * `@mealio/react-native-cart/testing` returns. With it the provider drives
+ * the real client against the fake server and store page, renders no
+ * WebView, and trusts the protocol test key.
+ */
+export interface MealioTesting {
+  fetchImpl: typeof fetch;
+  host: Host;
+  keys: Record<string, string>;
+  baseUrl: string;
+}
+
 export interface MealioProviderProps {
   publishableKey: string;
   /** Ask your server for a session (POST https://mealio.co/api/v1/sessions with your secret key). */
   getSessionToken: () => Promise<string>;
+  /**
+   * Your signed-in user's id, or null when nobody is signed in. Changing it
+   * stops any cart in progress, starts a new session, and signs the old user
+   * out of the stores. While null there is no session and no warm-up, and
+   * MealioCartButton calls onSignInRequired. With this set, getSessionToken may
+   * be an inline function. Once set, undefined means null.
+   */
+  userId?: string | null;
+  /** Called when a button or store settings is used while userId is null. */
+  onSignInRequired?: () => void;
   baseUrl?: string;
   /** Persist the store sign-out epoch. Without it, sign-out still clears cookies but the rails' small caches survive a restart. */
   epochStorage?: EpochStorage;
@@ -66,12 +92,18 @@ export interface MealioProviderProps {
   onEvent?: MealioEventListener;
   /** @deprecated use theme.accent */
   accentColor?: string;
+  /** Tests only: run on a fake Mealio (createFakeMealio from `@mealio/react-native-cart/testing`). */
+  testing?: MealioTesting;
   children: React.ReactNode;
 }
 
 export interface MealioApi {
+  /** The `userId` prop. Undefined when you do not pass one. */
+  userId: string | null | undefined;
+  /** False while `userId` is null. */
+  hasUser: boolean;
   /** `recipe` for one, or `recipes` for up to 10 in one cart. */
-  prepareCart(input: PrepareCartInput, opts?: { onStep?: StepListener }): Promise<CartSession>;
+  prepareCart(input: PrepareCartInput, opts?: { onStep?: StepListener; cancel?: CancelToken }): Promise<CartSession>;
   stores(): Promise<StoreInfo[]>;
   signOutOfAllStores(): Promise<void>;
   /**
@@ -108,6 +140,8 @@ interface Internal {
   login: LoginView | null;
   /** A cart flow sheet is open and will show the sign-in itself. */
   hostLogin: (on: boolean) => void;
+  /** The provider's onSignInRequired. */
+  onSignInRequired: (() => void) | null;
 }
 
 const ApiCtx = createContext<MealioApi | null>(null);
@@ -126,7 +160,10 @@ export function useMealioInternal(): Internal {
   return v;
 }
 
-type Waiter = { until: Matcher[]; messages: JsonMessage[]; resolve: (timedOut: boolean) => void; tag: Tagged };
+// A waiter belongs to one job: its timer and the page's events settle that
+// waiter and no other. A newer job's waiter replaces it only after settling it.
+type PageWaiter = { resolve: (r: { ok: boolean; finalUrl?: string; error?: string }) => void };
+type Waiter = { until: Matcher[]; messages: JsonMessage[]; resolve: (r: { timedOut: boolean; error?: string }) => void; tag: Tagged };
 
 // ── which frame is talking ────────────────────────────────────────────────
 //
@@ -154,7 +191,7 @@ const tagScript = (nonce: string) => `(function(){try{
 /** The message a frame posted, or null if it must be dropped. Flips `tag.strict` on the hello. */
 function untag(data: string, tag: Tagged | null): string | null {
   let o: any = null;
-  try { o = JSON.parse(data); } catch { /* a plain message */ }
+  try { o = parseJson(data); } catch { /* a plain message */ }
   if (o && typeof o === 'object' && typeof o.__mealio === 'string') {
     if (!tag || o.__mealio !== tag.nonce) return null;
     if (o.hello) { tag.strict = true; return null; }
@@ -202,7 +239,10 @@ interface LoginState {
   tag: Tagged;
   url: string;
   title: string;
+  /** GUARD_SCRIPT, at document start in every frame: installed, unarmed. */
   guard: string;
+  /** GUARD_ARM_SCRIPT, right before each check script: arms the guard. */
+  armGuard: string;
   check: { script: string; intervalMs: number } | null;
   doneWhen: Matcher[];
   doneWhenUrl: RegExp | null;
@@ -238,7 +278,7 @@ export function MealioProvider(props: MealioProviderProps) {
   const allowRef = useRef<MealioClient['allowlist'] | null>(null);
   const loginView = useRef<WebView>(null);
   const [hiddenUri, setHiddenUri] = useState<{ uri: string; n: number }>({ uri: 'about:blank', n: 0 });
-  const pageWaiter = useRef<{ resolve: (r: { ok: boolean; finalUrl?: string; error?: string }) => void } | null>(null);
+  const pageWaiter = useRef<PageWaiter | null>(null);
   const scriptWaiter = useRef<Waiter | null>(null);
   const [login, setLogin] = useState<LoginState | null>(null);
   const loginRef = useRef<LoginState | null>(null);
@@ -250,10 +290,8 @@ export function MealioProvider(props: MealioProviderProps) {
   // ── hidden WebView ───────────────────────────────────────────────────
 
   const onHiddenLoadEnd = useCallback((e: { nativeEvent: { url: string } }) => {
-    const w = pageWaiter.current;
-    if (!w || e.nativeEvent.url === 'about:blank') return;
-    pageWaiter.current = null;
-    w.resolve({ ok: true, finalUrl: e.nativeEvent.url });
+    if (e.nativeEvent.url === 'about:blank') return;
+    pageWaiter.current?.resolve({ ok: true, finalUrl: e.nativeEvent.url });
   }, []);
 
   /**
@@ -270,18 +308,12 @@ export function MealioProvider(props: MealioProviderProps) {
     const store = hiddenStore.current;
     const a = allowRef.current;
     const ok = !!store && !!a && (a.check(store, url, 'page').ok || a.check(store, url, 'login').ok);
-    if (!ok) {
-      const w = pageWaiter.current;
-      if (w) { pageWaiter.current = null; w.resolve({ ok: false, finalUrl: url, error: 'blocked' }); }
-    }
+    if (!ok) pageWaiter.current?.resolve({ ok: false, finalUrl: url, error: 'blocked' });
     return ok;
   }, []);
 
   const onHiddenError = useCallback(() => {
-    const w = pageWaiter.current;
-    if (!w) return;
-    pageWaiter.current = null;
-    w.resolve({ ok: false, error: 'load_failed' });
+    pageWaiter.current?.resolve({ ok: false, error: 'load_failed' });
   }, []);
 
   const onHiddenMessage = useCallback((e: WebViewMessageEvent) => {
@@ -291,7 +323,7 @@ export function MealioProvider(props: MealioProviderProps) {
     const msg = data == null ? null : parseMessage(data);
     if (!msg) return;
     w.messages.push(msg);
-    if (matchesAny(msg, w.until)) { scriptWaiter.current = null; w.resolve(false); }
+    if (matchesAny(msg, w.until)) w.resolve({ timedOut: false });
   }, []);
 
   // ── sign-in ──────────────────────────────────────────────────────────
@@ -309,7 +341,7 @@ export function MealioProvider(props: MealioProviderProps) {
     const l = loginRef.current;
     if (!l || !l.check) return;
     loginView.current?.injectJavaScript(tagScript(l.tag.nonce));
-    loginView.current?.injectJavaScript(l.guard);
+    loginView.current?.injectJavaScript(l.armGuard);
     loginView.current?.injectJavaScript(l.check.script);
   }, []);
 
@@ -339,10 +371,15 @@ export function MealioProvider(props: MealioProviderProps) {
     return l.allowNavigation(req.url);
   }, [endLogin]);
 
-  const loginWebView = login ? (
-    <WebView
+  const WebViewView = props.testing ? null : loadWebView().WebView;
+  const loginWebView = login && WebViewView ? (
+    <WebViewView
       ref={loginView}
       source={{ uri: login.url }}
+      // The guard in every frame from its first script (iOS; Android loads it
+      // in the main frame only, and the guard's own frame hooks cover the rest).
+      injectedJavaScriptBeforeContentLoaded={login.guard}
+      injectedJavaScriptBeforeContentLoadedForMainFrameOnly={false}
       onLoadEnd={injectCheck}
       onMessage={onLoginMessage}
       onNavigationStateChange={onLoginNav}
@@ -362,18 +399,33 @@ export function MealioProvider(props: MealioProviderProps) {
     openPage(store, url, timeoutMs) {
       hiddenStore.current = store;
       return new Promise((resolve) => {
-        const t = setTimeout(() => { if (pageWaiter.current) { pageWaiter.current = null; resolve({ ok: false, error: 'timeout' }); } }, timeoutMs);
-        pageWaiter.current = { resolve: (r) => { clearTimeout(t); resolve(r); } };
+        const waiter: PageWaiter = {
+          resolve: (r) => {
+            clearTimeout(t);
+            if (pageWaiter.current === waiter) pageWaiter.current = null;
+            resolve(r);
+          },
+        };
+        const t = setTimeout(() => waiter.resolve({ ok: false, error: 'timeout' }), timeoutMs);
+        pageWaiter.current?.resolve({ ok: false, error: 'superseded' });
+        pageWaiter.current = waiter;
         setHiddenUri((cur) => ({ uri: url, n: cur.n + 1 }));
       });
     },
     runScript(_store, guard, script, until, timeoutMs) {
       return new Promise((resolve) => {
-        const waiter: Waiter = { until, messages: [], resolve: () => {}, tag: { nonce: newNonce(), strict: false } };
-        const t = setTimeout(() => { if (scriptWaiter.current === waiter) { scriptWaiter.current = null; resolve({ messages: waiter.messages, timedOut: true }); } }, timeoutMs);
-        waiter.resolve = (timedOut) => { clearTimeout(t); resolve({ messages: waiter.messages, timedOut }); };
+        const waiter: Waiter = {
+          until, messages: [], tag: { nonce: newNonce(), strict: false },
+          resolve: (r) => {
+            clearTimeout(t);
+            if (scriptWaiter.current === waiter) scriptWaiter.current = null;
+            resolve({ messages: waiter.messages, ...r });
+          },
+        };
+        const t = setTimeout(() => waiter.resolve({ timedOut: true }), timeoutMs);
+        scriptWaiter.current?.resolve({ timedOut: false, error: 'superseded' });
         scriptWaiter.current = waiter;
-        if (!hidden.current) { scriptWaiter.current = null; clearTimeout(t); resolve({ messages: [], timedOut: false, error: 'no_webview' }); return; }
+        if (!hidden.current) { waiter.resolve({ timedOut: false, error: 'no_webview' }); return; }
         hidden.current.injectJavaScript(tagScript(waiter.tag.nonce));
         hidden.current.injectJavaScript(guard);
         hidden.current.injectJavaScript(script);
@@ -381,17 +433,26 @@ export function MealioProvider(props: MealioProviderProps) {
     },
     showLogin(opts) {
       return new Promise((resolve) => {
+        let off: (() => void) | undefined;
         const state: LoginState = {
           tag: { nonce: newNonce(), strict: false },
-          url: opts.url, title: opts.title, guard: opts.guard, check: opts.check ?? null, doneWhen: opts.doneWhen,
+          url: opts.url, title: opts.title, guard: opts.guard, armGuard: opts.armGuard, check: opts.check ?? null, doneWhen: opts.doneWhen,
           doneWhenUrl: opts.doneWhenUrl ? new RegExp(opts.doneWhenUrl) : null, allowNavigation: opts.allowNavigation,
-          messages: [], finish: (outcome) => { clearTimeout(t); resolve({ outcome, messages: state.messages }); },
+          messages: [], finish: (outcome) => { clearTimeout(t); off?.(); resolve({ outcome, messages: state.messages }); },
         };
-        const t = setTimeout(() => endLogin('timeout'), opts.timeoutMs);
+        const endThis = (outcome: 'cancelled' | 'timeout') => { if (loginRef.current === state) endLogin(outcome); else state.finish(outcome); };
+        const t = setTimeout(() => endThis('timeout'), opts.timeoutMs);
+        off = opts.cancel?.onCancel(() => endThis('cancelled'));
         loginRef.current = state;
         setLogin(state);
         if (state.check) checkTimer.current = setInterval(injectCheck, Math.max(1000, state.check.intervalMs));
       });
+    },
+    async resetPage() {
+      hiddenStore.current = null;
+      pageWaiter.current?.resolve({ ok: false, error: 'superseded' });
+      scriptWaiter.current?.resolve({ timedOut: false, error: 'superseded' });
+      setHiddenUri((cur) => ({ uri: 'about:blank', n: cur.n + 1 }));
     },
     async fetch(store, req, timeoutMs, maxBytes) {
       const ctl = new AbortController();
@@ -417,63 +478,131 @@ export function MealioProvider(props: MealioProviderProps) {
     },
   }), [endLogin, injectCheck]);
 
+  // Tracked from the first userId passed. Until then the old behavior stands:
+  // a new getSessionToken is a new client. Once tracked, the client lasts and
+  // always calls the latest function.
+  const trackUser = useRef(false);
+  if (props.userId !== undefined) trackUser.current = true;
+  const userId = trackUser.current ? props.userId ?? null : undefined;
+  const sessionFn = useRef(props.getSessionToken);
+  sessionFn.current = props.getSessionToken;
+  const clientKey = useRef(props.getSessionToken);
+  if (!trackUser.current) clientKey.current = props.getSessionToken;
+  const queue = useRef(new JobQueue()).current;
+
+  const testing = props.testing;
   const client = useMemo(() => new MealioClient({
     publishableKey: props.publishableKey,
-    getSessionToken: props.getSessionToken,
+    getSessionToken: () => sessionFn.current(),
     platform: 'react-native',
     sdkVersion: SDK_VERSION,
-    baseUrl: props.baseUrl,
+    baseUrl: testing ? testing.baseUrl : props.baseUrl,
     getEpoch: () => epochStore.get(),
-  }, host), [props.publishableKey, props.getSessionToken, props.baseUrl, host, epochStore]);
+    userId,
+    queue,
+    debug: typeof __DEV__ !== 'undefined' && !!__DEV__,
+    ...(testing ? { fetchImpl: testing.fetchImpl, keys: testing.keys } : {}),
+  }, testing ? testing.host : host), [props.publishableKey, clientKey.current, props.baseUrl, host, epochStore, queue, testing]);
   allowRef.current = client.allowlist;
+  const clientRef = useRef(client);
+  clientRef.current = client;
+
+  // Nothing may keep running in, or remember, the old session's page. Queued,
+  // so an add under way finishes first and the next user's cart waits for this.
+  // Every step is bounded by PAGE_RESET_MS and stops on the cancel token, so a
+  // storage or cookie call that never answers cannot hold the queue. A step
+  // that fails or runs late does not stop the next: the cookies are cleared
+  // even if the epoch could not be saved. The first failure is thrown at the end.
+  const clearStores = useCallback(() => client.runExclusive(async (cancel) => {
+    let first: unknown = null;
+    const step = async (fn: () => unknown) => {
+      if (cancel.cancelled) throw new MealioError('cancelled', 'Cancelled', cancel.reason ?? 'cancelled');
+      try { await boundedStep(fn, cancel); } catch (e) { if (cancel.cancelled) throw e; first = first ?? e; }
+    };
+    await step(async () => { await epochStore.set((await boundedStep(() => epochStore.get(), cancel)) + 1); });
+    await step(() => {
+      hiddenStore.current = null;
+      setHiddenUri((cur) => ({ uri: 'about:blank', n: cur.n + 1 }));
+      hidden.current?.clearCache?.(true);
+    });
+    // Without a cookie manager there is no way to delete a WebView cookie
+    // from React Native, so the stores' logins would survive. Saying so beats
+    // a sign-out that only looks like it worked.
+    const cookies = testing ? null : loadCookieManager();
+    if (!cookies && !testing) throw new MealioError('unsupported', `Install ${COOKIE_MANAGER} to sign out of stores.`);
+    if (cookies && typeof cookies.clearAllStores === 'function') {
+      await step(() => cookies.clearAllStores!());
+    } else if (cookies) {
+      await step(() => cookies.clearAll?.(true));
+      await step(() => cookies.clearAll?.(false));
+    }
+    if (first) throw first;
+  }), [client, epochStore, testing]);
+
+  // A layout effect, so it lands before any child's effect warms for the new user.
+  useLayoutEffect(() => {
+    if (userId === undefined) return;
+    if (userId === null) setSettingsOpen(false);
+    if (client.setUser(userId)) clearStores().catch(() => { /* never blocks a user change */ });
+  }, [client, clearStores, userId]);
+
+  // The provider went away, and every screen under it: `closed`.
+  useEffect(() => () => {
+    clientRef.current.cancelJobs('closed');
+    endLogin('cancelled');
+  }, [endLogin]);
+
+  const onSignInRequired = useRef(props.onSignInRequired);
+  onSignInRequired.current = props.onSignInRequired;
+  const hasSignIn = !!props.onSignInRequired;
+  const currentUser = useRef(userId);
+  currentUser.current = userId;
+  const openSettings = useCallback(() => {
+    if (currentUser.current === null) onSignInRequired.current?.();
+    else setSettingsOpen(true);
+  }, []);
 
   const api: MealioApi = useMemo(() => ({
     theme,
     ui,
+    userId,
+    hasUser: userId !== null,
     prepareCart: (input, opts) => client.prepareCart(input, opts),
     stores: () => client.stores(),
     warm: (opts) => client.warm(opts),
     storeLocations: (store, zip) => client.storeLocations(store, zip),
     storePreferences: () => client.storePreferences(),
     setStore: (store, locationId) => client.setStore(store, locationId),
-    openStoreSettings: () => setSettingsOpen(true),
+    openStoreSettings: openSettings,
     resetSession() { client.resetSession(); },
     async signOutOfAllStores() {
+      client.cancelJobs();
       client.resetSession();
-      await epochStore.set((await epochStore.get()) + 1);
-      // Nothing may keep running in, or remember, the old session's page.
-      hiddenStore.current = null;
-      setHiddenUri((cur) => ({ uri: 'about:blank', n: cur.n + 1 }));
-      hidden.current?.clearCache?.(true);
-      // Without a cookie manager there is no way to delete a WebView cookie
-      // from React Native, so the stores' logins would survive. Saying so beats
-      // a sign-out that only looks like it worked.
-      const cookies = loadCookieManager();
-      if (!cookies) {
-        throw new MealioError('unsupported', `Install ${COOKIE_MANAGER} to sign out of stores.`);
-      }
-      if (typeof cookies.clearAllStores === 'function') {
-        await cookies.clearAllStores();
-      } else {
-        await cookies.clearAll?.(true);
-        await cookies.clearAll?.(false);
-      }
+      await clearStores();
     },
-  }), [client, epochStore, theme, ui]);
+  }), [client, clearStores, openSettings, theme, ui, userId]);
 
   const internal: Internal = useMemo(() => ({
     login: login && loginWebView ? { title: login.title, webview: loginWebView, cancel: () => endLogin('cancelled') } : null,
     hostLogin: (on) => setHosts((n) => Math.max(0, n + (on ? 1 : -1))),
-  }), [login, loginWebView, endLogin]);
+    onSignInRequired: hasSignIn ? () => onSignInRequired.current?.() : null,
+  }), [login, loginWebView, endLogin, hasSignIn]);
 
   return (
     <ApiCtx.Provider value={api}>
       <InternalCtx.Provider value={internal}>
         {props.children}
-        {settingsOpen ? <MealioStoreSettings visible onClose={() => setSettingsOpen(false)} /> : null}
-        <View pointerEvents="none" style={styles.hidden}>
-          <WebView
+        {settingsOpen && userId !== null ? <MealioStoreSettings visible onClose={() => setSettingsOpen(false)} /> : null}
+        {!WebViewView ? null : <View pointerEvents="none" style={styles.hidden}>
+          <WebViewView
             ref={hidden}
+            // The guard goes into every frame at document start, before any
+            // store script (iOS: every frame; Android: react-native-webview
+            // injects the main frame only, so the guard's own frame hooks are
+            // what reach the frames there). runScript injects it again; it
+            // installs once per window.
+            injectedJavaScriptBeforeContentLoaded={GUARD_SCRIPT}
+            injectedJavaScriptBeforeContentLoadedForMainFrameOnly={false}
             // A new key per navigation remounts the WebView, so re-opening the
             // same URL really reloads it. Cookies and storage are shared.
             key={`mealio-hidden-${hiddenUri.n}`}
@@ -498,9 +627,9 @@ export function MealioProvider(props: MealioProviderProps) {
             setSupportMultipleWindows={false}
             style={styles.hiddenView}
           />
-        </View>
-        <Modal visible={!!login && hosts === 0} animationType="slide" onRequestClose={() => endLogin('cancelled')} presentationStyle="pageSheet">
-          <SafeAreaView style={[styles.flex, { backgroundColor: theme.background }]}>
+        </View>}
+        <Modal visible={!!login && hosts === 0} animationType="slide" onRequestClose={() => endLogin('cancelled')} presentationStyle="pageSheet" {...EDGE_TO_EDGE}>
+          <Inset style={[styles.flex, { backgroundColor: theme.background }]}>
             <View style={[styles.bar, { borderBottomColor: theme.border }]}>
               <Text style={[styles.title, { color: theme.text, fontFamily: theme.fontFamily }]} numberOfLines={1}>{login?.title}</Text>
               <Pressable accessibilityRole="button" onPress={() => endLogin('cancelled')} hitSlop={12}>
@@ -508,12 +637,92 @@ export function MealioProvider(props: MealioProviderProps) {
               </Pressable>
             </View>
             {hosts === 0 ? loginWebView : null}
-          </SafeAreaView>
+          </Inset>
         </Modal>
       </InternalCtx.Provider>
     </ApiCtx.Provider>
   );
 }
+
+/**
+ * The sign-in sheet's frame, clear of the status bar, notch, home indicator
+ * and navigation bar. The Modal draws edge to edge on Android
+ * (statusBarTranslucent and navigationBarTranslucent), so the insets are the
+ * same whether or not the app itself is edge to edge. With
+ * react-native-safe-area-context installed its SafeAreaView measures them;
+ * without it, fallbackInsets estimates them.
+ */
+export function Inset(p: { style?: any; children?: React.ReactNode }) {
+  const win = useWindowDimensions();
+  const Safe = loadInsetView();
+  if (Safe) return <Safe style={p.style} edges={['top', 'right', 'bottom', 'left']}>{p.children}</Safe>;
+  const e = fallbackInsets(Platform.OS, !!(Platform as { isPad?: boolean }).isPad, win, Dimensions.get('screen'), StatusBar.currentHeight ?? 0);
+  return <View style={[p.style, { paddingTop: e.top, paddingRight: e.right, paddingBottom: e.bottom, paddingLeft: e.left }]}>{p.children}</View>;
+}
+
+export interface EdgeInsets { top: number; right: number; bottom: number; left: number }
+
+type Size = { width: number; height: number };
+
+/** Android's navigation bar when it cannot be measured (the app is edge to edge): three-button height. */
+export const ANDROID_NAV_BAR = 48;
+
+/**
+ * The sign-in sheet's insets without react-native-safe-area-context.
+ *
+ * iOS: the page sheet starts below the status bar, so top is 0. An iPhone
+ * with a home indicator (at least 812 points on its long side) keeps 34 at
+ * the bottom in portrait; in landscape 21 at the bottom and 44 on each side,
+ * where the notch can be. An iPad keeps 20 at the bottom. Older iPhones need
+ * nothing.
+ *
+ * Android: the status bar height on top. The navigation bar is what the app's
+ * window leaves out of the screen: below it (less the status bar), or beside
+ * it in landscape, where the bar and the camera cutout can be on either side,
+ * so both sides get it. When the window leaves nothing out (an edge-to-edge
+ * app), ANDROID_NAV_BAR is used: at the bottom in portrait, on both sides and
+ * half of it at the bottom in landscape.
+ */
+export function fallbackInsets(os: string, isPad: boolean, win: Size, screen: Size, statusBar: number): EdgeInsets {
+  const landscape = win.width > win.height;
+  if (os === 'ios') {
+    if (isPad) return { top: 0, right: 0, bottom: 20, left: 0 };
+    if (Math.max(win.width, win.height) < 812) return { top: 0, right: 0, bottom: 0, left: 0 };
+    return landscape ? { top: 0, right: 44, bottom: 21, left: 44 } : { top: 0, right: 0, bottom: 34, left: 0 };
+  }
+  if (os === 'android') {
+    const side = Math.max(0, Math.round(screen.width - win.width));
+    const below = Math.max(0, Math.round(screen.height - win.height - statusBar));
+    if (landscape) {
+      if (side === 0 && below === 0) return { top: statusBar, right: ANDROID_NAV_BAR, bottom: ANDROID_NAV_BAR / 2, left: ANDROID_NAV_BAR };
+      return { top: statusBar, right: side, bottom: below, left: side };
+    }
+    return { top: statusBar, right: 0, bottom: below > 0 ? below : ANDROID_NAV_BAR, left: 0 };
+  }
+  return { top: 0, right: 0, bottom: 0, left: 0 };
+}
+
+/**
+ * One step of a store sign-out: `fn`'s result, or a `network` error after
+ * PAGE_RESET_MS, or `cancelled` as soon as `cancel` fires.
+ */
+export function boundedStep<T>(fn: () => T | Promise<T>, cancel: CancelTokenClass, ms: number = PAGE_RESET_MS): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => { off(); reject(new MealioError('network', 'Signing out of the stores took too long')); }, ms);
+    const off = cancel.onCancel(() => { clearTimeout(t); reject(new MealioError('cancelled', 'Cancelled', cancel.reason ?? 'cancelled')); });
+    Promise.resolve().then(fn).then(
+      (v) => { clearTimeout(t); off(); resolve(v); },
+      (e) => { clearTimeout(t); off(); reject(e); },
+    );
+  });
+}
+
+/**
+ * The sign-in Modal draws under the status and navigation bars on Android,
+ * whether or not the app is edge to edge, and Inset keeps its content clear.
+ * navigationBarTranslucent is React Native 0.77+; older versions ignore it.
+ */
+const EDGE_TO_EDGE: object = { statusBarTranslucent: true, navigationBarTranslucent: true };
 
 const IOS_IDLE = { html: '<html><body></body></html>', baseUrl: 'about:blank' };
 

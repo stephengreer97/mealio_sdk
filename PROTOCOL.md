@@ -106,10 +106,16 @@ JSON messages it posts until one matches `until`, or `timeoutMs` passes.
 - Scripts post messages with `window.ReactNativeWebView.postMessage(JSON.stringify(msg))`.
   Every SDK must define `window.ReactNativeWebView.postMessage` in its WebView
   (React Native's WebView does; native SDKs inject a shim, see `BRIDGE_SHIM`).
-- Before the server's script, the SDK injects `GUARD_SCRIPT` (below) once per
-  page load.
+- Right before the server's script, in the same top frame, the SDK injects
+  `GUARD_ARM_SCRIPT` (see "Guard script": it installs the guard if it is
+  missing and arms it).
 - Collect every message posted after injection. Messages that are not JSON
-  objects are dropped.
+  objects are dropped. A message is parsed with a depth limit of 512: the top
+  container is depth 1, containers down to depth 512 are built, and a
+  container at depth 513 is kept, empty, in its place; its contents are
+  skipped by bracket and string matching and never built. A parser must not
+  recurse per level (a page can post a 100,000-deep message). The cases are
+  `deepMessages` in `protocol/test-vectors.json`.
 - Matcher: `{ "type": string, "eq"?: {field: value}, "ne"?: {field: value} }`.
   A message matches when `msg.type === type`, every `eq` field is strictly
   equal, and every `ne` field is not strictly equal (a missing field is "not
@@ -138,9 +144,10 @@ sheet, or `timeoutMs` passes.
 }
 ```
 
-- After every page load in the sheet, and every `check.intervalMs`, the SDK
-  injects `GUARD_SCRIPT` then `check.script` into the visible page and
-  watches its messages. A message matching `doneWhen` means signed in.
+- The sheet's WebView gets `GUARD_SCRIPT` at document start in every frame.
+  After every page load in the sheet, and every `check.intervalMs`, the SDK
+  injects `GUARD_ARM_SCRIPT` then `check.script` into the visible page's top
+  frame and watches its messages (parsed as for `page_script`). A message matching `doneWhen` means signed in.
 - `doneWhenUrl`, when set, is a regex source. A navigation whose URL matches
   it also means signed in (used by Kroger's OAuth return).
 - Navigations the allowlist forbids are cancelled, except to hosts listed in
@@ -271,7 +278,7 @@ The fields an SDK needs for amounts and prices:
 | Object | Field | Meaning |
 | --- | --- | --- |
 | `CartItem` | `quantity` | Packages to add, from the recipe (every recipe's share added together) |
-| `CartItem` | `recipes` | `[{ id, title, quantity }]`: the recipes that call for it. Absent from older servers |
+| `CartItem` | `recipes` | `[{ id, title, quantity }]`: the recipes that call for it. Absent from older servers. `quantity` is the recipe's exact share and may be fractional: TypeScript's `ItemRecipe.quantity` is that number as sent; Kotlin and Dart keep `quantity` an `Int` as in 0.5.0 and give the exact value as `share` (a `Double`) |
 | `PreparedCart` | `recipes` | `[{ id, title }]`: the recipes the cart was made from, in the order sent |
 | `CartItem` | `weightLb` | The recipe's own weight for the line in lb, when it gave the amount in lb, oz, g or kg. Absent otherwise |
 | `Product` | `unitPrice` | One unit's price as a number, for an estimate |
@@ -368,12 +375,15 @@ checkout
 payment
 billing
 wallet
-place-?order
-submit-?order
-order-?confirm
+place[-_]?order
+submit[-_]?order
+order[-_]?confirm
 gift-?card
 /account/(delete|close|security|password)
 /addresses?/(add|edit|delete|new)
+/orders?/(submit|place)(/|\?|$)
+/cart/confirm
+/purchase(/|\?|$)
 ```
 
 The bundled allowlist is in `packages/core/src/allowlist.ts` (`STORES`). The
@@ -384,12 +394,324 @@ never touch `BLOCKED_PATTERNS`.
 
 ## Guard script
 
-`GUARD_SCRIPT` (in `packages/core/src/guard.ts`) is injected before every
-server script. It wraps `window.fetch` and `XMLHttpRequest` in the page so a
-request whose URL matches `BLOCKED_PATTERNS`, or whose body names a GraphQL
-operation matching `/checkout|placeorder|submitorder|payment/i`, throws
-instead of leaving the device. It also caps requests at 240 per minute per
-page. This is defense in depth. The signature is the primary control.
+`GUARD_SCRIPT` (in `packages/core/src/guard.ts`) runs inside the store page.
+Once armed, it wraps `window.fetch`, `XMLHttpRequest`, `navigator.sendBeacon`
+and form submission in the page so a request whose URL matches
+`BLOCKED_PATTERNS`, or whose body is a blocked operation, throws (or, for a
+beacon, returns false) instead of leaving the device. It caps requests at 240
+per minute per window, and refuses `blob:` and `data:` workers.
+
+### Threat model
+
+The controls, strongest first:
+
+1. **Signed instructions.** Every instruction is signed by Mealio, and the SDK
+   runs nothing else. This is the primary control.
+2. **The SDK's own allowlist and blocked paths.** Every page load and `fetch`
+   op the SDK makes is checked against the store's hosts and
+   `BLOCKED_PATTERNS`, and every `fetch` body against the body rules below,
+   in native code (or the React Native JS runtime) that page code cannot reach.
+3. **Native network blocking (iOS and Android only): the store's own
+   hosts, while a Mealio job runs.** The native SDKs refuse requests the
+   store page makes to one of the store's blocking hosts (below: its hosts
+   and its store-owned sign-in hosts, never a shared identity provider), or
+   a subdomain of one, whose path matches `BLOCKED_PATTERNS`: page and frame
+   navigations, form posts, and fetch and XHR, in the hidden WebView and the
+   sign-in sheet. It never refuses the store's own page assets (images,
+   stylesheets, scripts, fonts, media). Other hosts (a payment or captcha
+   frame, Google or Apple sign-in) are never refused by it. It turns on when
+   Mealio's first script of a job runs and stays on for the whole job,
+   across page navigations; it turns off only when the job ends (success,
+   failure or cancel) or the store changes. iOS compiles a
+   `WKContentRuleList` per store with a block rule per pattern anchored to
+   each blocking host, restricted to the resource types `fetch` and `raw`,
+   `document` and `popup`; Android refuses a POST, PUT, PATCH or DELETE in
+   `shouldInterceptRequest` with an empty 403 and a main-frame or frame
+   navigation (any method) in `shouldOverrideUrlLoading`. It runs outside the
+   page, so page code cannot turn it off. It checks paths only, not bodies.
+   See "When native blocking is on", "Native blocking hosts" and "Known
+   limits" below.
+   **React Native and Flutter have no native blocking**: their WebView plugins
+   give no hook on the page's own subresource requests. On those two platforms
+   the page's own requests rely on controls 1 and 2 and the in-page guard.
+4. **The in-page guard (every platform).** Best-effort defense in depth.
+   Code already running in the store page can defeat any in-page check, so
+   the guard raises the cost of a mistake or a careless script; it is not a
+   boundary against a hostile page.
+
+What the guard covers, once armed: `fetch`, XHR and beacons in the page and
+in its same-origin frames (frames in open shadow roots included) and
+same-origin popups; form `submit()`, `requestSubmit()` and submit events;
+`blob:` and `data:` workers.
+
+How it judges a form: `submit()` (which fires no event) and
+`requestSubmit()` are judged when they are called, and throw only for a
+blocked explicit target or blocked fields. Every other submission (a button,
+the Enter key) is judged by a submit listener in the CAPTURE phase, at the
+window (first on every path) and at every shadow root (submit does not cross
+a shadow root, so each root gets the listener: on `attachShadow`, open or
+closed, and at arming for open roots already there). A blocked submission is
+cancelled with `preventDefault` ONLY: the guard never calls
+`stopPropagation` or `stopImmediatePropagation`, so the page's own handlers
+always run, and a request one of them sends itself (a JS sign-in's `fetch`)
+is judged on its own as a `fetch` or XHR. A handler that stops propagation
+cannot hide a form from the guard, which has already judged it. A form is
+judged by an explicit target, the submitter's `formaction`, else the form's
+`action` attribute, as a path, and by its fields as a body. A form with
+neither (or with a blank one) posts back to the page it is on, which the SDK
+already allowed: only its fields are judged, never the page URL or its query
+(a sign-in form on `/login?returnUrl=%2Fcheckout` is not refused). A
+`dialog` method form is never judged. Its fields (the submitter's included)
+are read from its controls, never with `new FormData`, so the page's
+`formdata` listeners fire once per submission, as without the guard.
+Worker and SharedWorker stay subclassable: a subclass is constructed with
+`Reflect.construct` and its own prototype, as `new.target` would. It captures the built-ins it decides with when it
+installs (`RegExp.prototype.exec`, `URL` and its getters, `Blob.prototype.text`,
+`String`, `JSON.parse`, `Function.prototype.call` and `apply`,
+`Promise.prototype.then`, `Date.now` and the DOM getters it reads), so page code
+that replaces them later changes nothing. It reads a body's text once and
+sends that same text, so an object cannot show one text and send another.
+
+What it does not cover (native blocking does, on iOS and Android, for
+navigations, frames, form posts and fetch or XHR to paths on the store's own
+hosts while a job runs, but never for the store's page assets):
+
+- Requests it never sees: images, scripts, stylesheets, `<link>` prefetches,
+  `<a ping>`, CSS URLs, navigations by `location` or links, and any request
+  made by a frame or window it is not in: a sandboxed frame without
+  `allow-same-origin`, a `data:` frame, a cross-origin frame, a frame in a
+  closed shadow root the page never exposes, a store-served worker or a
+  service worker.
+- Page code that runs before the guard installs. Where the guard arrives
+  only with the per-script copy (no document-start copy), the page may have
+  kept the original `fetch`, defined `__mealioGuard` or `__mealioArm` itself,
+  or replaced built-ins before they were captured.
+- Page code that rewrites what the guard still reads at call time: Array,
+  Object and String prototype methods and index setters (the guard avoids most
+  of them but not all), the object it is given (a `FormData` file entry, a
+  Request already in use), or a `formdata` event listener that adds fields
+  after the guard judged a form.
+- Persisted queries that send only an innocent name and a hash.
+- A synchronous XHR (`open(method, url, false)`) whose body is a `Blob`, a
+  buffer or a typed array: such a body cannot be read synchronously, so the
+  guard judges its path only and sends it at once (it does not break the
+  request). An asynchronous one is read first, then judged.
+- A form in a declarative shadow root (`<template shadowrootmode>`) parsed
+  after arming, and fields of form-associated custom elements, are not read.
+- A form with no `action` that posts back to a page whose own path is
+  blocked is judged by its fields only: that page was already loaded.
+
+### Known limits
+
+- **Android: redirects of fetch, XHR and subresources.** Android WebView
+  does not report a redirect of a `fetch`, XHR or subresource request to
+  `shouldInterceptRequest`: only the first request is seen. A request to an
+  innocent path that the server redirects to a checkout path is not caught by
+  native blocking (the in-page guard judges only the first URL as well).
+  Navigation redirects are caught: `shouldOverrideUrlLoading` sees each
+  redirect of a main-frame or frame navigation.
+- **What native blocking leaves to the in-page guard.** On Android a GET or
+  HEAD fetch, XHR or subresource to a blocked path is not refused natively;
+  on iOS neither are `ping`, `websocket` and `other` loads. These are what a
+  store's own pages load, and none of them is a form post or a navigation.
+- **iOS: redirects.** WebKit content rule lists are evaluated for every
+  load WebKit makes, so a redirect to a blocked path on a blocking host
+  should be refused as well. This is WebKit's documented behavior and is not
+  yet verified by an SDK test (the iOS browser tests use a custom scheme
+  handler, whose redirects do not go through the network stack the same
+  way).
+- **React Native and Flutter** have no native blocking at all (see
+  "Threat model").
+
+### Native blocking hosts
+
+Native blocking (iOS and Android) runs on a store's hosts and its store-owned
+sign-in hosts: `albertsons.com` and `albertsons.okta.com` for an Albertsons
+banner, `kroger.com`, `login.kroger.com` and `api.kroger.com` for every Kroger
+family store (so the Kroger sign-in sheet is covered). It never runs on a
+shared identity provider: `SHARED_IDENTITY_HOSTS`, in
+`protocol/shared-identity-hosts.json`, which every SDK copies and tests
+against:
+
+```
+google.com  gstatic.com  apple.com  facebook.com  microsoftonline.com
+b2clogin.com  ciamlogin.com  live.com  okta.com  auth0.com  mealio.co
+```
+
+The rule (the JSON file's `rule` and `vectors` are the reference):
+
+1. Normalize a host: lowercase, drop one trailing dot.
+2. A host is under an entry `E` when it equals `E` or ends with `.E` (whole
+   labels: `evilgoogle.com` is not under `google.com`).
+3. The store's names: for each of its `hosts` and `authHosts` (bundled plus
+   signed widening) that is under no entry, the first label of its
+   registrable domain. Safeway has `safeway` and `albertsons`; every Kroger
+   banner has `kroger`.
+4. A host under an entry is a shared identity host, unless it is a strict
+   subdomain of the entry whose tenant label (the label just left of the
+   entry) is one of the store's names. `okta.com`, `login.okta.com` and
+   `kroger.okta.com` are shared for Safeway; `albertsons.okta.com` and
+   `www.albertsons.okta.com` are not. A host under no entry is never shared.
+5. The blocking hosts: the store's `hosts`, then its `authHosts`, without
+   repeats, leaving out every shared identity host. Wegmans blocks on
+   `wegmans.com` only (its B2C and Microsoft hosts are shared).
+
+`isSharedIdentityHost` and `nativeBlockHosts` in
+`packages/core/src/identity.ts` are the reference implementation.
+
+### When native blocking is on
+
+- **On** once, when Mealio's first script of a job runs (the first
+  `runScript`, with `GUARD_ARM_SCRIPT`, or the first sign-in
+  `check.script`). Nothing else turns it on.
+- **Stays on for the whole job**, across every page navigation. A navigation
+  never turns it off, so page code cannot turn it off by navigating and
+  there is no window between a new document and the next script.
+- **Off** only when the job ends (success, failure or cancel) or the store
+  changes.
+- **Never the store's own page assets.** Because it stays on while the store's
+  pages load, it refuses only requests that can change state or move the
+  page:
+  - Android: a request whose method changes state (POST, PUT, PATCH or
+    DELETE) to a blocked path, answered with an empty 403 in
+    `shouldInterceptRequest`; and a main-frame or frame navigation to a
+    blocked path, with any method, refused in `shouldOverrideUrlLoading`.
+    A GET or HEAD subresource is never refused.
+  - iOS: the content rules are restricted to the resource types `fetch` and
+    `raw` (fetch and XHR), `document` (the page and its frames) and `popup`;
+    never `image`, `style-sheet`, `script`, `font` or `media`.
+- A navigation redirected to a blocked path is judged again at the redirect.
+
+### Two copies, and arming
+
+The guard is installed early but stays OFF until Mealio uses the page.
+
+| Copy | Text | Where | When |
+|---|---|---|---|
+| Document-start | `GUARD_SCRIPT`, exactly | every frame (the platform's all-frames document-start script: a `WKUserScript` with `forMainFrameOnly: false`, Android's `addDocumentStartJavaScript`, which runs in every frame its origin rules match, react-native-webview's `injectedJavaScriptBeforeContentLoaded` with `...ForMainFrameOnly={false}`) | every document, in the hidden WebView and the sign-in sheet |
+| Per-script | `GUARD_ARM_SCRIPT` = `GUARD_SCRIPT + "\n" + GUARD_ARM` | the top frame only, through the platform's evaluate call | right before every Mealio server script: each `page_script` script and each `show_login` `check.script` |
+
+`GUARD_ARM` is exactly `window.__mealioArm(); true;`. Copy all three
+constants byte for byte from `guard.ts`; never build the arm call yourself.
+In the `Host` interface (`runner.ts`), `runScript`'s `guard` argument is
+`GUARD_ARM_SCRIPT`; `showLogin` gets `guard` (`GUARD_SCRIPT`, for document
+start) and `armGuard` (`GUARD_ARM_SCRIPT`, before each check script).
+
+- Evaluate `GUARD_ARM_SCRIPT` as its own evaluation, before the server
+  script's evaluation, in the same frame, with nothing between them. Both
+  steps are needed: on a platform with no document-start script (an older
+  Android WebView, the about:blank idle page), the `GUARD_SCRIPT` half
+  installs the guard; when the document-start copy already did, it returns at
+  once and only the arm call does anything.
+- Never put `GUARD_ARM_SCRIPT` or `GUARD_ARM` in a document-start script. An
+  armed copy at document start blocks the store's own boot code (its blob
+  workers, its `/payment` config fetches) and counts its traffic.
+
+What each state does:
+
+- **Unarmed** (after `GUARD_SCRIPT`): the hooks are in place but every call
+  passes straight through, unread. No path or body checks, no rate counting,
+  no worker refusal, no frame scanning.
+- **Arming** (`window.__mealioArm()`): turns the window's guard on for good,
+  until the page navigates (a new document starts unarmed). It arms every
+  same-origin frame the window has now (`window.frames`, and frame elements in
+  the document), installing the guard into any that lack it, recursively.
+  Frames inside open shadow roots, at any depth, are armed too.
+  Calling it again does nothing. `window.__mealioArm`, `window.__mealioArmed`
+  and `window.__mealioGuard` are non-writable, non-configurable properties, so
+  the page cannot swap or remove them once the guard is in.
+- **Armed**: every check is on. A same-origin frame added later is armed as
+  it is added (the DOM hooks below) or as it loads: the document-start copy in
+  a new frame arms itself when its parent's `__mealioArmed()` is true, and
+  the copy in a popup arms itself when its opener is same-origin and armed.
+  A window an armed page gets from `window.open` is armed at once.
+
+A cross-origin frame never gets the guard. The very first thing
+`GUARD_SCRIPT` does is check that it is the top window or that `window.top`
+is reachable and same-origin (reading `window.top.document` does not throw);
+otherwise it returns and installs nothing. So captchas and identity providers
+(Cloudflare Turnstile, reCAPTCHA, hCaptcha, Apple, Google) are never touched.
+
+### Frames made in one tick
+
+The platform's script does not reach a same-origin frame a page script adds
+and uses in the same tick (an about:blank frame), so while armed the guard
+installs itself, armed, into a frame as soon as one of these returns: the
+`contentWindow` and `contentDocument` getters of iframe, frame and object
+elements; `appendChild`, `insertBefore`, `replaceChild`, `append`, `prepend`,
+`replaceChildren`, `before`, `after`, `replaceWith`, `insertAdjacentElement`,
+`insertAdjacentHTML`; the `innerHTML` and `outerHTML` setters (and
+`ShadowRoot`'s `innerHTML`); `Element.prototype.setHTMLUnsafe` and
+`ShadowRoot.prototype.setHTMLUnsafe`; `Range.prototype.insertNode` and
+`surroundContents`; `Document.prototype.write`, `writeln` and
+`execCommand` (after which every `window.frames` entry is covered). A
+`MutationObserver` covers the rest. A frame in a shadow tree is not in
+`window.frames`; only its element's hooked getters reach its window.
+
+### Bodies
+
+A body is a blocked operation when any of these match
+`BLOCKED_GRAPHQL_OPERATION` (case-insensitive): its `operationName` (JSON,
+single or batched, or form-encoded), the declared name of any `mutation` in
+its `query`, or any root field of any mutation. A root field sits directly in
+the mutation's top selection set, or inside an inline fragment or a fragment
+spread at that level (spreads followed through other spreads). Aliases are
+looked through (`a: placeOrder` counts as `placeOrder`). Nested fields,
+arguments, variables and directives are never tested, so an add that reads
+back `maxPurchaseQuantity` or `checkoutUrl` is allowed. Strings, block strings
+(with `\"""` escapes) and comments are stripped before parsing.
+
+```
+check_?out|place_?order|submit_?order|confirm_?order|create_?order|purchase|payment
+```
+
+A GraphQL multipart upload's `operations` field is judged as a JSON body, whether the body is FormData or raw multipart text, and whatever the part name's quoting (`name="operations"`, `name='operations'` or bare). A leading byte order mark is ignored. Every SDK reads JSON exactly as `JSON.parse` does: any nesting depth, ASCII hex digits only in `\u` escapes, lone surrogates accepted. The cases are in `protocol/test-vectors.json` (`blockedBodies` and `jsonBodies`).
+
+Limits, in this order after the byte order mark is dropped (`bodyLimits` in
+the vectors; `BODY_MAX_DEPTH` and `BODY_MAX_TEXT` in `allowlist.ts`):
+
+1. **Depth.** The top body is depth 0; an `operations` value (form-encoded or
+   a raw multipart part) is judged at its parent's depth + 1. A body at depth
+   greater than 8 is blocked without being read. Judging never recurses more
+   than that, and never crashes: on Kotlin a `StackOverflowError` in
+   `bodyBlocked` is caught and the body is blocked.
+2. **Size.** A body longer than 1,048,576 UTF-16 code units is blocked
+   without being read. Store requests are far smaller, and a body that size
+   could hide a blocked name in escapes that no text match would see.
+
+A body that cannot be read, such as a stream, is allowed, but its path is
+still checked. Any other body that is not a string, `URLSearchParams`,
+`FormData`, `Blob`, `ArrayBuffer` or view, stream or document (a `String`
+object, an object with `toString`) is converted to text once with `String()`,
+judged, and that text is what is sent. An `ArrayBuffer` body is copied into a
+`Blob` once, read, and the copy is sent.
+
+**Raw multipart text** is scanned by `multipartFields` (`allowlist.ts`), which
+finds exactly the matches of the regex `MULTIPART_FIELD` (flag `g`) in one
+pass, linear in the body. Do not run `MULTIPART_FIELD` as a regex: it walks
+every following line again from every `name=`, so a body of `name=query\n`
+lines under 1 MB takes minutes. Port `multipartFields` step for step (its
+comment lists the steps), use `isJsSpace` for the name lookahead (JavaScript's
+`\s`; Kotlin's and Swift's `\s` are different sets), and test the port
+against the regex on fuzzed text and against `multipartScan` in the vectors
+(each judged in well under a second).
+
+**Form submissions.** `form.submit()` and `requestSubmit()` are judged when
+they are called and throw when refused. Every other submission is judged by a
+`submit` listener in the capture phase on the window and on every shadow root,
+and a refused one is cancelled with `preventDefault` only (see "Threat model"
+above). An explicit target (the submitter's `formaction`, else the form's
+`action` attribute, when not blank) is checked as a path. A form with neither
+is judged by its fields only, never by the page URL. The form's
+`operationName`, `query` and `operations` controls (the submitter included)
+are checked as a form-encoded body. A `dialog` method form is never judged.
+
+`Request`, `Blob`, `ArrayBuffer`,
+`URLSearchParams` and `FormData` bodies are read before the check. A beacon
+cannot wait for a body to be read, so a beacon whose body is not text is
+refused. The cases every SDK must agree on are in `protocol/test-vectors.json`
+(`blockedBodies`, `jsonBodies`, `bodyLimits`, `multipartScan`), and `node protocol/check-rails.mjs` confirms none of the
+rails' own paths or operations are blocked.
 
 ## Rate caps
 
@@ -405,6 +727,43 @@ envelopes with more than 64 instructions.
 Rotating a key means shipping the new public key in an SDK release first,
 then switching the server's `kid`.
 
+## One job at a time
+
+Every job that drives the hidden page (prepare, search, add and warm) runs
+through one queue in the client, so no two jobs ever overlap on the page. A
+page load or script result belongs to the job that asked for it.
+
+Every wait is bounded. Each HTTP request to Mealio, and each call to the
+partner's session function, times out after 30 seconds (`network` or
+`session_failed`). A host that never answers an instruction is cut off 5
+seconds after that instruction's own timeout.
+
+A prepare or search can be cancelled, for example when the user closes the
+sheet. It stops after the current step, sends nothing more, never shows
+sign-in, and frees the queue. An add cannot be cancelled once it starts, so
+the drop-in cannot be closed while adding. A second add on the same cart
+returns the first one's result.
+
+## Users
+
+`setUser(id)` (React Native: the provider's `userId` prop) tells the SDK who
+is signed in. When the id changes, the SDK cancels any prepare or search,
+forgets the session, and if a user was signed in before, signs out of the
+stores. While the id is null nobody is signed in: no session is requested,
+warm-ups do nothing, and the drop-in button calls `onSignInRequired`.
+`resetSession()` forgets the session alone.
+
+## Warnings
+
+A prepared cart may carry `warnings: [{ code, message }]`. The SDK exposes
+them as `cart.warnings` and logs them in debug builds.
+
+| code | meaning |
+| --- | --- |
+| `ingredients_dropped` | A recipe had more than 60 ingredients. Only the first 60 were used |
+| `lines_dropped` | The cart had more than 100 items. Only the first 100 were used |
+| `servings_ignored` | `makeServings` was sent without `servings`, so nothing scaled |
+
 ## Errors the SDK raises to the app
 
 | code | meaning |
@@ -413,7 +772,12 @@ then switching the server's `kid`.
 | `blocked` | An instruction broke the allowlist |
 | `store_unavailable` | The server says the store cannot be reached now |
 | `login_cancelled` | The user closed the login sheet |
-| `session_expired` | The SDK session token expired; get a new one from your server |
+| `session_expired` | Mealio refused the session twice in a row |
+| `session_failed` | The partner's session function threw or timed out. The message is the partner's own |
+| `not_signed_in` | A cart was started while `userId` is null |
+| `cancelled` | The job was cancelled, for example by closing the sheet or a user change |
+| `cart_expired` | The prepared cart is too old to add. Prepare it again |
+| `too_many_searches` | This cart reached its search limit |
 | `network` | Could not reach Mealio |
 | `unsupported` | An instruction `op` this SDK does not know |
 | `cart_cap_reached` | The app reached the monthly cap set in its dashboard. The drop-in shows `capReached` |
