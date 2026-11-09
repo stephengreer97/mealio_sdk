@@ -132,10 +132,10 @@ struct JSONWriter {
         return s
     }
 
-    /// JSONEncoder's `.sortedKeys` order.
+    /// JSONEncoder's `.sortedKeys` order on current Foundation: plain UTF-16
+    /// code unit order ("A" < "_" < "a", "a1" < "a10" < "a2").
     static func before(_ a: String, _ b: String) -> Bool {
-        a.compare(b, options: [.numeric, .caseInsensitive, .forcedOrdering], range: a.startIndex..<a.endIndex,
-                  locale: Locale(identifier: "")) == .orderedAscending
+        a.utf16.lexicographicallyPrecedes(b.utf16)
     }
 
     private static let hex: [UInt8] = Array("0123456789abcdef".utf8)
