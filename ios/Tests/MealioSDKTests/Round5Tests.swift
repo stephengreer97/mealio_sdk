@@ -11,23 +11,29 @@ final class Round5Tests: XCTestCase {
     private static let mutation = #"{"query":"mutation { placeOrder { id } }"}"#
     private static let innocent = #"{"operationName":"cartItemsV2"}"#
 
-    /// `inner` as the `operations` part of a raw multipart body, `levels` deep.
+    /// `inner` as a form-encoded `operations` field, `levels` deep.
     private func nested(_ inner: String, levels: Int) -> String {
-        var s = inner
-        for _ in 0..<levels {
-            s = "--b\r\nContent-Disposition: form-data; name=\"operations\"\r\n\r\n" + s
-        }
-        return s + "\r\n--b--"
+        String(repeating: "operations=", count: levels) + inner
+    }
+
+    /// The same, inside one raw multipart `operations` part (one more level).
+    /// Raw multipart parts cannot nest in each other: a part's value ends at
+    /// the first line starting `--`, which is the next part's boundary.
+    private func multipart(_ inner: String, levels: Int) -> String {
+        "--b\r\nContent-Disposition: form-data; name=\"operations\"\r\n\r\n" + nested(inner, levels: levels - 1) + "\r\n--b--"
     }
 
     // MARK: item 2: body checks never crash and never recurse deeply
 
     func testAnOperationsFieldNestedPastEightLevelsIsBlocked() {
-        XCTAssertFalse(Allowlist.bodyBlocked(nested(Round5Tests.innocent, levels: Allowlist.bodyMaxDepth)))
-        XCTAssertTrue(Allowlist.bodyBlocked(nested(Round5Tests.innocent, levels: Allowlist.bodyMaxDepth + 1)))
-        XCTAssertTrue(Allowlist.bodyBlocked(nested(Round5Tests.mutation, levels: 3)))
-        // Far deeper ends at once instead of recursing on.
-        XCTAssertTrue(Allowlist.bodyBlocked(nested(Round5Tests.innocent, levels: 2000)))
+        let wraps: [(String, Int) -> String] = [self.nested(_:levels:), self.multipart(_:levels:)]
+        for wrap in wraps {
+            XCTAssertFalse(Allowlist.bodyBlocked(wrap(Round5Tests.innocent, Allowlist.bodyMaxDepth)))
+            XCTAssertTrue(Allowlist.bodyBlocked(wrap(Round5Tests.innocent, Allowlist.bodyMaxDepth + 1)))
+            XCTAssertTrue(Allowlist.bodyBlocked(wrap(Round5Tests.mutation, 3)))
+            // Far deeper ends at once instead of recursing on.
+            XCTAssertTrue(Allowlist.bodyBlocked(wrap(Round5Tests.innocent, 2000)))
+        }
     }
 
     func testABodyOverOneMegabyteIsBlockedUnread() {
@@ -189,8 +195,108 @@ final class Round5Tests: XCTestCase {
             XCTAssertEqual(msg["keep"], v["keep"], what)
             // What the runner does with it next: match it, and send it to the server.
             XCTAssertTrue(matches(msg, Matcher(type: "X", eq: ["keep": 1])), what)
-            XCTAssertNoThrow(try JSONEncoder().encode(JSONValue.object(msg)), what)
+            XCTAssertNoThrow(try JSONValue.object(msg).jsonData(), what)
+            // Inside a step body it is four levels deeper still, and is sent whole.
+            let step = StepRequest(seq: 1, results: [InstructionResult(id: "i1", ok: true, ms: 5, messages: [msg])])
+            let sent = try JSONWriter().data(step.jsonNode)
+            let back = try XCTUnwrap(JSONValue.parse(sent), what)
+            let echoed = try XCTUnwrap(back["results"]?.arrayValue?.first?["messages"]?.arrayValue?.first, what)
+            XCTAssertEqual(echoed, .object(msg), what)
         }
+    }
+
+    // MARK: JSONWriter writes what JSONEncoder writes, at any depth
+
+    private func encoder(sorted: Bool, slashes: Bool) -> JSONEncoder {
+        let e = JSONEncoder()
+        var f: JSONEncoder.OutputFormatting = []
+        if sorted { f.insert(.sortedKeys) }
+        if !slashes { f.insert(.withoutEscapingSlashes) }
+        e.outputFormatting = f
+        return e
+    }
+
+    private static let ordinary: [JSONValue] = {
+        var list: [JSONValue] = [
+            .null, true, false, 0, 1, -1, 42, .int(Int.max), .int(Int.min), .int(9_007_199_254_740_993),
+            0.5, -0.5, 1.5, 0.1, 0.2, .double(1.0 / 3.0), 100.0, -100.0, 1e15, 1e16, 1e17, 1e21, 1e22, 1.5e300, 1e-5, 1e-7, 5e-324,
+            .double(-0.0), .double(0.0), .double(Double.greatestFiniteMagnitude), .double(-Double.leastNormalMagnitude),
+            .double(123456789.125), .double(9_007_199_254_740_993.0),
+            "", "plain", "quote \" backslash \\ slash / end", "</script>", "http://a.b/c?d=e&f",
+            "tab\tnew\nret\rback\u{08}feed\u{0C}", "nul \u{00} one \u{01} us \u{1F} del \u{7F}", "\u{0B}\u{0E}\u{10}\u{1A}",
+            "caf\u{E9} \u{4E2D}\u{6587} \u{1F600} \u{2028}\u{2029} \u{FEFF} \u{200B}", "e\u{301}",
+        ]
+        for c in 0..<0x20 { list.append(.string(String(Character(Unicode.Scalar(UInt8(c)))))) }
+        list.append([])
+        list.append([:])
+        list.append([1, 2.5, "x", nil, true, [], [:], [[["deep"]]]])
+        list.append(["a": 1, "b": [1, 2, ["c": "d/e"]], "c": ["x": nil, "y": [:], "z": []], "d": -0.0, "e": "\u{1F600}"])
+        list.append(["k": ["k": ["k": ["k": ["k": "v"]]]]])
+        list.append(["b": 1, "a": 2, "B": 3, "A": 4, "a1": 5, "a10": 6, "a2": 7, "_": 8, "z": 9, "": 11])
+        list.append(["type": "X", "items": [["id": "p1", "price": 3.99, "qty": 2], ["id": "p/2", "price": 0.5, "qty": 1]]])
+        return list
+    }()
+
+    func testJSONWriterMatchesJSONEncoderOnOrdinaryValues() throws {
+        for v in Round5Tests.ordinary {
+            for sorted in [true, false] {
+                for slashes in [true, false] {
+                    // Unsorted, only an object of one key has a single order.
+                    if !sorted, case .object(let o) = v, o.count > 1 { continue }
+                    let want = try encoder(sorted: sorted, slashes: slashes).encode(v)
+                    let got = try JSONWriter(sortedKeys: sorted, escapeSlashes: slashes).data(v)
+                    XCTAssertEqual(String(decoding: got, as: UTF8.self), String(decoding: want, as: UTF8.self),
+                                   "sorted \(sorted) slashes \(slashes)")
+                }
+            }
+        }
+        // The default is the client's: unsorted, slashes left alone.
+        XCTAssertEqual(try JSONValue.string("a/b").jsonData(), Data(#""a/b""#.utf8))
+    }
+
+    func testJSONWriterRefusesWhatJSONEncoderRefuses() {
+        for d in [Double.nan, Double.infinity, -Double.infinity] {
+            XCTAssertThrowsError(try JSONEncoder().encode(JSONValue.double(d)))
+            XCTAssertThrowsError(try JSONValue.double(d).jsonData())
+            XCTAssertThrowsError(try JSONValue.array([["x": .double(d)]]).jsonData())
+        }
+    }
+
+    func testAStepBodyIsWrittenAsJSONEncoderWritesIt() throws {
+        let full = InstructionResult(id: "i1", ok: false, ms: 12, skipped: false, error: "bad / thing", finalUrl: "https://x.test/a",
+                                     messages: [["type": "A", "n": 1.25], ["type": "B", "list": [1, "two", nil]]],
+                                     timedOut: true, outcome: .signedIn, status: 200, headers: ["content-type": "text/html", "x-a": "1"],
+                                     body: "{\"a\":\"\u{01}\"}", truncated: true)
+        let bare = InstructionResult(id: "i2", ok: true, ms: 0)
+        let step = StepRequest(seq: 7, results: [full, bare])
+        for slashes in [true, false] {
+            let want = try encoder(sorted: true, slashes: slashes).encode(step)
+            let got = try JSONWriter(sortedKeys: true, escapeSlashes: slashes).data(step.jsonNode)
+            XCTAssertEqual(String(decoding: got, as: UTF8.self), String(decoding: want, as: UTF8.self))
+        }
+        // Unsorted, the fields come in declared order and nil ones are left out.
+        XCTAssertEqual(String(decoding: try JSONWriter().data(StepRequest(seq: 2, results: [bare]).jsonNode), as: UTF8.self),
+                       #"{"seq":2,"results":[{"id":"i2","ok":true,"ms":0}]}"#)
+    }
+
+    func testAMessage513DeepInsideAStepBodyIsWritten() throws {
+        let n = 512
+        let raw = #"{"type":"X","a":"# + String(repeating: "[", count: n) + String(repeating: "]", count: n) + #","keep":1}"#
+        let msg = try XCTUnwrap(parseMessage(raw))
+        XCTAssertEqual(depthOf(.object(msg)), 513)
+        // Foundation's writer stops at 512, which is why the SDK has its own.
+        XCTAssertThrowsError(try JSONEncoder().encode(StepRequest(seq: 1, results: [InstructionResult(id: "i", ok: true, ms: 1, messages: [msg])])))
+        let step = StepRequest(seq: 1, results: [InstructionResult(id: "i", ok: true, ms: 1, messages: [msg])])
+        let text = String(decoding: try JSONWriter().data(step.jsonNode), as: UTF8.self)
+        XCTAssertTrue(text.hasPrefix(#"{"seq":1,"results":[{"id":"i","ok":true,"ms":1,"messages":[{"#), text.prefix(80).description)
+        let back = try XCTUnwrap(JSONValue.parse(text))
+        XCTAssertEqual(depthOf(back), 517)
+        // Far deeper still writes, without recursion. (Kept to a depth whose
+        // release, which is recursive, fits the test thread's stack.)
+        var deep: JSONValue = "end"
+        for _ in 0..<5_000 { deep = .array([deep]) }
+        let big = try deep.jsonData()
+        XCTAssertEqual(big.count, 5_000 * 2 + 5)
     }
 
     func testIsJSONParseForAnythingNotTooDeepStringsWithBracketsInThemIncluded() {

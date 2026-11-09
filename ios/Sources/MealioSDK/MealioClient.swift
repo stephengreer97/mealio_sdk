@@ -805,11 +805,18 @@ public final class MealioClient {
     /// `pin`: an add's own session. `cancel`: the job's, checked once its session arrives.
     private func post<B: Encodable>(_ path: String, body: B, pin: SessionPin? = nil,
                                     cancel: CancelToken? = nil) async throws -> JSONValue {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.withoutEscapingSlashes]
         let data: Data
         do {
-            data = try encoder.encode(body)
+            if let b = body as? JSONNodeConvertible {
+                // A JSON value or a step body, which may carry a page message
+                // already 513 deep: JSONEncoder stops at 512, this writer does not.
+                data = try JSONWriter().data(b.jsonNode)
+            } else {
+                // Typed bodies (recipes, selections, ids) hold no page message.
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.withoutEscapingSlashes]
+                data = try encoder.encode(body)
+            }
         } catch {
             throw MealioError(code: MealioError.Code.server, message: "Could not encode the request")
         }
