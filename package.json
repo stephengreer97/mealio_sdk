@@ -5,7 +5,7 @@
     "packages/*"
   ],
   "scripts": {
-    "test": "npm run test --workspaces --if-present",
+    "test": "npm run build -w @mealio/sdk-core && npm run test --workspaces --if-present",
     "typecheck": "npm run build -w @mealio/sdk-core && npm run typecheck --workspaces --if-present"
   }
 }
