@@ -194,7 +194,7 @@ Pick from this list.
 
 Also tell the developer two things, so nothing surprises them:
 
-- **Cost:** pricing is per completed cart. The first 100 live carts each month are free. Sandbox carts are never billed.
+- **Cost:** pricing is per completed cart, and a number of live carts each month are free (see developers.mealio.co/docs/pricing for the current numbers). Sandbox carts are never billed.
 - **Keys:** they will create an app at https://developers.mealio.co/dashboard. Only a person can do this. Ask them to do it now if they have not. Only the publishable key may be shared with you.
 
 ## Phase 3: Plan
