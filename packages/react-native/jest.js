@@ -12,8 +12,12 @@
 // afterEach itself, on the file's root block, so it runs after every test in
 // the file. Loaded once tests have started (a require inside a test or a hook
 // such as beforeAll, a lazy require, jest.isolateModules), where Jest refuses
-// new hooks, it does not. The reliable path everywhere is a setup file
-// (Jest's setupFilesAfterEnv) with
+// new hooks, it does not. On other runners (Vitest) it registers the hook
+// where it first loads: at a file's top level that covers the file, inside a
+// describe body only that describe (and setupMealioMock() returns true). With
+// the afterEach comes a beforeEach that undoes Jest's resetMocks on the
+// default answers. The reliable path on any runner is a setup file (Jest's
+// setupFilesAfterEnv, Vitest's setupFiles) with
 //   require('@mealio/react-native-cart/jest').setupMealioMock();
 // It registers once however often it is called.
 // To run your screens on the real client and a fake server instead, see
@@ -21,7 +25,31 @@
 // Plain JS on purpose: partners' Jest loads it untransformed.
 const React = require('react');
 
-const fn = (impl) => (typeof jest !== 'undefined' ? jest.fn(impl) : impl);
+/**
+ * Every mock made with a default answer, and that answer. Jest's resetMocks
+ * (and restoreMocks on Jest 29) strips a jest.fn of its implementation before
+ * each test; the beforeEach setupMealioMock registers puts the default back
+ * on each one left with none, so useMealio().prepareCart() still gives a cart.
+ * An answer the test scripted (mockResolvedValue, mockImplementation) is kept.
+ */
+const defaults = [];
+let filling = false; // true while fill() makes useMealio()'s own mocks
+const noop = () => undefined;
+function fn(impl) {
+  if (typeof jest === 'undefined' || !jest || typeof jest.fn !== 'function') return impl || noop;
+  const m = jest.fn(impl);
+  if (impl) defaults.push([m, impl, filling]);
+  return m;
+}
+/** Puts each default answer back on a mock that has none left. */
+function restoreDefaults() {
+  for (let i = 0; i < defaults.length; i += 1) {
+    const m = defaults[i][0];
+    try {
+      if (typeof m.getMockImplementation === 'function' && !m.getMockImplementation()) m.mockImplementation(defaults[i][1]);
+    } catch (e) { /* a mock the test replaced oddly is left alone */ }
+  }
+}
 
 let DEFAULT_STRINGS = {};
 let textTools = null;
@@ -102,6 +130,10 @@ const ui = {
 /** The one object useMealio() returns. resetMealioMock refills it in place. */
 const api = {};
 function fill() {
+  filling = true;
+  try { fillApi(); } finally { filling = false; }
+}
+function fillApi() {
   ui.emit = fn();
   Object.assign(api, {
     userId: undefined,
@@ -126,6 +158,8 @@ let providerSignIn = null;
 /** Back to the start: default answers, no recorded calls, a signed-in user, no provider. */
 function resetMealioMock() {
   providerSignIn = null;
+  // The old mocks are gone from useMealio(); carts made earlier keep theirs.
+  for (let i = defaults.length - 1; i >= 0; i -= 1) if (defaults[i][2]) defaults.splice(i, 1);
   fill();
 }
 fill();
@@ -176,9 +210,13 @@ function testsStarted() {
  * A hook added while a describe block is being collected belongs to that
  * block alone, so a mock first required inside one describe would reset
  * only that block's tests. On Jest the hook is added to the file's root
- * block instead, so it runs after every test in the file. Where that cannot
- * be done (another runner inside a describe), no hook is added and the
- * return is false: a setup file is the reliable path.
+ * block instead, so it runs after every test in the file. Other runners
+ * (Vitest) cannot be reached that way: there the hook goes where this is
+ * called, a describe body included, and the return is still true. A setup
+ * file is the reliable path on any runner.
+ *
+ * A beforeEach is registered with it by the same rules: it puts each default
+ * answer back on a mock that Jest's resetMocks left with none.
  */
 let registered = false;
 function setupMealioMock() {
@@ -192,6 +230,11 @@ function setupMealioMock() {
   try {
     if (nested) state.currentDescribeBlock = root;
     afterEach(() => resetMealioMock());
+    // Registered by the same rules, so it runs before every test the reset
+    // runs after: it undoes Jest's resetMocks on the default answers.
+    if (typeof beforeEach === 'function') {
+      try { beforeEach(() => restoreDefaults()); } catch (e) { /* the reset alone still works */ }
+    }
   } catch (e) {
     return false;
   } finally {

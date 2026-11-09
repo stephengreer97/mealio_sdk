@@ -42,8 +42,13 @@ export function setMockUser(id: string | null | undefined): void;
 /** Default answers, no recorded calls, a signed-in user. Runs after every test by itself (see setupMealioMock). */
 export function resetMealioMock(): void;
 /**
- * Register the after-each reset. Loaded at a test file's top level the mock
- * does this itself; call it from a setup file (setupFilesAfterEnv) when the
- * mock may first load inside a test. False where no hook can be added.
+ * Register the after-each reset, and a before-each that puts the default
+ * answers back after Jest's resetMocks. Loaded at a test file's top level
+ * the mock does this itself; call it from a setup file (Jest's
+ * setupFilesAfterEnv, Vitest's setupFiles), the reliable path on any runner.
+ * On Jest the hooks go on the file's root block; on other runners they go
+ * where this is called, so inside a describe body they cover only that
+ * describe. False where no hook can be added (inside a test, or once Jest has
+ * started running tests).
  */
 export function setupMealioMock(): boolean;

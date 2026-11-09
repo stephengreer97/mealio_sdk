@@ -1,5 +1,9 @@
 ## Unreleased
 
+- `ItemRecipe.share` (double) is the exact share the server sends (0.5);
+  `quantity` stays the 0.5.0 int. `toJson` sends the share. Testing kit:
+  `MealioFakeItem.quantityExact` keeps a script's fractional quantity (1.5)
+  and is what the fake cart sends.
 - Guard: installed unarmed and armed by the per-script copy
   (`guardArmScript`, injected before each page script and each sign-in check
   script), so the store's own boot traffic runs untouched until Mealio's

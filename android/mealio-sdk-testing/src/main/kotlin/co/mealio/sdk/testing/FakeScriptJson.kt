@@ -72,15 +72,19 @@ fun fakeScriptFromJson(o: JSONObject): FakeScript {
 /** One script line, TypeScript FakeItem field names. */
 fun fakeItemFromJson(o: JSONObject): FakeItem {
     checkItem(o, "item")
+    val scriptQuantity = jsNumber(o.opt("quantity"))?.toDouble() ?: 1.0
     return FakeItem(
         key = o.string("key")!!,
         options = o.objects("options").map { Product.fromJson(it) },
         remembered = o.string("remembered"),
         ingredient = o.string("ingredient"),
-        // TS `quantity?: number`: the value as JSON.parse reads it, kept (1.5,
-        // 3000000000 and 1e400, which is Infinity, are not truncated, clamped
-        // or refused). The cart sends it as JSON.stringify would.
-        quantity = jsNumber(o.opt("quantity")) ?: 1,
+        // TS `quantity?: number`: the value as JSON.parse reads it, kept in
+        // quantityExact (1.5, 3000000000 and 1e400, which is Infinity, are not
+        // truncated, clamped or refused). A whole Int is quantity too, so
+        // FakeItem(quantity = 2) equals a script's 2. The cart sends it as
+        // JSON.stringify would.
+        quantity = scriptQuantity.let { if (wholeInt(it)) it.toInt() else 1 },
+        quantityExact = scriptQuantity,
         rememberedPreferenceId = o.string("rememberedPreferenceId"),
         rememberedUnavailable = o.opt("rememberedUnavailable") == true,
         startUnchecked = o.opt("startUnchecked") == true,
@@ -117,6 +121,10 @@ internal fun jsNumber(v: Any?): Number? = when (v) {
     is Number -> v
     else -> null
 }
+
+/** A Double that is exactly an Int (not -0.0, which JSON.parse keeps). */
+private fun wholeInt(d: Double): Boolean =
+    d == Math.rint(d) && d >= Int.MIN_VALUE && d <= Int.MAX_VALUE && (d != 0.0 || 1.0 / d > 0)
 
 private fun isJsNumber(v: Any?) = v is Number || v is JsNonFinite
 

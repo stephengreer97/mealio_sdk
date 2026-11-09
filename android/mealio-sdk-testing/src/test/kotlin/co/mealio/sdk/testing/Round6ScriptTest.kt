@@ -13,7 +13,7 @@ class Round6ScriptTest {
 
     @Test fun largeIntegersAreNotWrapped() {
         val s = fakeScriptFromJson("{\"items\":[{\"key\":\"a\",\"quantity\":3000000000}],\"add\":{\"fail\":{\"code\":\"x\",\"status\":4294967799}}}")
-        assertEquals(3000000000L, s.items.single().quantity) // round 7: kept, not clamped
+        assertEquals(3.0e9, s.items.single().quantityExact, 0.0) // round 7: kept, not clamped (round 8: in quantityExact)
         assertEquals(Int.MAX_VALUE, s.addFail?.status)
     }
 
@@ -22,11 +22,11 @@ class Round6ScriptTest {
             "{\"items\":[{\"key\":\"a\",\"quantity\":1.5,\"recipes\":[{\"id\":\"r\",\"title\":null,\"quantity\":0.5}]," +
                 "\"options\":[{\"id\":\"p\",\"name\":\"P\",\"maxQuantity\":2.5}]}],\"errors\":{\"search\":{\"code\":\"n\",\"status\":503.5}}}",
         )
-        assertEquals(1.5, s.items.single().quantity) // round 7: kept, not truncated
-        assertEquals(0.5, s.items.single().recipes!!.single().quantity, 0.0)
+        assertEquals(1.5, s.items.single().quantityExact, 0.0) // round 7: kept, not truncated (round 8: in quantityExact)
+        assertEquals(0.5, s.items.single().recipes!!.single().share, 0.0)
         assertEquals(503, s.errors[FakeKind.SEARCH]?.status)
         // Exponent forms and -0 too.
         assertEquals(2, fakeScriptFromJson("{\"items\":[{\"key\":\"a\",\"quantity\":2e0}]}").items.single().quantity)
-        assertEquals(-0.0, fakeScriptFromJson("{\"items\":[{\"key\":\"a\",\"quantity\":-0}]}").items.single().quantity)
+        assertEquals(-0.0, fakeScriptFromJson("{\"items\":[{\"key\":\"a\",\"quantity\":-0}]}").items.single().quantityExact, 0.0)
     }
 }

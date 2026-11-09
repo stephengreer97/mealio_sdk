@@ -743,6 +743,9 @@ public final class MealioClient {
         guard let job = start["job"]?.stringValue else {
             throw MealioError(code: MealioError.Code.server, message: "Mealio did not start a job")
         }
+        // However the job ends (done, fail, cancel, an error), the host is
+        // told: the network block that went on at its first script comes off.
+        defer { runner.jobEnded() }
         var env = Envelope(json: start["envelope"])
         var seq = 0
         for _ in 0..<MealioClient.maxSteps {

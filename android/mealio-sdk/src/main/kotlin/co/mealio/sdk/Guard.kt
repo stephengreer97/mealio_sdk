@@ -67,7 +67,7 @@ val GUARD_SCRIPT: String = """(function(){
   var formAction = getter(window.HTMLFormElement, 'action'), formMethod = getter(window.HTMLFormElement, 'method'), formElements = getter(window.HTMLFormElement, 'elements');
   var getAttr = method(window.Element, 'getAttribute'), shadowOf = getter(window.Element, 'shadowRoot');
   var evTarget = getter(window.Event, 'target'), evSubmitter = getter(window.SubmitEvent, 'submitter'), evPrevented = getter(window.Event, 'defaultPrevented');
-  var evPrevent = method(window.Event, 'preventDefault'), evStop = method(window.Event, 'stopImmediatePropagation');
+  var evPrevent = method(window.Event, 'preventDefault');
   var addEL = method(window.EventTarget, 'addEventListener'), gpo = Object.getPrototypeOf;
   var construct = typeof Reflect === 'object' && Reflect && typeof Reflect.construct === 'function' ? Reflect.construct : null;
   var BLOCK = new RegExp(${jsStringLiteral(BLOCKED_PATTERNS.joinToString("|"))}, 'i');
@@ -440,11 +440,14 @@ val GUARD_SCRIPT: String = """(function(){
     }
     guardWorker('Worker');
     guardWorker('SharedWorker');
-    // Form submissions: the action (or the submitter's formaction; with
-    // neither, the page's own URL, where the form really goes) is checked as a
-    // path, and the form's fields as a form-encoded body. The fields are read
-    // from the form's controls, not with new FormData: that would fire the
-    // page's formdata listeners a second time.
+    // Form submissions: an explicit target (the submitter's formaction, or
+    // else the form's action attribute) is checked as a path, and the form's
+    // fields as a form-encoded body. A form with neither posts back to the
+    // page it is on, which the SDK already allowed: only its fields are
+    // judged, never the page URL or its query (a sign-in page at
+    // /login?returnUrl=/checkout is not a checkout). The fields are read from
+    // the form's controls, not with new FormData: that would fire the page's
+    // formdata listeners a second time.
     function fieldsOf(form, submitter) {
       var els = null, q = '', n = 0, i, el, name, type, v;
       try { els = formElements ? formElements(form) : form.elements; n = els.length; } catch (e) { return null; }
@@ -469,40 +472,58 @@ val GUARD_SCRIPT: String = """(function(){
       if (m === null || m === undefined) { try { m = formMethod ? formMethod(form) : form.method; } catch (e) {} }
       return typeof m === 'string' && has(/^dialog$/i, m);
     }
+    // An attribute that is there and not blank names where the form goes.
+    function attrOf(el, name) {
+      var v = null;
+      if (!el || !getAttr) return null;
+      try { v = getAttr(el, name); } catch (e) { return null; }
+      return typeof v === 'string' && has(/\S/, v) ? v : null;
+    }
     function formCheck(form, submitter) {
-      var action = null, fa = null;
+      var action = null;
       if (isDialog(form, submitter)) return;
-      if (submitter && getAttr) { try { fa = getAttr(submitter, 'formaction'); } catch (e) {} }
-      if (fa !== null && fa !== undefined) action = fa;
-      else { try { action = formAction ? formAction(form) : form.action; } catch (e) { return; } }
-      if (pathBlocked(action)) throw refuse('blocked_path');
+      action = attrOf(submitter, 'formaction');
+      if (action === null && attrOf(form, 'action') !== null) {
+        try { action = formAction ? formAction(form) : form.action; } catch (e) { action = null; }
+      }
+      if (action !== null && pathBlocked(action)) throw refuse('blocked_path');
       if (bodyBlocked(fieldsOf(form, submitter))) throw refuse('blocked_operation');
     }
-    // form.submit() fires no event, so it is judged here. requestSubmit(),
-    // buttons and the Enter key fire a submit event, judged below.
+    // form.submit() fires no event, so it is judged here. requestSubmit() is
+    // judged here as well, before its event, by the same rules: each throws
+    // only for a blocked explicit target or blocked fields. Buttons and the
+    // Enter key fire a submit event, judged below.
     var FE = w.HTMLFormElement;
     if (FE && FE.prototype) {
-      var fsubmit = FE.prototype.submit;
+      var fsubmit = FE.prototype.submit, frequest = FE.prototype.requestSubmit;
       if (typeof fsubmit === 'function') FE.prototype.submit = function () { if (armed) formCheck(this, null); return apply(fsubmit, this, arguments); };
+      if (typeof frequest === 'function') FE.prototype.requestSubmit = function (by) {
+        // A submitter that is not this form's is refused by requestSubmit itself.
+        if (armed) { var sb = null; try { if (by && by.form === this) sb = by; } catch (e) {} formCheck(this, sb); }
+        return apply(frequest, this, arguments);
+      };
     }
-    // A submit event is judged AFTER the page's own handlers, in the bubble
-    // phase, and only when none of them called preventDefault: a form the
-    // page sends itself in JS (React's onSubmit) is never touched. submit does
-    // not cross a shadow root, so each shadow root gets the same listener: on
-    // attachShadow, and at arming for open roots already there.
+    // A submit event is judged in the CAPTURE phase, before any handler of the
+    // page's can stop it: on the window, which comes first on every path, and
+    // on each shadow root (submit does not cross one), on attachShadow and at
+    // arming for open roots already there. A blocked form is refused with
+    // preventDefault ONLY, never stopPropagation: the page's own handlers
+    // always run, and a request one of them sends itself (a JS sign-in's
+    // fetch) is judged on its own by the fetch hook.
     function onSubmit(e) {
       if (!armed) return;
       var form = null, by = null, prevented = false;
+      // Already refused (by the window's listener, on a form a shadow root's
+      // listener sees again), or already not going anywhere.
       try { prevented = evPrevented ? evPrevented(e) : e.defaultPrevented; } catch (x) {}
       if (prevented) return;
       try { form = evTarget ? evTarget(e) : e.target; } catch (x) {}
       try { by = evSubmitter ? evSubmitter(e) : e.submitter; } catch (x) {}
       try { formCheck(form, by); } catch (x) {
         try { if (evPrevent) evPrevent(e); else e.preventDefault(); } catch (y) {}
-        try { if (evStop) evStop(e); else e.stopImmediatePropagation(); } catch (y) {}
       }
     }
-    function listen(t) { try { if (addEL) addEL(t, 'submit', onSubmit, false); else t.addEventListener('submit', onSubmit, false); } catch (e) {} }
+    function listen(t) { try { if (addEL) addEL(t, 'submit', onSubmit, true); else t.addEventListener('submit', onSubmit, true); } catch (e) {} }
     if (typeof w.addEventListener === 'function') listen(w);
     var EP = w.Element && w.Element.prototype, attach = EP && EP.attachShadow;
     if (typeof attach === 'function') {

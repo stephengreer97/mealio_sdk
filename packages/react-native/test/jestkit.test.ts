@@ -185,3 +185,75 @@ describe('the Jest kit first required inside a describe', () => {
     }
   });
 });
+
+// 0.6 round 8: Jest's resetMocks strips every jest.fn of its implementation
+// before each test, which left useMealio().prepareCart() answering undefined.
+// The before-each the mock registers with its after-each puts each default
+// answer back, and keeps one the test scripted. A small jest.fn with Jest's
+// own reset (no implementation left at all; Vitest's leaves an empty one)
+// stands in. Checked against real Jest 29 and 30 with resetMocks: true too.
+function jestFn(impl?: (...a: any[]) => any) {
+  let cur = impl;
+  const m: any = (...a: any[]) => (cur ? cur(...a) : undefined);
+  m._isMockFunction = true;
+  m.getMockImplementation = () => cur;
+  m.mockImplementation = (f: any) => { cur = f; return m; };
+  m.mockResolvedValue = (v: any) => m.mockImplementation(async () => v);
+  m.mockReset = () => { cur = undefined; return m; };
+  return m;
+}
+describe('the Jest kit under resetMocks', () => {
+  it('puts the default answers back before each test, and keeps scripted ones', async () => {
+    const state = expect.getState();
+    expect.setState({ currentTestName: undefined });
+    const path = require.resolve('../jest.js');
+    const after: Array<() => void> = [], before: Array<() => void> = [];
+    (globalThis as any).jest = { fn: jestFn };
+    (globalThis as any).afterEach = (f: () => void) => { after.push(f); };
+    (globalThis as any).beforeEach = (f: () => void) => { before.push(f); };
+    (globalThis as any).expect = expect;
+    let m: any;
+    try {
+      delete require.cache[path];
+      m = require('../jest.js');
+    } finally {
+      delete (globalThis as any).afterEach;
+      delete (globalThis as any).beforeEach;
+      delete (globalThis as any).expect;
+      expect.setState({ currentTestName: state.currentTestName });
+    }
+    try {
+      expect([after.length, before.length]).toEqual([1, 1]);
+      const api = m.useMealio();
+      const early = m.mockCart();
+      // What resetMocks does before a test: every mock loses its implementation.
+      const resetAll = () => {
+        for (const v of [...Object.values(api), ...Object.values(early)]) if (v && (v as any)._isMockFunction) (v as any).mockReset();
+      };
+      resetAll();
+      expect(api.prepareCart()).toBeUndefined();
+      before.forEach((f) => f());
+      expect((await api.prepareCart()).cartId).toBe('cart_mock');
+      expect((await early.addToCart()).cartId).toBe('cart_mock');
+      expect(api.setStore('heb') instanceof Promise).toBe(true);
+      // A scripted answer survives the before-each.
+      api.prepareCart.mockResolvedValue('scripted');
+      before.forEach((f) => f());
+      expect(await api.prepareCart()).toBe('scripted');
+      // After the after-each reset, the new mocks are covered too.
+      after.forEach((f) => f());
+      resetAll();
+      before.forEach((f) => f());
+      expect((await m.useMealio().prepareCart()).cartId).toBe('cart_mock');
+    } finally {
+      delete (globalThis as any).jest;
+    }
+  });
+
+  it('gives plain functions, not undefined, for mocks with no answer when there is no jest', () => {
+    const c = kit.mockCart();
+    expect(typeof c.select).toBe('function');
+    expect(c.select('k', 'id')).toBeUndefined();
+    expect(typeof kit.useMealio().ui.emit).toBe('function');
+  });
+});

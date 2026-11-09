@@ -61,6 +61,13 @@ interface Host {
      */
     suspend fun resetPage() = Unit
 
+    /**
+     * The job that ran on the hidden page is over (done, failed or
+     * cancelled). Native blocking, on since the job's first script, turns
+     * off here (PROTOCOL.md "When native blocking is on").
+     */
+    fun jobEnded() = Unit
+
     /** Load `url` in the hidden WebView. */
     suspend fun openPage(store: String, url: String, timeoutMs: Long): PageLoad
 

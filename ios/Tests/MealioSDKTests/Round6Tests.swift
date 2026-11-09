@@ -81,7 +81,8 @@ final class Round6Tests: XCTestCase {
         XCTAssertEqual((first?["action"] as? [String: Any])?["type"] as? String, "block")
         let trigger = first?["trigger"] as? [String: Any]
         XCTAssertEqual(trigger?["url-filter-is-case-sensitive"] as? Bool, false)
-        XCTAssertNil(trigger?["resource-type"], "every resource type")
+        // Round 8: requests and documents only, never page assets (Round8Tests).
+        XCTAssertEqual(trigger?["resource-type"] as? [String], NetworkBlock.resourceTypes)
         XCTAssertNil(trigger?["load-type"], "first and third party")
         XCTAssertNil(trigger?["if-domain"], "the request's host is in the filter, not the page's")
     }

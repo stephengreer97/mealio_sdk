@@ -4,9 +4,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mealio_sdk/mealio_sdk.dart';
 
 void main() {
-  test('the guard judges a submit after the page, in shadow roots, without a second FormData', () {
-    // Bubble phase at window and each open shadow root, skipped when the page prevented it.
-    expect(guardScript, contains("addEL(t, 'submit', onSubmit, false)"));
+  test('the guard judges a submit in shadow roots, without a second FormData', () {
+    // At window and each shadow root, skipped when already prevented (round 8: capture phase).
+    expect(guardScript, contains("addEL(t, 'submit', onSubmit, true)"));
     expect(guardScript, contains('evPrevented'));
     expect(guardScript, contains('attachShadow'));
     expect(guardScript, isNot(contains("w.addEventListener('submit', function (e) {")));

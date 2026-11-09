@@ -699,6 +699,22 @@ class MealioClient @JvmOverloads constructor(
         cancel: CancelToken? = null,
         pin: Pin? = null,
     ): Any? {
+        // Native blocking stays on from the job's first script to here: the
+        // job ends however it ends (done, failed, cancelled).
+        try {
+            return driveJob(start, onStep, warm, cancel, pin)
+        } finally {
+            host.jobEnded()
+        }
+    }
+
+    private suspend fun driveJob(
+        start: JSONObject,
+        onStep: StepListener?,
+        warm: Boolean,
+        cancel: CancelToken?,
+        pin: Pin?,
+    ): Any? {
         val job = start.opt("job") as? String
         var env = Envelope.fromJson(start.opt("envelope"))
         var seq = 0

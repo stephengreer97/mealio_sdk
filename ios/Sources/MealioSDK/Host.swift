@@ -120,6 +120,12 @@ public protocol MealioHost: AnyObject {
     /// cap. Optional: the default does nothing.
     func resetPage()
 
+    /// The job is over (done, failed or cancelled). WebViewHost takes the
+    /// hidden page's network block off here (round 8: it went on at the
+    /// job's first script and stayed on across navigations). Optional: the
+    /// default does nothing.
+    func endJob()
+
     /// Throws when this host cannot run a job safely. Called before every
     /// job's first instruction. WebViewHost waits (bounded) for its network
     /// block of checkout paths and refuses without it. Optional: the default
@@ -129,6 +135,7 @@ public protocol MealioHost: AnyObject {
 
 public extension MealioHost {
     func resetPage() {}
+    func endJob() {}
     func ready() async throws {}
 }
 

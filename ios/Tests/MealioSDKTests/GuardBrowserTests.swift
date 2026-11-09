@@ -11,9 +11,10 @@
 //
 // Most tests here test the in-page guard ALONE: their pages leave out the
 // network block list (NetworkBlock.swift) that the SDK's own pages carry
-// while Mealio drives them. The "network block" tests at the end add it:
-// H-E-B's list (heb.com and its subdomains) from the first load, or through
-// WebViewHost's own hidden page, where it goes on with the first script.
+// while a job runs. The "network block" tests at the end add it: H-E-B's
+// list (heb.com and its subdomains) from the first load, or through
+// WebViewHost's own hidden page, where it goes on with a job's first script
+// and stays on until `endJob`.
 //
 // Each page is shown in a window, as WebViewHost parks its hidden page in
 // the key window. A WKWebView in no window counts as hidden: WebKit throttles
@@ -116,8 +117,39 @@ final class GuardBrowserTests: XCTestCase {
         windows.append(window)
     }
 
-    /// The run's first page load has happened (it may take longer).
-    @MainActor private static var firstLoadDone = false
+    /// WebKit has been warmed for this class (round 8).
+    @MainActor private static var warmed = false
+
+    /// Once per test class, before its first test: start WebKit's processes
+    /// with a blank local page, so no test meets a cold simulator (CI run
+    /// 42658185517: the first page took over 20s and the next stalled).
+    override func setUp() async throws {
+        try await super.setUp()
+        await warmWebKit()
+    }
+
+    @MainActor
+    private func warmWebKit() async {
+        if GuardBrowserTests.warmed { return }
+        GuardBrowserTests.warmed = true
+        let pages = TestPages()
+        let config = WebViewHost.makeConfiguration(handler: ScriptHandler())
+        config.setURLSchemeHandler(pages, forURLScheme: TestPages.scheme)
+        let web = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480), configuration: config)
+        show(web)
+        _ = web.load(URLRequest(url: URL(string: TestPages.home)!))
+        // Bounded, and never a failure: the tests' own loads have 20s each.
+        for _ in 0..<6000 {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+            if !web.isLoading, web.url?.scheme == TestPages.scheme { break }
+        }
+        // One script round trip, so the page's process answers too.
+        _ = try? await js(web, "return 'warm';", seconds: 30)
+    }
+
+    /// How long any test page may take to load (round 8: every load, not
+    /// only the first).
+    private static let loadSeconds = 20
 
     private static let mutation = #"{"query":"mutation { placeOrder { id } }"}"#
 
@@ -143,15 +175,13 @@ final class GuardBrowserTests: XCTestCase {
         let web = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480), configuration: config)
         show(web)
         _ = web.load(URLRequest(url: URL(string: TestPages.home + String(start.dropFirst()))!))
-        // Bounded: 3 seconds at most, 20 for the run's first page, which
-        // also starts WebKit's processes on a cold simulator.
-        let seconds = GuardBrowserTests.firstLoadDone ? 3 : 20
+        // Bounded: 20 seconds (WebKit was warmed in setUp).
+        let seconds = GuardBrowserTests.loadSeconds
         for _ in 0..<(seconds * 100) {
             try await Task.sleep(nanoseconds: 10_000_000)
             if !web.isLoading { break }
         }
         XCTAssertFalse(web.isLoading, "the test page did not load in \(seconds)s")
-        GuardBrowserTests.firstLoadDone = true
         if arm { try await self.arm(web) }
         return web
     }
@@ -648,11 +678,12 @@ final class GuardBrowserTests: XCTestCase {
             await new Promise((res) => setTimeout(res, 500));
             return out;
             """)
-        // Round 7: a submit event is judged after the page's own listeners
-        // (which see it, not prevented) and refused by preventDefault, not by
-        // a throw. Nothing blocked reaches the handler either way.
-        XCTAssertEqual(got, ["submitPath": "blocked_path", "submitBody": "blocked_operation", "requestSubmit": "sent",
-                             "click": "went", "formaction": "sent", "innocent": "sent"])
+        // Round 8: a submit event is judged in the capture phase and refused
+        // by preventDefault alone (the page's listener sees it prevented),
+        // and requestSubmit() throws for a blocked target as submit() does.
+        // Nothing blocked reaches the handler either way.
+        XCTAssertEqual(got, ["submitPath": "blocked_path", "submitBody": "blocked_operation", "requestSubmit": "blocked_path",
+                             "click": "prevented", "formaction": "blocked_path", "innocent": "sent"])
         for _ in 0..<300 where !pages.reached.contains("/search") {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
@@ -727,11 +758,12 @@ final class GuardBrowserTests: XCTestCase {
         XCTAssertEqual(pages.reached, ["/api/login"])
     }
 
-    /// With no action, a form goes to the page's own URL: judged by that,
-    /// and only when it really submits.
+    /// With no action, a form posts back to the page it is on, which the
+    /// SDK already allowed: judged by its fields only, never the page URL
+    /// or its query (round 8).
     @MainActor
-    func testJudgesAFormWithNoActionByThePageURL() async throws {
-        for (start, want) in [("/store?redirect=/checkout", [String]()), ("/store?q=milk", ["/store"])] {
+    func testJudgesAFormWithNoActionByItsFieldsNeverThePageURLItPostsBackTo() async throws {
+        for (start, want) in [("/store?redirect=/checkout", ["/store"]), ("/store?q=milk", ["/store"])] {
             let pages = TestPages()
             pages.pages["/store"] = "<html><body><iframe name=\"sink\"></iframe></body></html>"
             let web = try await page(pages: pages, start: start)
@@ -739,6 +771,9 @@ final class GuardBrowserTests: XCTestCase {
                 const f = document.createElement('form'); f.method = 'POST'; f.target = 'sink';
                 f.innerHTML = '<input name="x" value="1"><button>go</button>'; document.body.appendChild(f);
                 f.querySelector('button').click(); await new Promise((r) => setTimeout(r, 300));
+                const g = document.createElement('form'); g.method = 'POST'; g.target = 'sink';
+                g.innerHTML = '<input name="operationName" value="PlaceOrder"><button>go</button>'; document.body.appendChild(g);
+                g.querySelector('button').click(); await new Promise((r) => setTimeout(r, 300));
                 return 'ok';
                 """)
             try await settle(pages, want)
@@ -770,7 +805,9 @@ final class GuardBrowserTests: XCTestCase {
             open.querySelector('button').click();
             const h2 = document.createElement('div'); document.body.appendChild(h2);
             const closed = h2.attachShadow({ mode: 'closed' }); closed.innerHTML = \(MealioScripts.jsStringLiteral(form("/payment/closed")));
-            closed.querySelector('form').requestSubmit();
+            // A click, so the closed root's own submit listener is what
+            // refuses it (requestSubmit() would throw first, since round 8).
+            closed.querySelector('button').click();
             const h3 = document.createElement('div'); document.body.appendChild(h3);
             const fine = h3.attachShadow({ mode: 'open' }); fine.innerHTML = \(MealioScripts.jsStringLiteral(form("/search")));
             fine.querySelector('button').click();
@@ -877,6 +914,139 @@ final class GuardBrowserTests: XCTestCase {
         XCTAssertEqual(pages.reached, [])
     }
 
+    // MARK: round 8: forms in the guard (round8.browser.test.ts)
+
+    /// A sign-in page: a sink frame, an open-shadow card that slots its
+    /// children, and a closed-shadow element whose root is window.__closed.
+    private static let signInPage = """
+        <!doctype html><html><body><iframe name="sink"></iframe>
+        <script>
+        customElements.define('x-card', class extends HTMLElement {
+          constructor() { super(); this.attachShadow({ mode: 'open' }).innerHTML = '<div class="frame"><slot></slot></div>'; }
+        });
+        customElements.define('x-closed', class extends HTMLElement {
+          constructor() { super(); window.__closed = this.attachShadow({ mode: 'closed' }); }
+        });
+        </script></body></html>
+        """
+
+    @MainActor
+    private func signIn(_ start: String) async throws -> (WKWebView, TestPages) {
+        let pages = TestPages()
+        pages.pages["/login"] = GuardBrowserTests.signInPage
+        let web = try await page(pages: pages, start: start)
+        return (web, pages)
+    }
+
+    /// A submit event is judged in the capture phase: a page handler that
+    /// stops propagation cannot hide a blocked form, and it still runs.
+    @MainActor
+    func testRefusesABlockedFormWhoseOwnHandlerStopsPropagationAndStillRunsThatHandler() async throws {
+        let (web, pages) = try await signIn("/login")
+        let got = try await run6(web, """
+            const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+            const out = { light: 0, shadow: 0, prevented: [] };
+            // Each form posts into its own frame: a second submission into one frame cancels the first.
+            for (const n of ['s1', 's2', 's3']) { const fr = document.createElement('iframe'); fr.name = n; document.body.appendChild(fr); }
+            const f = document.createElement('form'); f.method = 'POST'; f.action = '/checkout/sp'; f.target = 's1';
+            f.innerHTML = '<input name="a" value="1"><button>Pay</button>'; document.body.appendChild(f);
+            f.addEventListener('submit', (e) => { out.light++; out.prevented.push(e.defaultPrevented); e.stopPropagation(); });
+            f.querySelector('button').click();
+            const g = document.createElement('form'); g.method = 'POST'; g.action = '/payment/si'; g.target = 's2';
+            g.innerHTML = '<input name="a" value="1"><button>Pay</button>'; document.body.appendChild(g);
+            g.addEventListener('submit', (e) => { out.light++; e.stopImmediatePropagation(); });
+            g.querySelector('button').click();
+            const host = document.createElement('x-closed'); document.body.appendChild(host);
+            window.__closed.innerHTML = '<form method="post" action="/checkout/closed" target="s3"><button>Pay</button></form>';
+            const cf = window.__closed.querySelector('form');
+            cf.addEventListener('submit', (e) => { out.shadow++; e.stopPropagation(); });
+            cf.querySelector('button').click();
+            await wait(400);
+            return out;
+            """)
+        try await settle(pages)
+        XCTAssertEqual(pages.reached, [])
+        XCTAssertEqual(got, ["light": 2, "shadow": 1, "prevented": [true]])
+    }
+
+    /// A slotted sign-in form with no action, on a page whose query names
+    /// checkout, sent by the page's own JS: the handler runs and its fetch
+    /// goes out.
+    @MainActor
+    func testRunsThePagesHandlerForASlottedSignInFormAndItsFetchGoesOut() async throws {
+        let (web, pages) = try await signIn("/login?returnUrl=%2Fcheckout")
+        let got = try await run6(web, """
+            const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+            let js = 0;
+            document.addEventListener('submit', (e) => {
+              if (e.target.id !== 'slot') return;
+              e.preventDefault(); js++;
+              fetch('/api/login', { method: 'POST', body: 'u' });
+            });
+            const card = document.createElement('x-card'); document.body.appendChild(card);
+            card.innerHTML = '<form id="slot" method="post" target="sink"><input name="user" value="u"><button id="go">Sign in</button></form>';
+            document.getElementById('go').click();
+            await wait(400);
+            return { js };
+            """)
+        XCTAssertEqual(got, ["js": 1])
+        try await settle(pages, ["/api/login"])
+        XCTAssertEqual(pages.reached, ["/api/login"])
+    }
+
+    /// A form with no action (or a blank one) posts back to its page,
+    /// judged by its fields only, by click, submit() and requestSubmit().
+    @MainActor
+    func testLetsAFormWithNoActionPostBackToItsPageJudgedByItsFieldsOnly() async throws {
+        let (web, pages) = try await signIn("/login?returnUrl=%2Fcheckout")
+        let got = try await run6(web, """
+            const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+            const make = (html) => { const f = document.createElement('form'); f.method = 'POST'; f.target = 'sink'; f.innerHTML = html; document.body.appendChild(f); return f; };
+            make('<input name="user" value="u"><button>Sign in</button>').querySelector('button').click();
+            await wait(300);
+            const out = {};
+            out.submit = await t(() => make('<input name="user" value="v">').submit());
+            await wait(300);
+            out.requestSubmit = await t(() => make('<input name="user" value="w">').requestSubmit());
+            await wait(300);
+            const blank = make('<input name="user" value="x">'); blank.setAttribute('action', '  ');
+            out.blankAction = await t(() => blank.submit());
+            await wait(300);
+            out.badFields = await t(() => make('<input name="operationName" value="PlaceOrder">').submit());
+            make('<input name="operationName" value="PlaceOrder"><button>go</button>').querySelector('button').click();
+            await wait(300);
+            return out;
+            """)
+        XCTAssertEqual(got, ["submit": "sent", "requestSubmit": "sent", "blankAction": "sent", "badFields": "blocked_operation"])
+        try await settle(pages, ["/login"])
+        XCTAssertEqual(pages.reached, Array(repeating: "/login", count: 4))
+    }
+
+    /// submit() and requestSubmit() throw for a blocked explicit target,
+    /// even when called from inside the page's submit handler.
+    @MainActor
+    func testSubmitAndRequestSubmitThrowForABlockedExplicitTargetEvenFromASubmitHandler() async throws {
+        let (web, pages) = try await signIn("/login")
+        let got = try await run6(web, """
+            const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+            const make = (action) => { const f = document.createElement('form'); f.method = 'POST'; f.action = action; f.target = 'sink';
+              f.innerHTML = '<input name="a" value="1"><button>go</button>'; document.body.appendChild(f); return f; };
+            const out = {};
+            out.requestSubmit = await t(() => make('/checkout/rs').requestSubmit());
+            const f = make('/search'); f.querySelector('button').setAttribute('formaction', '/checkout/fa');
+            out.formaction = await t(() => f.requestSubmit(f.querySelector('button')));
+            const pd = make('/checkout/pd'); out.pd = null;
+            pd.addEventListener('submit', (e) => { e.preventDefault(); try { e.target.submit(); out.pd = 'sent'; } catch (x) { out.pd = String(x.message).replace('mealio guard: ', ''); } });
+            pd.querySelector('button').click();
+            out.fine = await t(() => make('/search').requestSubmit());
+            await wait(300);
+            return out;
+            """)
+        XCTAssertEqual(got, ["requestSubmit": "blocked_path", "formaction": "blocked_path", "pd": "blocked_path", "fine": "sent"])
+        try await settle(pages, ["/search"])
+        XCTAssertEqual(pages.reached, ["/search"])
+    }
+
     // MARK: round 6 and 7: the network block list (NetworkBlock.swift)
 
     @MainActor
@@ -898,15 +1068,17 @@ final class GuardBrowserTests: XCTestCase {
         XCTAssertNotNil(kroger)
     }
 
-    /// WebViewHost's own hidden page, served locally. Before Mealio drives
-    /// the page, the store's own requests to blocked paths go out (its boot
-    /// code is never refused). From the first server script, the same
-    /// requests to the store's host never leave, even with RegExp and URL
-    /// replaced, including the image and frame loads the in-page guard never
-    /// sees. A third-party host's /payment frame loads before and after. A
-    /// new document starts unblocked again.
+    /// WebViewHost's own hidden page, served locally. Before a job's first
+    /// script, the store's own requests to blocked paths go out (its boot
+    /// code is never refused). From that script until the job ends, across
+    /// a new document too (round 8), the store's fetch and frame loads to
+    /// blocked paths never leave, even with RegExp and URL replaced, while
+    /// its page assets (an image, a style sheet, a script) on such paths
+    /// load. A third-party host's /payment frame loads throughout. After
+    /// `endJob`, or once the page is opened for another store, nothing is
+    /// blocked.
     @MainActor
-    func testTheNetworkBlockIsOnlyForTheStoresHostsWhileMealioDrivesThePage() async throws {
+    func testTheNetworkBlockIsForTheStoresRequestsFromAJobsFirstScriptUntilItEndsNeverItsAssets() async throws {
         let pages = TestPages()
         WebViewHost.testConfiguration = { $0.setURLSchemeHandler(pages, forURLScheme: TestPages.scheme) }
         defer { WebViewHost.testConfiguration = nil }
@@ -915,15 +1087,25 @@ final class GuardBrowserTests: XCTestCase {
         host.hiddenNavigationPolicy = { _, _ in true }
         show(host.hiddenWebView())
 
-        func openHome() async throws -> WKWebView {
-            let opened = try await host.openPage(store: "heb", url: TestPages.home,
-                                                 timeoutMs: GuardBrowserTests.firstLoadDone ? 5000 : 20_000)
+        func openHome(_ store: String = "heb") async throws -> WKWebView {
+            let opened = try await host.openPage(store: store, url: TestPages.home,
+                                                 timeoutMs: GuardBrowserTests.loadSeconds * 1000)
             XCTAssertTrue(opened.ok, "\(opened)")
-            GuardBrowserTests.firstLoadDone = true
             return try XCTUnwrap(host.hidden)
         }
-        /// The store's three blocked-path requests, one ordinary one, and a
-        /// third party's /payment frame, all tagged `tag`.
+        func drive() async throws {
+            let driven = try await host.runScript(
+                store: "heb", guardScript: MealioScripts.guardArmScript,
+                script: "window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'driven' })); true;",
+                until: [Matcher(type: "driven")], timeoutMs: 5000)
+            XCTAssertNil(driven.error)
+            XCTAssertFalse(driven.timedOut)
+        }
+        /// The store's two blocked-path requests, its three blocked-path
+        /// assets, one ordinary request, and a third party's /payment frame,
+        /// all tagged `tag`. In "after" the armed in-page guard may stop the
+        /// fetch first; in "next" no script has armed the new document, so
+        /// only the list can stop it.
         func send(_ web: WKWebView, _ tag: String, tamper: Bool) async throws {
             _ = try await run(web, """
                 if (\(tamper)) {
@@ -933,13 +1115,16 @@ final class GuardBrowserTests: XCTestCase {
                 }
                 r.fetch = await t(() => fetch('/checkout/\(tag)-fetch', { method: 'POST', body: '{}' }));
                 r.ok = await t(() => fetch('/api/\(tag)-ok', { method: 'POST', body: '{}' }));
-                new Image().src = '/payment/\(tag)-img';
                 { const f = document.createElement('iframe'); f.src = '/billing/\(tag)-frame'; document.body.appendChild(f); }
+                new Image().src = '/payment/\(tag)-img';
+                { const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = '/checkout/\(tag)-css'; document.head.appendChild(l); }
+                { const s = document.createElement('script'); s.src = '/payment/\(tag)-js'; document.head.appendChild(s); }
                 { const f = document.createElement('iframe'); f.src = '\(TestPages.scheme)://js.stripe.com/payment/\(tag)'; document.body.appendChild(f); }
                 """)
         }
-        func storePaths(_ tag: String) -> [String] {
-            ["/checkout/\(tag)-fetch", "/payment/\(tag)-img", "/billing/\(tag)-frame"]
+        func requests(_ tag: String) -> [String] { ["/checkout/\(tag)-fetch", "/billing/\(tag)-frame"] }
+        func assets(_ tag: String) -> [String] {
+            ["/payment/\(tag)-img", "/checkout/\(tag)-css", "/payment/\(tag)-js", "/api/\(tag)-ok", "js.stripe.com/payment/\(tag)"]
         }
         /// Waits (bounded) for `want` to reach the handler, then a little more.
         func arrive(_ want: [String]) async throws {
@@ -948,33 +1133,43 @@ final class GuardBrowserTests: XCTestCase {
             }
             try await Task.sleep(nanoseconds: 500_000_000)
         }
+        func everything(_ tag: String) async throws {
+            let all = requests(tag) + assets(tag)
+            try await arrive(all)
+            XCTAssertEqual(all.filter { !pages.reached.contains($0) }, [], "\(tag): \(pages.reached)")
+        }
+        func blocked(_ tag: String) async throws {
+            try await arrive(assets(tag))
+            XCTAssertEqual(assets(tag).filter { !pages.reached.contains($0) }, [], "\(tag): assets and other hosts load: \(pages.reached)")
+            XCTAssertEqual(pages.reached.filter { requests(tag).contains($0) }, [], "\(tag): the store's blocked requests")
+        }
 
-        // Before Mealio drives the page: everything reaches the handler.
+        // Before the job's first script: everything reaches the handler.
         var web = try await openHome()
         try await send(web, "before", tamper: false)
-        let before = storePaths("before") + ["/api/before-ok", "js.stripe.com/payment/before"]
-        try await arrive(before)
-        XCTAssertEqual(before.filter { !pages.reached.contains($0) }, [], "\(pages.reached)")
+        try await everything("before")
 
-        // The first server script: the list goes on with the guard's arming.
-        let driven = try await host.runScript(
-            store: "heb", guardScript: MealioScripts.guardArmScript,
-            script: "window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'driven' })); true;",
-            until: [Matcher(type: "driven")], timeoutMs: 5000)
-        XCTAssertNil(driven.error)
-        XCTAssertFalse(driven.timedOut)
+        // The job's first script: the list goes on with the guard's arming.
+        try await drive()
         try await send(web, "after", tamper: true)
-        try await arrive(["/api/after-ok", "js.stripe.com/payment/after"])
-        XCTAssertTrue(pages.reached.contains("/api/after-ok"), "\(pages.reached)")
-        XCTAssertTrue(pages.reached.contains("js.stripe.com/payment/after"), "a third party is never blocked: \(pages.reached)")
-        XCTAssertEqual(pages.reached.filter { storePaths("after").contains($0) }, [], "the store's blocked paths, once Mealio drives the page")
+        try await blocked("after")
 
-        // A new document: Mealio is not driving it yet, so nothing is blocked.
+        // A new document in the same job: still on, with no script yet.
         web = try await openHome()
         try await send(web, "next", tamper: false)
-        let next = storePaths("next") + ["js.stripe.com/payment/next"]
-        try await arrive(next)
-        XCTAssertEqual(next.filter { !pages.reached.contains($0) }, [], "\(pages.reached)")
+        try await blocked("next")
+
+        // The job ends: off, until the next job's first script.
+        host.endJob()
+        web = try await openHome()
+        try await send(web, "ended", tamper: false)
+        try await everything("ended")
+
+        // On again for the next job; opening the page for another store takes it off.
+        try await drive()
+        web = try await openHome("wegmans")
+        try await send(web, "moved", tamper: false)
+        try await everything("moved")
     }
 
     /// Page code has replaced RegExp.prototype.test and window.URL. A fetch,
@@ -1052,21 +1247,22 @@ final class GuardBrowserTests: XCTestCase {
         XCTAssertEqual(pages.reached.filter { $0.contains("encoded") || $0.contains("twice") }, [])
     }
 
-    // MARK: round 7: when the list comes off, and redirects
+    // MARK: round 8: when the list comes off; round 7: redirects
 
-    /// The page Mealio drove navigates itself (a script sets location). The
-    /// new document's response takes the list off before WebKit goes on, so
-    /// its very first subresource (an image) and its own boot fetch, both on
-    /// blocked-looking paths, reach the handler. A script that then arms the
-    /// new page keeps it armed: its blocked requests never arrive, now or a
-    /// second later (no late disarm, as a didCommit-time removal could do).
+    /// Round 8: the page a job drives navigates itself (a script sets
+    /// location). The list stays on through the navigation, so the new
+    /// document's own boot fetch to a blocked path never leaves, though no
+    /// script has armed that page yet and its in-page guard is unarmed (no
+    /// window between documents). Its style sheet and image on such paths
+    /// load (assets are never blocked). A second later it is still on. Once
+    /// the job ends, the same fetch goes out.
     @MainActor
-    func testTheListComesOffBeforeANewDocumentsFirstSubresourceAndStaysOnOnceAScriptArmsIt() async throws {
+    func testTheListStaysOnAcrossTheJobsNavigationsWithNoWindowAndComesOffWhenTheJobEnds() async throws {
         let pages = TestPages()
         pages.pages["/second"] = """
             <html><head><link rel="stylesheet" href="/checkout/second-css"></head><body>
             <img src="/payment/second-img">
-            <script>fetch('/billing/second-boot', { method: 'POST', body: '{}' });</script>
+            <script>fetch('/billing/second-boot', { method: 'POST', body: '{}' }); fetch('/api/second-ok', { method: 'POST', body: '{}' });</script>
             </body></html>
             """
         WebViewHost.testConfiguration = { $0.setURLSchemeHandler(pages, forURLScheme: TestPages.scheme) }
@@ -1076,63 +1272,69 @@ final class GuardBrowserTests: XCTestCase {
         host.hiddenNavigationPolicy = { _, _ in true }
         show(host.hiddenWebView())
         let opened = try await host.openPage(store: "heb", url: TestPages.home,
-                                             timeoutMs: GuardBrowserTests.firstLoadDone ? 5000 : 20_000)
+                                             timeoutMs: GuardBrowserTests.loadSeconds * 1000)
         XCTAssertTrue(opened.ok, "\(opened)")
-        GuardBrowserTests.firstLoadDone = true
         let web = try XCTUnwrap(host.hidden)
 
-        func drive(_ script: String, _ until: String) async throws {
-            let out = try await host.runScript(
-                store: "heb", guardScript: MealioScripts.guardArmScript,
-                script: "\(script); window.ReactNativeWebView.postMessage(JSON.stringify({ type: '\(until)' })); true;",
-                until: [Matcher(type: until)], timeoutMs: 5000)
-            XCTAssertNil(out.error)
-            XCTAssertFalse(out.timedOut, until)
-        }
         func arrive(_ want: [String]) async throws {
             for _ in 0..<300 where !want.allSatisfy({ pages.reached.contains($0) }) {
                 try await Task.sleep(nanoseconds: 10_000_000)
             }
         }
 
-        // Driven: the list is on. The script itself sends the page away.
-        try await drive("setTimeout(function () { location.href = '/second'; }, 50)", "leaving")
-        let first = ["/checkout/second-css", "/payment/second-img", "/billing/second-boot"]
-        try await arrive(first)
-        XCTAssertEqual(first.filter { !pages.reached.contains($0) }, [], "the new page's first loads: \(pages.reached)")
+        // The job's first script sends the page away.
+        let out = try await host.runScript(
+            store: "heb", guardScript: MealioScripts.guardArmScript,
+            script: "setTimeout(function () { location.href = '/second'; }, 50); window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'leaving' })); true;",
+            until: [Matcher(type: "leaving")], timeoutMs: 5000)
+        XCTAssertNil(out.error)
+        XCTAssertFalse(out.timedOut)
+        let loads = ["/checkout/second-css", "/payment/second-img", "/api/second-ok"]
+        try await arrive(loads)
         for _ in 0..<300 where web.isLoading || web.url?.path != "/second" {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         XCTAssertEqual(web.url?.path, "/second")
+        XCTAssertEqual(loads.filter { !pages.reached.contains($0) }, [], "the new page's assets: \(pages.reached)")
+        XCTAssertFalse(pages.reached.contains("/billing/second-boot"), "the new page's boot fetch left: \(pages.reached)")
 
-        // Armed in the new page: on, and still on a second later. Images and
-        // frames, which the in-page guard never sees, so only the list stops them.
-        try await drive("new Image().src = '/checkout/armed-1'", "armed")
+        // Still on a second later, with nothing armed in this page.
         try await Task.sleep(nanoseconds: 1_000_000_000)
         _ = try await run(web, """
-            new Image().src = '/checkout/armed-2';
-            { const f = document.createElement('iframe'); f.src = '/checkout/armed-3'; document.body.appendChild(f); }
-            new Image().src = '/api/armed-ok';
+            r.fetch = await t(() => fetch('/checkout/later-fetch', { method: 'POST', body: '{}' }));
+            { const f = document.createElement('iframe'); f.src = '/checkout/later-frame'; document.body.appendChild(f); }
+            new Image().src = '/checkout/later-img';
             """)
-        try await arrive(["/api/armed-ok"])
+        try await arrive(["/checkout/later-img"])
         try await Task.sleep(nanoseconds: 300_000_000)
-        XCTAssertTrue(pages.reached.contains("/api/armed-ok"), "\(pages.reached)")
-        XCTAssertEqual(pages.reached.filter { $0.hasPrefix("/checkout/armed") }, [])
+        XCTAssertTrue(pages.reached.contains("/checkout/later-img"), "\(pages.reached)")
+        XCTAssertEqual(pages.reached.filter { $0 == "/checkout/later-fetch" || $0 == "/checkout/later-frame" }, [])
+
+        // The job ends: the same requests go out.
+        host.endJob()
+        _ = try await run(web, """
+            r.fetch = await t(() => fetch('/checkout/ended-fetch', { method: 'POST', body: '{}' }));
+            { const f = document.createElement('iframe'); f.src = '/checkout/ended-frame'; document.body.appendChild(f); }
+            """)
+        try await arrive(["/checkout/ended-fetch", "/checkout/ended-frame"])
+        XCTAssertTrue(pages.reached.contains("/checkout/ended-fetch"), "\(pages.reached)")
+        XCTAssertTrue(pages.reached.contains("/checkout/ended-frame"), "\(pages.reached)")
     }
 
     /// Content rules judge each hop of a redirect, not just the first URL
     /// (the Known limits note in README.md rests on this test). A scheme
     /// handler cannot redirect, so this page comes from a tiny HTTP server on
     /// 127.0.0.1 with the list for that host, and no in-page guard. A fetch,
-    /// an image and a frame each go to an ordinary path that answers 302 to
-    /// a checkout path: the server sees the first hop, never the second. A
-    /// redirect to an ordinary path is followed. Skipped (not passed) if
+    /// an XHR and a frame each go to an ordinary path that answers 302 to a
+    /// checkout path: the server sees the first hop, never the second. A
+    /// redirect to an ordinary path is followed. (Images are page assets,
+    /// never blocked since round 8.) Skipped (not passed) if
     /// WebKit will not load http://127.0.0.1 here.
     @MainActor
     func testTheNetworkBlockAlsoRefusesARedirectToACheckoutPath() async throws {
         let server = LocalHTTP()
         server.routes["/"] = (200, "text/html", "<html><body>page</body></html>")
-        for kind in ["fetch", "img", "frame", "xhr"] {
+        for kind in ["fetch", "frame", "xhr"] {
             server.routes["/hop/\(kind)"] = (302, "/checkout/redirected-\(kind)", "")
         }
         server.routes["/hop/ok"] = (302, "/api/redirected-ok", "")
@@ -1146,12 +1348,11 @@ final class GuardBrowserTests: XCTestCase {
         let web = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480), configuration: config)
         show(web)
         _ = web.load(URLRequest(url: URL(string: origin + "/")!))
-        let seconds = GuardBrowserTests.firstLoadDone ? 5 : 20
+        let seconds = GuardBrowserTests.loadSeconds
         for _ in 0..<(seconds * 100) {
             try await Task.sleep(nanoseconds: 10_000_000)
             if !web.isLoading { break }
         }
-        GuardBrowserTests.firstLoadDone = true
         guard server.reached.contains("/"), web.url?.host == "127.0.0.1" else {
             throw XCTSkip("WebKit did not load \(origin) here (App Transport Security?): redirects unverified")
         }
@@ -1159,10 +1360,9 @@ final class GuardBrowserTests: XCTestCase {
             r.fetch = await t(() => fetch('/hop/fetch', { method: 'POST', body: '{}' }));
             r.ok = await t(() => fetch('/hop/ok'));
             await new Promise((res) => { const x = new XMLHttpRequest(); x.onloadend = res; x.open('GET', '/hop/xhr'); x.send(); setTimeout(res, 1500); });
-            new Image().src = '/hop/img';
             { const f = document.createElement('iframe'); f.src = '/hop/frame'; document.body.appendChild(f); }
             """)
-        let hops = ["/hop/fetch", "/hop/xhr", "/hop/img", "/hop/frame", "/hop/ok", "/api/redirected-ok"]
+        let hops = ["/hop/fetch", "/hop/xhr", "/hop/frame", "/hop/ok", "/api/redirected-ok"]
         for _ in 0..<300 where !hops.allSatisfy({ server.reached.contains($0) }) {
             try await Task.sleep(nanoseconds: 10_000_000)
         }

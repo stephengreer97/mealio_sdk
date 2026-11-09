@@ -85,7 +85,7 @@ internal class LoginWebController(
     private val handler = Handler(Looper.getMainLooper())
     private var docStartScript = false
     private var bootstrap = BOOTSTRAP_SCRIPT
-    /** Native network blocking for the login page: armed before each check script, off at a new main document. */
+    /** Native network blocking for the sign-in sheet: armed at the first check script, on until the sheet closes ([destroy]). */
     internal val networkBlock = NetworkBlock()
     // doneWhenUrl is a JavaScript regex source. java.util.regex reads the
     // patterns the server uses (plain URL prefixes and escapes) the same way.
@@ -128,6 +128,7 @@ internal class LoginWebController(
 
     fun destroy() {
         handler.removeCallbacksAndMessages(null)
+        networkBlock.disarm()
         CookieManager.getInstance().flush()
         webView?.let {
             it.stopLoading()
@@ -143,7 +144,8 @@ internal class LoginWebController(
         val c = session.request.check ?: return
         if (session.result.isCompleted) return
         wv.evaluateJavascript(bootstrap, null)
-        networkBlock.arm(session.request.blockHosts ?: blockHostsFor(Allowlist(), session.request.store))
+        // On from the first check until the sheet closes; arming again is the same hosts.
+        if (!networkBlock.armed) networkBlock.arm(session.request.blockHosts ?: blockHostsFor(Allowlist(), session.request.store))
         wv.evaluateJavascript(session.request.armGuard, null)
         wv.evaluateJavascript(c.script, null)
     }
@@ -171,11 +173,10 @@ internal class LoginWebController(
             if (!request.isForMainFrame) return false
             val url = request.url?.toString() ?: return true
             if (!admit(url)) return true
-            return mainFrameAllowed(request)
+            return false
         }
 
         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-            // Blocking turned off when this document was requested, not here (after the commit).
             if (!docStartScript) view?.evaluateJavascript(bootstrap, null)
             // Backstop for navigations shouldOverrideUrlLoading does not see
             // (POST form submissions).

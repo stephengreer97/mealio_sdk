@@ -6,29 +6,25 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import java.io.ByteArrayInputStream
 
-// Native network blocking (PROTOCOL.md "Guard script", threat model). While
-// Mealio drives a page, every request that page makes to the current store's
-// own hosts, in any frame and of any kind (documents, subframe documents,
-// fetch, XHR, beacons, form POSTs, images), is asked of requestBlocked before
-// it leaves the device. A blocked one gets an empty 403 and never reaches the
-// store. Page code cannot turn this off: it runs in the app, not in the page.
+// Native network blocking (PROTOCOL.md "When native blocking is on"). While
+// Mealio runs a job, the requests the page makes to the current store's own
+// hosts, in any frame, are asked of requestBlocked before they leave the
+// device. A blocked one gets an empty 403 and never reaches the store. Page
+// code cannot turn this off: it runs in the app, not in the page.
 //
-// Two limits keep it from breaking the store:
+// Three limits keep it from breaking the store:
 // - Only the store's hosts and its store-owned sign-in hosts (blockHostsFor).
 //   A third-party host (a Stripe or captcha iframe) or a shared identity
 //   provider (Google, Okta's own pages) is never blocked, whatever its path.
-// - Only while Mealio drives the page. It turns on (arm) right before the first
-//   Mealio script for the page, the same moment the in-page guard arms, and
-//   turns off the moment a new main document is requested (or the store
-//   changes). The store's own boot requests before that always go through.
-//
-// Turning off at the request, not at onPageStarted: onPageStarted is posted
-// after the new document commits, so the new page's first subresources went
-// out still armed (and refused), and a script armed after the commit was
-// disarmed by the late callback. The cost: between the request and the
-// commit the old page runs unblocked (its in-page guard is still armed), and
-// a main-frame request that never commits (a 204, a download) leaves it off
-// until the next script.
+// - Only requests that change state (POST, PUT, PATCH, DELETE) and documents
+//   (main-frame and subframe navigations, any method). A store's own page
+//   assets (scripts, styles, images, fonts: GETs that are not documents) are
+//   never blocked, whatever their path.
+// - Only during a job. It turns on (arm) right before the first Mealio script
+//   of a job and stays on for the whole job, across page navigations. It
+//   turns off only when the job ends (done, failed or cancelled), the store
+//   changes, or the sign-in sheet closes. Nothing the page does turns it off,
+//   so there is no window between a navigation and its commit.
 //
 // Known limit: Android WebView does not show redirects of fetch, XHR or
 // subresources to shouldInterceptRequest, only the first URL. A request to an
@@ -134,17 +130,33 @@ internal fun blockHostsFor(allowlist: Allowlist, store: String): List<String> {
 internal fun blockedResponse(): WebResourceResponse =
     WebResourceResponse("text/plain", "utf-8", 403, "Forbidden", emptyMap(), ByteArrayInputStream(ByteArray(0)))
 
+/** Methods that change state on the server. Only these (and documents) are ever blocked. */
+internal val STATE_CHANGING_METHODS: Set<String> = setOf("POST", "PUT", "PATCH", "DELETE")
+
+/**
+ * Is this request a document (a frame navigation)? The main frame says so.
+ * A subframe document is told by its Accept header, which the browser sets
+ * to text/html (or application/xhtml+xml) for navigations and never for
+ * scripts, styles, images, fonts or a default fetch.
+ */
+internal fun isDocumentRequest(mainFrame: Boolean, headers: Map<String, String>?): Boolean {
+    if (mainFrame) return true
+    val accept = headers?.entries?.firstOrNull { it.key.equals("Accept", ignoreCase = true) }?.value ?: return false
+    val first = accept.substringBefore(',').substringBefore(';').trim().lowercase()
+    return first == "text/html" || first == "application/xhtml+xml"
+}
+
 /**
  * One WebView's blocking state. Set on the main thread, read on WebView
- * background threads. Off until [arm]; [disarm] at a new main document or a
- * store change.
+ * background threads. Off until [arm]; [disarm] only when the job ends, the
+ * store changes, or the sign-in sheet closes. Never at a navigation.
  */
 internal class NetworkBlock {
     @Volatile private var hosts: List<String>? = null
 
     val armed: Boolean get() = hosts != null
 
-    /** Turn on for these hosts (the current store's). Called right before each Mealio script. */
+    /** Turn on for these hosts (the current store's). Called right before each Mealio script; arming again only replaces the hosts. */
     fun arm(storeHosts: List<String>) {
         hosts = storeHosts.toList()
     }
@@ -153,10 +165,20 @@ internal class NetworkBlock {
         hosts = null
     }
 
-    /** Refuse `url`? Only while armed, only on the store's hosts, only for a blocked path. */
+    /** Is `url` to a blocked path on the store's hosts, while armed? The path and host alone; see [blocksRequest]. */
     fun blocks(url: String?): Boolean {
         val h = hosts ?: return false
         return requestBlocked(url) && onHosts(url, h)
+    }
+
+    /**
+     * Refuse this request? Only a state-changing method or a document, to a
+     * blocked path on the store's hosts, while armed. A store's own assets
+     * (a GET that is not a document) always pass.
+     */
+    fun blocksRequest(url: String?, method: String?, document: Boolean): Boolean {
+        if (!document && (method ?: "GET").uppercase() !in STATE_CHANGING_METHODS) return false
+        return blocks(url)
     }
 }
 
@@ -164,26 +186,17 @@ internal class NetworkBlock {
  * The WebViewClient both SDK WebViews use. shouldInterceptRequest is called
  * for every request of every frame (on a WebView background thread); it is
  * final so the hidden and login clients cannot lose it. Subclasses call
- * [navigationBlocked] first in shouldOverrideUrlLoading and
- * [mainFrameAllowed] when they let a main-frame navigation go.
+ * [navigationBlocked] first in shouldOverrideUrlLoading. No navigation turns
+ * blocking off.
  */
 internal open class BlockingWebViewClient(val block: NetworkBlock) : WebViewClient() {
     final override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
-        val url = request?.url?.toString()
-        if (block.blocks(url)) return blockedResponse()
-        // A new main document is requested (loadUrl, a form POST, a reload):
-        // the page Mealio drove is going away, so blocking turns off before
-        // the new page's own requests.
-        if (request?.isForMainFrame == true) block.disarm()
+        if (request == null) return null
+        val document = isDocumentRequest(request.isForMainFrame, request.requestHeaders)
+        if (block.blocksRequest(request.url?.toString(), request.method, document)) return blockedResponse()
         return null
     }
 
-    /** A navigation of any frame to a blocked path on the store's hosts, while armed, is refused (true) before it starts. */
+    /** A navigation of any frame (any method) to a blocked path on the store's hosts, while armed, is refused (true) before it starts. */
     protected fun navigationBlocked(request: WebResourceRequest): Boolean = block.blocks(request.url?.toString())
-
-    /** shouldOverrideUrlLoading lets `request` go: a main-frame one is a new document, so blocking turns off. Returns false. */
-    protected fun mainFrameAllowed(request: WebResourceRequest): Boolean {
-        if (request.isForMainFrame) block.disarm()
-        return false
-    }
 }

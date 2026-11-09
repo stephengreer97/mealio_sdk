@@ -278,7 +278,7 @@ The fields an SDK needs for amounts and prices:
 | Object | Field | Meaning |
 | --- | --- | --- |
 | `CartItem` | `quantity` | Packages to add, from the recipe (every recipe's share added together) |
-| `CartItem` | `recipes` | `[{ id, title, quantity }]`: the recipes that call for it. Absent from older servers |
+| `CartItem` | `recipes` | `[{ id, title, quantity }]`: the recipes that call for it. Absent from older servers. `quantity` is the recipe's exact share and may be fractional: TypeScript's `ItemRecipe.quantity` is that number as sent; Kotlin and Dart keep `quantity` an `Int` as in 0.5.0 and give the exact value as `share` (a `Double`) |
 | `PreparedCart` | `recipes` | `[{ id, title }]`: the recipes the cart was made from, in the order sent |
 | `CartItem` | `weightLb` | The recipe's own weight for the line in lb, when it gave the amount in lb, oz, g or kg. Absent otherwise |
 | `Product` | `unitPrice` | One unit's price as a number, for an estimate |
@@ -412,23 +412,25 @@ The controls, strongest first:
    `BLOCKED_PATTERNS`, and every `fetch` body against the body rules below,
    in native code (or the React Native JS runtime) that page code cannot reach.
 3. **Native network blocking (iOS and Android only): the store's own
-   hosts, while Mealio drives the page.** The native SDKs refuse every
-   request the store page makes to one of the store's blocking hosts (below:
-   its hosts and its store-owned sign-in hosts, never a shared identity
-   provider), or a subdomain of one, whose path matches `BLOCKED_PATTERNS`:
-   documents, frames, form posts, fetch and XHR, in the hidden WebView and
-   the sign-in sheet. Other hosts (a payment or captcha frame, Google or
-   Apple sign-in) are never refused by it. It turns on only from
-   `runScript` (when the guard arms) or a login check (before each
-   `check.script` in the sign-in sheet), and turns off when a new main-frame
-   document is requested or the store changes, so a store page's own boot
-   requests are never refused. iOS compiles a `WKContentRuleList` per store
-   with a block rule per pattern anchored to each blocking host, and adds it
-   to the page's user content controller only for that time; Android answers
-   such a request in `shouldInterceptRequest` with an empty 403 and refuses
-   such a navigation in `shouldOverrideUrlLoading`, in every frame. It runs
-   outside the page, so page code cannot turn it off. It checks paths only,
-   not bodies. See "Native blocking hosts" and "Known limits" below.
+   hosts, while a Mealio job runs.** The native SDKs refuse requests the
+   store page makes to one of the store's blocking hosts (below: its hosts
+   and its store-owned sign-in hosts, never a shared identity provider), or
+   a subdomain of one, whose path matches `BLOCKED_PATTERNS`: page and frame
+   navigations, form posts, and fetch and XHR, in the hidden WebView and the
+   sign-in sheet. It never refuses the store's own page assets (images,
+   stylesheets, scripts, fonts, media). Other hosts (a payment or captcha
+   frame, Google or Apple sign-in) are never refused by it. It turns on when
+   Mealio's first script of a job runs and stays on for the whole job,
+   across page navigations; it turns off only when the job ends (success,
+   failure or cancel) or the store changes. iOS compiles a
+   `WKContentRuleList` per store with a block rule per pattern anchored to
+   each blocking host, restricted to the resource types `fetch` and `raw`,
+   `document` and `popup`; Android refuses a POST, PUT, PATCH or DELETE in
+   `shouldInterceptRequest` with an empty 403 and a main-frame or frame
+   navigation (any method) in `shouldOverrideUrlLoading`. It runs outside the
+   page, so page code cannot turn it off. It checks paths only, not bodies.
+   See "When native blocking is on", "Native blocking hosts" and "Known
+   limits" below.
    **React Native and Flutter have no native blocking**: their WebView plugins
    give no hook on the page's own subresource requests. On those two platforms
    the page's own requests rely on controls 1 and 2 and the in-page guard.
@@ -442,20 +444,26 @@ in its same-origin frames (frames in open shadow roots included) and
 same-origin popups; form `submit()`, `requestSubmit()` and submit events;
 `blob:` and `data:` workers.
 
-How it judges a form: `submit()` (which fires no event) is judged when it is
-called. Every other submission (`requestSubmit()`, a button, the Enter key)
-is judged by a submit listener in the bubble phase, at the window and at
-every shadow root (submit does not cross a shadow root, so each root gets
-the listener: on `attachShadow`, open or closed, and at arming for open
-roots already there). It acts only when no page handler called
-`preventDefault`: a form the page sends itself in JS (React's `onSubmit`) is
-never touched, and its request is judged as a `fetch` or XHR instead. A form
-that will really submit is judged by where it goes: the submitter's
-`formaction`, else the form's `action`, else (no action attribute) the page's
-own URL; a `dialog` method form is never judged. Its fields (the submitter's
-included) are read from its controls, never with `new FormData`, so the
-page's `formdata` listeners fire once per submission, as without the guard.
-A refused submission is cancelled with `preventDefault`; it does not throw.
+How it judges a form: `submit()` (which fires no event) and
+`requestSubmit()` are judged when they are called, and throw only for a
+blocked explicit target or blocked fields. Every other submission (a button,
+the Enter key) is judged by a submit listener in the CAPTURE phase, at the
+window (first on every path) and at every shadow root (submit does not cross
+a shadow root, so each root gets the listener: on `attachShadow`, open or
+closed, and at arming for open roots already there). A blocked submission is
+cancelled with `preventDefault` ONLY: the guard never calls
+`stopPropagation` or `stopImmediatePropagation`, so the page's own handlers
+always run, and a request one of them sends itself (a JS sign-in's `fetch`)
+is judged on its own as a `fetch` or XHR. A handler that stops propagation
+cannot hide a form from the guard, which has already judged it. A form is
+judged by an explicit target, the submitter's `formaction`, else the form's
+`action` attribute, as a path, and by its fields as a body. A form with
+neither (or with a blank one) posts back to the page it is on, which the SDK
+already allowed: only its fields are judged, never the page URL or its query
+(a sign-in form on `/login?returnUrl=%2Fcheckout` is not refused). A
+`dialog` method form is never judged. Its fields (the submitter's included)
+are read from its controls, never with `new FormData`, so the page's
+`formdata` listeners fire once per submission, as without the guard.
 Worker and SharedWorker stay subclassable: a subclass is constructed with
 `Reflect.construct` and its own prototype, as `new.target` would. It captures the built-ins it decides with when it
 installs (`RegExp.prototype.exec`, `URL` and its getters, `Blob.prototype.text`,
@@ -464,8 +472,9 @@ installs (`RegExp.prototype.exec`, `URL` and its getters, `Blob.prototype.text`,
 that replaces them later changes nothing. It reads a body's text once and
 sends that same text, so an object cannot show one text and send another.
 
-What it does not cover (native blocking does, on iOS and Android, for paths on
-the store's own hosts while Mealio drives the page):
+What it does not cover (native blocking does, on iOS and Android, for
+navigations, frames, form posts and fetch or XHR to paths on the store's own
+hosts while a job runs, but never for the store's page assets):
 
 - Requests it never sees: images, scripts, stylesheets, `<link>` prefetches,
   `<a ping>`, CSS URLs, navigations by `location` or links, and any request
@@ -487,11 +496,10 @@ the store's own hosts while Mealio drives the page):
   buffer or a typed array: such a body cannot be read synchronously, so the
   guard judges its path only and sends it at once (it does not break the
   request). An asynchronous one is read first, then judged.
-- A page submit listener added at the window, in the bubble phase, after the
-  guard installed: it runs after the guard's, so a form it would handle in JS
-  is judged as if it really submits. A form in a declarative shadow root
-  (`<template shadowrootmode>`) parsed after arming, and fields of
-  form-associated custom elements, are not read.
+- A form in a declarative shadow root (`<template shadowrootmode>`) parsed
+  after arming, and fields of form-associated custom elements, are not read.
+- A form with no `action` that posts back to a page whose own path is
+  blocked is judged by its fields only: that page was already loaded.
 
 ### Known limits
 
@@ -502,6 +510,10 @@ the store's own hosts while Mealio drives the page):
   native blocking (the in-page guard judges only the first URL as well).
   Navigation redirects are caught: `shouldOverrideUrlLoading` sees each
   redirect of a main-frame or frame navigation.
+- **What native blocking leaves to the in-page guard.** On Android a GET or
+  HEAD fetch, XHR or subresource to a blocked path is not refused natively;
+  on iOS neither are `ping`, `websocket` and `other` loads. These are what a
+  store's own pages load, and none of them is a form post or a navigation.
 - **iOS: redirects.** WebKit content rule lists are evaluated for every
   load WebKit makes, so a redirect to a blocked path on a blocking host
   should be refused as well. This is WebKit's documented behavior and is not
@@ -549,22 +561,26 @@ The rule (the JSON file's `rule` and `vectors` are the reference):
 
 ### When native blocking is on
 
-- **On** only when Mealio arms the page: right before a server script runs
-  (`runScript`, with `GUARD_ARM_SCRIPT`) and before each sign-in
-  `check.script`. Nothing else turns it on.
-- **Off** when a new main-frame document is requested: Android in
-  `shouldOverrideUrlLoading` for a main-frame navigation, or in
-  `shouldInterceptRequest` for a main-frame document request (whichever comes
-  first, `isForMainFrame` true); iOS in `decidePolicyFor navigationAction`
-  for a main-frame navigation it allows. Not in `onPageStarted` or
-  `didCommit`: by then the new page's first subresources may already have
-  been asked for and refused. So the new page's first subresource with a
-  blocked-looking path is not refused, and a script armed after the new
-  document commits stays armed. Also off when the store changes.
-- Order matters: while blocking is on, a main-frame navigation to a blocking
-  host with a blocked path is refused first (and blocking stays on). Only a
-  main-frame navigation that goes ahead turns blocking off. A navigation
-  redirected to a blocked path is judged again at the redirect.
+- **On** once, when Mealio's first script of a job runs (the first
+  `runScript`, with `GUARD_ARM_SCRIPT`, or the first sign-in
+  `check.script`). Nothing else turns it on.
+- **Stays on for the whole job**, across every page navigation. A navigation
+  never turns it off, so page code cannot turn it off by navigating and
+  there is no window between a new document and the next script.
+- **Off** only when the job ends (success, failure or cancel) or the store
+  changes.
+- **Never the store's own page assets.** Because it stays on while the store's
+  pages load, it refuses only requests that can change state or move the
+  page:
+  - Android: a request whose method changes state (POST, PUT, PATCH or
+    DELETE) to a blocked path, answered with an empty 403 in
+    `shouldInterceptRequest`; and a main-frame or frame navigation to a
+    blocked path, with any method, refused in `shouldOverrideUrlLoading`.
+    A GET or HEAD subresource is never refused.
+  - iOS: the content rules are restricted to the resource types `fetch` and
+    `raw` (fetch and XHR), `document` (the page and its frames) and `popup`;
+    never `image`, `style-sheet`, `script`, `font` or `media`.
+- A navigation redirected to a blocked path is judged again at the redirect.
 
 ### Two copies, and arming
 

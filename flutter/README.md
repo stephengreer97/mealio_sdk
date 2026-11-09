@@ -135,7 +135,7 @@ MealioCartButton(recipes: [tacos, pasta, soup], store: 'heb')
 await MealioCartFlow.show(context, recipes: [tacos, pasta, soup]);
 final session = await MealioCart.instance.prepareCart(recipes: [tacos, pasta, soup]);
 session.recipes;                     // [CartRecipe(id, title)], in the order sent
-session.recipesFor(item.key);        // [ItemRecipe(id, title, quantity)] for one item
+session.recipesFor(item.key);        // [ItemRecipe(id, title, quantity, share)] for one item; share is exact (0.5)
 ```
 
 More than 10 throws `too_many_recipes` and none throws `bad_recipe`, before
@@ -501,7 +501,8 @@ testWidgets('recipe screen', (tester) async {
 - `configureMealioForTesting(fake: MealioFake(script))` runs the real client
   and the real sheet against a scripted Mealio. The script is plain data, the
   same format as `@mealio/sdk-core/testing`: `items` (`MealioFakeItem` with
-  `options`, prices on each `Product`, `remembered`, `startUnchecked`,
+  `options`, prices on each `Product`, `quantity` and `quantityExact` (a
+  script's `1.5` kept exactly), `remembered`, `startUnchecked`,
   `weightLb`, `unavailable`), `search` results per query, `addFailure` or
   `onAdd`, `signIn` (`signed_in`, `cancelled`, `timeout`), `errors` by call
   (`MealioFakeError(code, status: ...)`), `warnings`, `stores`,

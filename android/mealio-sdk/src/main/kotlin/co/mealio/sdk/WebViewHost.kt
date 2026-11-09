@@ -184,8 +184,10 @@ class WebViewHost(context: Context) : Host {
     private var bootstrap = BOOTSTRAP_SCRIPT
     /** The store whose page the hidden view was last told to open. */
     private var currentStore: String? = null
-    /** Native network blocking for the hidden view: armed before each script, off at a new main document or store. */
+    /** Native network blocking for the hidden view: armed at a job's first script, off when the job ends or the store changes. */
     internal val networkBlock = NetworkBlock()
+    /** The store [networkBlock] is armed for. */
+    @Volatile private var armedStore: String? = null
     private var pendingLoad: CompletableDeferred<PageLoad>? = null
     private var loadStarted = false
 
@@ -241,9 +243,6 @@ class WebViewHost(context: Context) : Host {
 
     private inner class HiddenClient : BlockingWebViewClient(networkBlock) {
         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-            // Blocking already turned off when this document was requested
-            // (BlockingWebViewClient); turning it off here, after the commit,
-            // would undo a script armed in between.
             // Backstop for navigations shouldOverrideUrlLoading does not see
             // (form POSTs): leave at once and report the load as blocked.
             if (url != null && !hiddenMayGo(url)) {
@@ -285,7 +284,7 @@ class WebViewHost(context: Context) : Host {
                 pendingLoad?.complete(PageLoad(ok = false, finalUrl = u, error = "blocked"))
                 return true
             }
-            return mainFrameAllowed(request)
+            return false
         }
 
         // API 26+. Without this a crashed renderer takes the app down with it.
@@ -306,8 +305,9 @@ class WebViewHost(context: Context) : Host {
             val wv = ensureWebView()
             pendingLoad?.complete(PageLoad(ok = false, error = "load_failed")) // superseded
             pendingLoad = load
-            // A new page (or another store): off until its first script.
-            networkBlock.disarm()
+            // Another store: off until its first script. The same store keeps
+            // blocking on for the rest of the job.
+            if (store != armedStore) networkBlock.disarm()
             currentStore = store
             loadStarted = false
             wv.stopLoading()
@@ -343,8 +343,11 @@ class WebViewHost(context: Context) : Host {
                 // because the fallback path (no document-start script) may have
                 // raced the page; it does nothing when already installed.
                 wv.evaluateJavascript(bootstrap, null)
-                // Native blocking turns on with the in-page guard, for this store's hosts.
+                // Native blocking turns on with the in-page guard, for this store's
+                // hosts, and stays on until the job ends (jobEnded) or the store changes.
+                // Arming again for the same store changes nothing.
                 networkBlock.arm(blockHostsFor(allowlist, store))
+                armedStore = store
                 wv.evaluateJavascript(guard, null)
                 wv.evaluateJavascript(script, null)
             }
@@ -423,6 +426,12 @@ class WebViewHost(context: Context) : Host {
 
     /** Leave the store page (after a sign-out). */
     override suspend fun resetPage() { reset() }
+
+    /** The job is over (done, failed or cancelled): native blocking turns off until the next job's first script. */
+    override fun jobEnded() {
+        networkBlock.disarm()
+        armedStore = null
+    }
 
     suspend fun reset() = onMain {
         webView?.stopLoading()

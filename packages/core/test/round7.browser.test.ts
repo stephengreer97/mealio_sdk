@@ -1,5 +1,7 @@
-// 0.6 round 7: the in-page guard, in real Chrome. A form submission is judged
-// after the page's own handlers and only when it will really go; forms in
+// 0.6 round 7: the in-page guard, in real Chrome. (Round 8 moved form
+// judging to the capture phase and stopped judging a form with no action by
+// the page URL; see round8.browser.test.ts.) A form submission is judged
+// only when it will really go; forms in
 // shadow roots are covered; Worker subclasses still work; a synchronous XHR
 // with a Blob or buffer body is sent at once; the page's formdata listener
 // fires once per submission. Skipped without Playwright, as the other browser
@@ -83,13 +85,16 @@ describe.skipIf(!browser)('round 7: the guard judges what really leaves', () => 
     await s.ctx.close();
   });
 
-  it('judges a form with no action by the page URL, when it really submits', async () => {
+  it('judges a form with no action by its fields, never the page URL it posts back to (round 8)', async () => {
     const s = await armedPage('/store?redirect=/checkout');
     await s.run(`
       const f = document.createElement('form'); f.method = 'POST'; f.target = 'sink';
       f.innerHTML = '<input name="x" value="1"><button>go</button>'; document.body.appendChild(f);
-      f.querySelector('button').click(); await wait(300);`);
-    expect(s.reached).toEqual([]);
+      f.querySelector('button').click(); await wait(300);
+      const g = document.createElement('form'); g.method = 'POST'; g.target = 'sink';
+      g.innerHTML = '<input name="operationName" value="PlaceOrder"><button>go</button>'; document.body.appendChild(g);
+      g.querySelector('button').click(); await wait(300);`);
+    expect(s.reached).toEqual(['POST /store?redirect=/checkout']);
     await s.ctx.close();
     const ok = await armedPage('/store?q=milk');
     await ok.run(`
@@ -129,7 +134,9 @@ describe.skipIf(!browser)('round 7: the guard judges what really leaves', () => 
       open.querySelector('button')!.click();
       const h2 = document.createElement('div'); document.body.appendChild(h2);
       const closed = h2.attachShadow({ mode: 'closed' }); closed.innerHTML = b;
-      (closed.querySelector('form') as HTMLFormElement).requestSubmit();
+      // A click, so the closed root's own submit listener is what refuses it
+      // (requestSubmit() would throw first, since round 8).
+      closed.querySelector('button')!.click();
       const h3 = document.createElement('div'); document.body.appendChild(h3);
       const fine = h3.attachShadow({ mode: 'open' }); fine.innerHTML = c;
       fine.querySelector('button')!.click();

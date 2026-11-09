@@ -161,7 +161,11 @@ export type ItemStatus = 'remembered' | 'choose' | 'remembered_unavailable' | 'u
 export interface ItemRecipe {
   id: string;
   title: string | null;
-  /** This recipe's share of the item's quantity. */
+  /**
+   * This recipe's share of the item's quantity, exactly as sent (it may be
+   * fractional). Kotlin and Dart keep their `quantity` an integer, as in
+   * 0.5.0, and name this exact value `share`; TypeScript needs no second field.
+   */
   quantity: number;
 }
 

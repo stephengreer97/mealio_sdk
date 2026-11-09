@@ -1,11 +1,15 @@
-// Native network blocking of checkout paths (0.6, round 7: the store's hosts
-// and store-owned sign-in hosts, while Mealio drives the page).
+// Native network blocking of checkout paths (0.6: round 7 for the hosts,
+// round 8 for the timing and the resource types).
 //
-// A WKContentRuleList blocks every request, in every frame and of every
-// resource type (documents, subframes, fetch, XHR, form posts, beacons,
-// workers' loads), whose HOST is one of the current store's blocking hosts
-// (or a subdomain of one) and whose path + query matches a BLOCKED_PATTERNS entry.
-// Page code cannot turn it off: WebKit applies it outside the page.
+// A WKContentRuleList blocks every request whose HOST is one of the current
+// store's blocking hosts (or a subdomain of one), whose path + query matches
+// a BLOCKED_PATTERNS entry, and whose resource type is one a checkout could
+// be reached through: fetch and XHR (`fetch`, and `raw` for WebKit before
+// it had `fetch`), documents (top frames and frames, form posts included)
+// and popups. Never a store's own page assets: images, style sheets,
+// scripts, fonts and media load whatever their path (round 8; a store's
+// /checkout-banner.png or /payment.css is not a purchase). Page code cannot
+// turn it off: WebKit applies it outside the page.
 //
 // Round 6 blocked those paths on every host from the first page load. That
 // stopped the store's own boot requests (a /payment config fetch) and
@@ -20,13 +24,15 @@
 //   so each filter anchors the request's own host instead:
 //   `^scheme://[userinfo@][sub.]store.com[:port]` then the path. A request to
 //   any other host matches no rule.
-// - Only while Mealio drives the page. WebViewHost adds the list to the
-//   hidden page's user content controller right before the first server
-//   script for a page (when the in-page guard arms) and removes it when the
-//   top frame's response for a new document arrives, before WebKit commits
-//   it (so before that document's first subresource, and never after a
-//   script armed the new page); the sign-in sheet does the same around each
-//   check script. A store page's boot requests before that are never blocked.
+// - Only while a job runs, from Mealio's first script (round 8). WebViewHost
+//   adds the list to the hidden page's user content controller right before
+//   the first server script of a job and keeps it on across that page's
+//   navigations until the job ends (done, failed or cancelled:
+//   MealioHost.endJob) or the page is opened for another store. Nothing
+//   page code does (a navigation, a 204, a download) takes it off, so there
+//   is no window between documents. The sign-in sheet adds it before its
+//   first check script and keeps it until the sheet closes. A store page's
+//   boot before Mealio's first script of a job is never blocked.
 //
 // WebKit's url-filter is a small regex language with no `|`, matched against
 // the whole URL. So each pattern is expanded into one filter per
@@ -125,14 +131,23 @@ public enum NetworkBlock {
         return out
     }
 
-    /// The WKContentRuleList source: one block rule per filter, every
-    /// resource type and load (no resource-type or load-type given).
-    public static func ruleListJSON(hosts: [String]) -> String {
+    /// The resource types the rules block (round 8): fetch and XHR, frames
+    /// and pages, popups. Never image, style-sheet, script, font or media.
+    public static let resourceTypes = ["fetch", "raw", "document", "popup"]
+
+    /// The same for a WebKit that does not know `fetch` (it rejects a list
+    /// naming it); `raw` covers fetch and XHR there.
+    public static let legacyResourceTypes = ["raw", "document", "popup"]
+
+    /// The WKContentRuleList source: one block rule per filter, for
+    /// `resourceTypes` (or `legacyResourceTypes`), every load type.
+    public static func ruleListJSON(hosts: [String], legacy: Bool = false) -> String {
+        let types = legacy ? legacyResourceTypes : resourceTypes
         let rules: [[String: Any]] = urlFilters(hosts: hosts).map { f in
-            ["trigger": ["url-filter": f, "url-filter-is-case-sensitive": false] as [String: Any],
+            ["trigger": ["url-filter": f, "url-filter-is-case-sensitive": false, "resource-type": types] as [String: Any],
              "action": ["type": "block"]]
         }
-        // Strings and booleans only: serialization cannot fail.
+        // Strings, string arrays and booleans only: serialization cannot fail.
         let data = (try? JSONSerialization.data(withJSONObject: rules, options: [.sortedKeys])) ?? Data("[]".utf8)
         return String(decoding: data, as: UTF8.self)
     }
@@ -179,18 +194,28 @@ final class BlockedPathRules {
         let e = Entry()
         entries[id] = e
         let source = NetworkBlock.ruleListJSON(hosts: clean)
+        let legacy = NetworkBlock.ruleListJSON(hosts: clean, legacy: true)
         Task { @MainActor in
-            do {
-                let store: WKContentRuleListStore? = WKContentRuleListStore.default()
-                if let store = store {
-                    let list: WKContentRuleList? = try await store.compileContentRuleList(
-                        forIdentifier: id, encodedContentRuleList: source)
-                    if let list = list { e.compiled = list } else { e.failure = "WebKit returned no rule list" }
-                } else {
-                    e.failure = "no content rule list store"
+            let store: WKContentRuleListStore? = WKContentRuleListStore.default()
+            if let store = store {
+                // The `fetch` resource type first; a WebKit that rejects it
+                // gets the same rules with `raw` alone.
+                for text in [source, legacy] {
+                    do {
+                        let list: WKContentRuleList? = try await store.compileContentRuleList(
+                            forIdentifier: id, encodedContentRuleList: text)
+                        if let list = list {
+                            e.compiled = list
+                            e.failure = nil
+                            break
+                        }
+                        e.failure = "WebKit returned no rule list"
+                    } catch {
+                        e.failure = "\(error)"
+                    }
                 }
-            } catch {
-                e.failure = "\(error)"
+            } else {
+                e.failure = "no content rule list store"
             }
             e.finished = true
             let waiting = e.waiters

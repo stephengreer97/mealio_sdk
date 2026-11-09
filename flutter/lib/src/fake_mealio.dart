@@ -190,8 +190,8 @@ void _checkItem(Object? json, String path) {
   }, const <String>{'key'})
     ..string('key')
     ..string('ingredient')
-    // A number in TypeScript, so 1.5 is accepted; the cart reads it as the
-    // client reads any quantity from the server (whole packages).
+    // A number in TypeScript, so 1.5 is accepted and kept (quantityExact);
+    // the cart sends it as TypeScript does.
     ..number('quantity')
     ..list('options', _checkProduct)
     ..string('remembered', nullable: true)
@@ -257,6 +257,23 @@ void _checkError(Object? v, String path) {
 // Infinity, which JSON.stringify sends as null, so it is no quantity.
 int? _wholeOrNull(Object? v) => v is num && v.isFinite ? v.toInt() : null;
 
+// The exact number, when it is not a whole one quantity already holds (1.5,
+// 3e20, Infinity, -0), as TypeScript keeps it. Null for a whole int.
+double? _exactOrNull(Object? v) {
+  if (v is! num) return null;
+  if (v is int) return null;
+  final d = v.toDouble();
+  if (d.isFinite && d == d.truncateToDouble() && d.abs() < 9007199254740992.0 && !(d == 0 && d.isNegative)) return null;
+  return d;
+}
+
+// A number as JSON.stringify writes it: a whole one as an int, a non-finite one as null.
+Object? _wire(double d) {
+  if (!d.isFinite) return null;
+  if (d == d.truncateToDouble() && d.abs() < 9007199254740992.0) return d.toInt();
+  return d;
+}
+
 List<Product> _products(Object? json, String what) => _listOf(json, what).map(Product.fromJson).toList();
 
 /// One line of a cart script.
@@ -265,6 +282,7 @@ class MealioFakeItem {
     required this.key,
     this.ingredient,
     this.quantity,
+    this.quantityExact,
     this.options = const <Product>[],
     this.remembered,
     this.rememberedPreferenceId,
@@ -283,6 +301,7 @@ class MealioFakeItem {
       key: m['key']! as String,
       ingredient: m['ingredient'] as String?,
       quantity: _wholeOrNull(m['quantity']),
+      quantityExact: _exactOrNull(m['quantity']),
       options: m['options'] == null ? const <Product>[] : _products(m['options'], 'options'),
       remembered: m['remembered'] as String?,
       rememberedPreferenceId: m['rememberedPreferenceId'] as String?,
@@ -297,6 +316,12 @@ class MealioFakeItem {
   final String key;
   final String? ingredient;
   final int? quantity;
+
+  /// Packages exactly, as TypeScript's `quantity?: number`: part of a
+  /// package (1.5), or past what [quantity] holds. Wins over [quantity] on
+  /// the wire; a non-finite one is sent as null, as JSON.stringify does. A
+  /// script's quantity that is not a whole int lands here too.
+  final double? quantityExact;
   final List<Product> options;
 
   /// The remembered product's id. In [options] and in stock: status
@@ -452,7 +477,7 @@ Map<String, Object?> _itemJson(MealioFakeItem f) {
   return <String, Object?>{
     'key': f.key,
     'ingredient': f.ingredient ?? f.key,
-    'quantity': f.quantity ?? 1,
+    'quantity': f.quantityExact != null ? _wire(f.quantityExact!) : f.quantity ?? 1,
     'status': status,
     'options': options.map((Product p) => p.toJson()).toList(),
     'selectedId': usable ? rem.id : null,

@@ -170,6 +170,11 @@ public final class Runner {
         host.resetPage()
     }
 
+    /// A job is over, however it ended (MealioHost.endJob).
+    func jobEnded() {
+        host.endJob()
+    }
+
     /// The host can run a job (MealioHost.ready); throws when it cannot.
     func hostReady() async throws {
         try await host.ready()

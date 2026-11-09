@@ -13,16 +13,18 @@
 // - show_login: while a MealioCartFlow sheet is open, the sign-in WebView is
 //   published in `login` and the flow draws it inside its own sheet (one sheet
 //   for the whole flow). With no flow open, the host presents its own sheet.
-// - While Mealio drives a page, it carries a WKContentRuleList that blocks
-//   every checkout path on the store's own hosts and store-owned sign-in
-//   hosts (never a shared identity provider), for every request in every
-//   frame (NetworkBlock.swift): added right before the first server script
-//   for a document (the hidden page) or before each check script (sign-in),
-//   dropped when the top frame's response for a new document arrives
-//   (decidePolicyFor navigationResponse, before WebKit commits it). Other hosts are never
-//   blocked by it, nor is a store page's boot before Mealio drives it. No
-//   page loads or runs a script without its store's list compiled, and jobs
-//   are refused if WebKit cannot compile the rules.
+// - While a job runs, the page carries a WKContentRuleList that blocks every
+//   checkout path on the store's own hosts and store-owned sign-in hosts
+//   (never a shared identity provider) for fetch, XHR, frames, pages and
+//   popups in every frame, never the store's images, styles, scripts or
+//   fonts (NetworkBlock.swift). Round 8: it goes on right before the job's
+//   first server script (the hidden page) or the first check script
+//   (sign-in) and stays on across navigations until the job ends
+//   (`endJob`), the hidden page is opened for another store, or the sign-in
+//   closes. Nothing the page does takes it off. Other hosts are never
+//   blocked by it, nor is a store page's boot before a job's first script.
+//   No page loads or runs a script without its store's list compiled, and
+//   jobs are refused if WebKit cannot compile the rules.
 
 #if canImport(UIKit) && canImport(WebKit)
 import Combine
@@ -73,8 +75,8 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
     }
 
     private(set) var hidden: WKWebView?
-    /// The block list on the hidden page now (added when Mealio started
-    /// driving this document), and the hosts it was made for.
+    /// The block list on the hidden page now (added at the job's first
+    /// script, on until the job ends or the store changes), and its id.
     private var hiddenRules: WKContentRuleList?
     private var hiddenRulesKey = ""
     private var hiddenStore = ""
@@ -144,9 +146,9 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
     /// test WebView ever reaches a store.
     static var testConfiguration: ((WKWebViewConfiguration) -> Void)?
 
-    /// No block list here: it is added only while Mealio drives the page
-    /// (`armRules`, LoginSheet.inject). `rules` is for tests that want a page
-    /// blocked from its first load.
+    /// No block list here: it is added only while a job runs (`armRules`,
+    /// LoginSheet.inject). `rules` is for tests that want a page blocked
+    /// from its first load.
     static func makeConfiguration(handler: WKScriptMessageHandler, rules: WKContentRuleList? = nil) -> WKWebViewConfiguration {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = WKWebsiteDataStore.default()
@@ -189,9 +191,9 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
         return web
     }
 
-    /// Mealio starts driving the hidden page's document: its store's block
-    /// list goes on (once per document and store; a list for other hosts
-    /// comes off first).
+    /// A job's script is about to run on the hidden page: its store's block
+    /// list goes on, once per job (a list for other hosts comes off first).
+    /// It stays on across navigations until `endJob` or a store change.
     private func armRules(_ list: WKContentRuleList?, on web: WKWebView) {
         let key = list?.identifier ?? ""
         if hiddenRulesKey == key, hiddenRules != nil || list == nil { return }
@@ -203,7 +205,7 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
         }
     }
 
-    /// The page left the document Mealio drove: its block list comes off.
+    /// The job ended or the store changed: the block list comes off.
     private func disarmRules(on web: WKWebView?) {
         if hiddenRules != nil {
             web?.configuration.userContentController.removeAllContentRuleLists()
@@ -226,6 +228,12 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
     /// MealioHost: before a job, after exclusive work outlived its cap.
     public func resetPage() {
         resetHiddenPage()
+    }
+
+    /// The job ended (done, failed or cancelled): the hidden page's block
+    /// list comes off, until the next job's first script. MealioHost.
+    public func endJob() {
+        disarmRules(on: hidden)
     }
 
     public func resetHiddenPage() {
@@ -260,8 +268,9 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
     public func openPage(store: String, url: String, timeoutMs: Int) async throws -> PageOpenOutcome {
         guard let target = URL(string: url) else { return PageOpenOutcome(ok: false, error: "load_failed") }
         // Never a load whose store's block list is not compiled, ready for
-        // the first script. It is not on the page yet: the store's own boot
-        // requests run untouched until Mealio drives the page.
+        // the first script. Before a job's first script it is not on the
+        // page: the store's own boot requests run untouched until then. Once
+        // on, it stays on through this load (same job, same store).
         do {
             _ = try await blockList(for: store, waitingAtMost: min(max(timeoutMs, 0), NetworkBlock.waitMs))
         } catch {
@@ -293,8 +302,8 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
         guard hidden?.url != nil else {
             return ScriptOutcome(messages: [], timedOut: false, error: "no_page")
         }
-        // Mealio drives the page from here: the store's block list goes on
-        // first, with the guard's arming. No list, no script.
+        // The job drives the page from here: the store's block list goes on
+        // first (once per job), with the guard's arming. No list, no script.
         let list: WKContentRuleList?
         do {
             list = try await blockList(for: store, waitingAtMost: min(max(timeoutMs, 0), NetworkBlock.waitMs))
@@ -338,7 +347,8 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
             return LoginOutcome(outcome: .cancelled, messages: [])
         }
         // Never a sign-in page whose store's block list is not compiled. It
-        // goes on before each check script, not before the page's own boot.
+        // goes on before the first check script, not before the page's own
+        // boot, and stays on until the sheet closes.
         let rules = try await blockList(for: request.store)
         if request.cancel?.cancelled == true {
             return LoginOutcome(outcome: .cancelled, messages: [])
@@ -567,31 +577,6 @@ extension WebViewHost: WKNavigationDelegate {
         }
     }
 
-    /// The top frame's response for a new document is in: Mealio is not
-    /// driving that document (yet), so the block list comes off HERE, before
-    /// WebKit is told to go on, so before the new document's first byte and
-    /// first subresource (round 7). Not at didCommit: that callback reaches
-    /// the app after the web process has committed, so the new page's first
-    /// subresources could still meet the old list, and a script that armed
-    /// the new page in between would lose its list. Re-armed only by
-    /// runScript. Same-document navigations have no response and keep it.
-    public func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
-                        decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
-        if webView === hidden, WebViewHost.startsNewDocument(navigationResponse) {
-            disarmRules(on: webView)
-        }
-        // WebKit's own default when no delegate answers.
-        decisionHandler(navigationResponse.canShowMIMEType ? .allow : .cancel)
-    }
-
-    /// A top-frame response that becomes a new document: one WebKit can show,
-    /// and not a 204 or 205 (which leave the current document in place).
-    static func startsNewDocument(_ r: WKNavigationResponse) -> Bool {
-        guard r.isForMainFrame, r.canShowMIMEType else { return false }
-        if let http = r.response as? HTTPURLResponse, http.statusCode == 204 || http.statusCode == 205 { return false }
-        return true
-    }
-
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         pageWait?.settle(PageOpenOutcome(ok: true, finalUrl: webView.url?.absoluteString))
     }
@@ -644,9 +629,10 @@ final class LoginSheet: NSObject, WKNavigationDelegate, WKUIDelegate, UIAdaptive
     /// Why the sheet could not be shown, when it could not. The run then
     /// fails with this instead of waiting out its timeout.
     private(set) var failure: MealioError?
-    /// The store's block list, added before each check script.
+    /// The store's block list, added before the first check script.
     private let rules: WKContentRuleList?
-    /// It is on the sheet's page now (until a new document's response arrives).
+    /// It is on the sheet's page now (until the sheet closes; round 8: a
+    /// navigation never takes it off).
     private var rulesOn = false
 
     /// How long a modal presentation may take to start before it counts as refused.
@@ -762,7 +748,7 @@ final class LoginSheet: NSObject, WKNavigationDelegate, WKUIDelegate, UIAdaptive
     static let notShown = MealioError(code: MealioError.Code.unsupported,
                                       message: "Could not show the store sign-in: the presenting view controller is not on screen or is already presenting")
 
-    /// The store's block list (if not on already), GUARD_ARM_SCRIPT, then the
+    /// The store's block list (once: it stays on), GUARD_ARM_SCRIPT, then the
     /// check script, each its own evaluation in the top frame. (GUARD_SCRIPT
     /// is already in every frame at document start.)
     private func inject() {
@@ -844,19 +830,6 @@ final class LoginSheet: NSObject, WKNavigationDelegate, WKUIDelegate, UIAdaptive
             return
         }
         decisionHandler(allowed ? .allow : .cancel)
-    }
-
-    /// A new document's response: Mealio is not driving it until the next
-    /// check, so the block list comes off before WebKit goes on (not at
-    /// didCommit, which can come after the new page's first subresources and
-    /// after a check already armed it; see WebViewHost).
-    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
-                 decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
-        if rulesOn, WebViewHost.startsNewDocument(navigationResponse) {
-            webView.configuration.userContentController.removeAllContentRuleLists()
-            rulesOn = false
-        }
-        decisionHandler(navigationResponse.canShowMIMEType ? .allow : .cancel)
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

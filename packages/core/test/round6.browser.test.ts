@@ -167,12 +167,13 @@ describe.skipIf(!browser)('round 6: the guard in Chromium', () => {
       out.formaction = await t(() => f5.requestSubmit(f5.querySelector('button')));
       out.innocent = await t(() => form('/search', ['q', 'milk']).submit());
       return out;`);
-    // Round 7: a submit event is judged after the page's own listeners (which
-    // see it, not prevented) and refused by preventDefault, not by a throw.
-    // Nothing blocked reaches the server either way.
+    // Round 8: a submit event is judged in the capture phase and refused by
+    // preventDefault alone (the page's listener sees it prevented), and
+    // requestSubmit() throws for a blocked target as submit() does. Nothing
+    // blocked reaches the server either way.
     expect(got).toEqual({
-      submitPath: 'blocked_path', submitBody: 'blocked_operation', requestSubmit: 'sent', click: 'went',
-      formaction: 'sent', innocent: 'sent',
+      submitPath: 'blocked_path', submitBody: 'blocked_operation', requestSubmit: 'blocked_path', click: 'prevented',
+      formaction: 'blocked_path', innocent: 'sent',
     });
     await s.page.waitForTimeout(500);
     expect(s.reached).toEqual(['POST /search']);

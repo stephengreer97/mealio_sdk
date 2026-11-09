@@ -80,12 +80,8 @@ data class FakeItem @JvmOverloads constructor(
     /** The remembered product's id. In `options` and in stock: status remembered, pre-selected. */
     val remembered: String? = null,
     val ingredient: String? = null,
-    /**
-     * Packages, as TypeScript's `quantity?: number`: any Int, Long or Double,
-     * kept as given (no truncating or clamping to Int). The cart sends it as
-     * JSON.stringify would (a non-finite one as null).
-     */
-    val quantity: Number = 1,
+    /** Packages, a whole number. The cart sends [quantityExact], which is this unless set. */
+    val quantity: Int = 1,
     val rememberedPreferenceId: String? = null,
     /** The remembered product is gone this time: status remembered_unavailable, nothing pre-selected. */
     val rememberedUnavailable: Boolean = false,
@@ -96,6 +92,14 @@ data class FakeItem @JvmOverloads constructor(
     val recipes: List<ItemRecipe>? = null,
     /** Nothing found: status unavailable with this reason. */
     val unavailable: String? = null,
+    /**
+     * Packages exactly, as TypeScript's `quantity?: number`: part of a
+     * package (1.5), past Int (3e9), or non-finite (sent as null, as
+     * JSON.stringify does). Defaults to [quantity]; the cart sends this.
+     * A script's quantity that is not a whole Int lands here, with
+     * [quantity] left at 1.
+     */
+    val quantityExact: Double = quantity.toDouble(),
 )
 
 /** What a request is, for [FakeScript.errors], [FakeMealio.hold] and [FakeRequest]. */
@@ -464,14 +468,14 @@ fun fakeCartItem(f: FakeItem): JSONObject {
         rem != null -> "remembered_unavailable"
         else -> "choose"
     }
-    val o = JSONObject().put("key", f.key).put("ingredient", f.ingredient ?: f.key).put("quantity", wireNumber(f.quantity)).put("status", status)
+    val o = JSONObject().put("key", f.key).put("ingredient", f.ingredient ?: f.key).put("quantity", wireNumber(f.quantityExact)).put("status", status)
         .put("options", JSONArray(f.options.map { productJson(it) }))
         .put("selectedId", if (usable) rem!!.id else JSONObject.NULL)
         .put("remembered", if (rem == null) JSONObject.NULL else productJson(if (usable) rem else rem.copy(outOfStock = true)))
     f.rememberedPreferenceId?.let { o.put("rememberedPreferenceId", it) }
     if (f.startUnchecked) o.put("startUnchecked", true)
     f.weightLb?.let { o.put("weightLb", it) }
-    f.recipes?.let { r -> o.put("recipes", JSONArray(r.map { JSONObject().put("id", it.id).put("title", it.title ?: JSONObject.NULL).put("quantity", wireNumber(it.quantity)) })) }
+    f.recipes?.let { r -> o.put("recipes", JSONArray(r.map { JSONObject().put("id", it.id).put("title", it.title ?: JSONObject.NULL).put("quantity", wireNumber(it.share)) })) }
     if (status == "unavailable") o.put("reason", f.unavailable ?: "not_found")
     return o
 }
