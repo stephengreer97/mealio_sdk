@@ -185,7 +185,7 @@ class CartFlowModelTest {
         advanceUntilIdle()
         assertEquals(Phase.LIST, m.phase)
         assertEquals("aldi", m.store)
-        assertEquals(listOf("heb", "aldi"), h.bodies.filter { it.has("recipes") }.map { it.optString("store") })
+        assertEquals(listOf("heb", "aldi"), h.bodies.filter { it.has("recipe") || it.has("recipes") }.map { it.optString("store") })
         assertTrue(h.errors.isEmpty())
         m.close()
     }
