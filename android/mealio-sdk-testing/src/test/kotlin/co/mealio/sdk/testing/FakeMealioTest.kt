@@ -12,7 +12,11 @@ import co.mealio.sdk.RecipeIngredient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.yield
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -23,6 +27,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.atomic.AtomicBoolean
 
 // The testing kit's own tests, written the way a partner's custom-screen
 // tests would be: the real client and CartSession on the fake.
@@ -151,11 +156,63 @@ class FakeMealioTest {
         runCurrent()
         MealioCart.setUser("ben")
         release()
-        assertEquals(CancelReason.USER_CHANGED, p.await()!!.reason)
-        runCurrent()
-        assertEquals("Ana was signed out of the stores", 1, fake.storeEpoch)
-        assertEquals("milk", MealioCart.prepareCart("heb", recipe).items.first().key)
-        MealioCart.signOutOfAllStores()
+        // The store sign-out bumps the epoch on Dispatchers.IO, a real thread.
+        // Virtual time must stand still until it is back, or runTest skips
+        // ahead to the SDK's 10s/30s timeouts whenever that thread is slow.
+        withTimeFrozen {
+            assertEquals(CancelReason.USER_CHANGED, p.await()!!.reason)
+            // Queued behind Ana's sign-out, so it is done by the time this returns.
+            assertEquals("milk", MealioCart.prepareCart("heb", recipe).items.first().key)
+            assertEquals("Ana was signed out of the stores", 1, fake.storeEpoch)
+            MealioCart.signOutOfAllStores()
+        }
         assertEquals(2, fake.storeEpoch)
+    }
+
+    /**
+     * install(io = ...) keeps the sign-outs' IO work on the test's dispatcher,
+     * so runTest never jumps to the SDK's sign-out timeouts while a real
+     * thread works. No withTimeFrozen needed. Run 200 times: a flake here
+     * would show within that.
+     */
+    @Test
+    fun installWithTestDispatcherSignsOutOnVirtualTime() {
+        repeat(200) { n ->
+            runTest {
+                val main = StandardTestDispatcher(testScheduler)
+                Dispatchers.setMain(main)
+                try {
+                    val fake = FakeMealio(script())
+                    fake.install(io = main)
+                    MealioCart.setUser("ana")
+                    MealioCart.setUser("ben")
+                    MealioCart.signOutOfAllStores()
+                    assertEquals("run $n: Ana's sign-out, then the explicit one", 2, fake.storeEpoch)
+                    assertEquals("run $n: virtual time moved", 0L, currentTime)
+                } finally {
+                    FakeMealio.uninstall()
+                    Dispatchers.resetMain()
+                }
+            }
+        }
+    }
+
+    /**
+     * Run `block` with virtual time held still: a coroutine that only yields
+     * keeps a task due now in the scheduler, so runTest never jumps to a
+     * timeout while work is out on another thread. Fails if time moved anyway.
+     * Do not call runCurrent or advance* inside it.
+     */
+    private suspend fun <T> TestScope.withTimeFrozen(block: suspend () -> T): T {
+        val at = currentTime
+        val done = AtomicBoolean(false)
+        val pin = launch { while (!done.get()) yield() }
+        try {
+            return block()
+        } finally {
+            done.set(true)
+            pin.cancel()
+            assertEquals("virtual time moved", at, currentTime)
+        }
     }
 }

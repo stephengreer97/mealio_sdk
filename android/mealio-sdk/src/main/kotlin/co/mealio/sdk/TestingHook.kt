@@ -1,5 +1,8 @@
 package co.mealio.sdk
 
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+
 /**
  * The seam co.mealio:mealio-sdk-testing plugs into. Not for apps: the kit that
  * uses it is a separate artifact, added with `testImplementation`, so the fake
@@ -24,15 +27,22 @@ interface TestSessions {
 object MealioTesting {
     /**
      * Make MealioCart use `host` and the client `makeClient` builds, as
-     * configure() would, with store sign-outs going to `sessions`.
+     * configure() would, with store sign-outs going to `sessions`. The
+     * sign-outs' disk work runs on `io` (Dispatchers.IO unless a test passes
+     * its own dispatcher, so it stays on the test's virtual clock).
      */
-    fun install(host: Host, sessions: TestSessions, makeClient: (JobQueue) -> MealioClient): MealioClient =
+    fun install(
+        host: Host,
+        sessions: TestSessions,
+        io: CoroutineDispatcher = Dispatchers.IO,
+        makeClient: (JobQueue) -> MealioClient,
+    ): MealioClient =
         MealioCart.install(host, object : SessionStore {
             override fun epoch(): Int = sessions.epoch()
             override fun bumpEpoch(): Int = sessions.bumpEpoch()
             override suspend fun clearStore(hosts: StoreHosts) = Unit
             override suspend fun clearAll() = Unit
-        }, release = {}, makeClient = makeClient)
+        }, release = {}, io = io, makeClient = makeClient)
 
     /** Undo [install]: MealioCart is unconfigured again and forgets the user. */
     fun uninstall() = MealioCart.uninstall()

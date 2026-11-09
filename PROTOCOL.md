@@ -696,15 +696,15 @@ comment lists the steps), use `isJsSpace` for the name lookahead (JavaScript's
 against the regex on fuzzed text and against `multipartScan` in the vectors
 (each judged in well under a second).
 
-**Form submissions.** `form.submit()` is hooked; every other submission is
-judged by a bubble-phase `submit` listener on the window and on every shadow
-root, only when the page did not call `preventDefault` (see "Threat model"
-above). The action (the submitter's `formaction`, else the form's action,
-which is the page URL when the form has none) is checked as a path, and the
-form's `operationName`, `query` and `operations` controls (the submitter
-included) as a form-encoded body. A refused `submit()` throws; a refused
-submit event is cancelled with `preventDefault` after the page's own
-listeners ran.
+**Form submissions.** `form.submit()` and `requestSubmit()` are judged when
+they are called and throw when refused. Every other submission is judged by a
+`submit` listener in the capture phase on the window and on every shadow root,
+and a refused one is cancelled with `preventDefault` only (see "Threat model"
+above). An explicit target (the submitter's `formaction`, else the form's
+`action` attribute, when not blank) is checked as a path. A form with neither
+is judged by its fields only, never by the page URL. The form's
+`operationName`, `query` and `operations` controls (the submitter included)
+are checked as a form-encoded body. A `dialog` method form is never judged.
 
 `Request`, `Blob`, `ArrayBuffer`,
 `URLSearchParams` and `FormData` bodies are read before the check. A beacon

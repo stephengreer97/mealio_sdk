@@ -596,6 +596,22 @@ MealioCart.setUser("u1")
 FakeMealio.uninstall()                          // in @After
 ```
 
+Under `runTest`, pass your test dispatcher to `install` as well as setting it
+as Main. The store sign-outs (`setUser` to a new user, `signOutOfAllStores`)
+do IO work, on `Dispatchers.IO` by default. On a real thread, virtual time can
+jump past the SDK's sign-out timeouts while that work runs, and the test flakes:
+
+```kotlin
+@Test fun signsOut() = runTest {
+    val main = StandardTestDispatcher(testScheduler)
+    Dispatchers.setMain(main)
+    fake.install(io = main)
+    MealioCart.setUser("ana"); MealioCart.setUser("ben")
+    MealioCart.signOutOfAllStores()
+    assertEquals(2, fake.storeEpoch)
+}
+```
+
 | | |
 |---|---|
 | `FakeMealio.fromJson(json)`, `FakeScript.fromJson(json)` | a script as JSON with the TypeScript field names, the same text `createFakeMealio` and Swift's `FakeMealio(json:)` take (`signIn: "cancelled"`, `errors: {"search": "network"}`, `add: {"fail": ...}`, `warm: {"signedIn": false}` or `null`). `protocol/fake-script.json` is one every kit runs |
@@ -605,6 +621,7 @@ FakeMealio.uninstall()                          // in @After
 | `fake.requests` / `fake.hostCalls` | what the client sent (`FakeRequest(kind, path, body, token)`) and what the store page was asked |
 | `fake.hold(kind)` | holds the next request of that kind until the returned function is called (test cancels and user switches) |
 | `fake.offered(cartId)` | products a cart offered; an add of anything else fails as `not_offered`, as on the server |
+| `fake.install(sessionTokenProvider, io)` | `io`: the dispatcher for the sign-outs' IO work, `Dispatchers.IO` by default; pass your test dispatcher under `runTest` |
 | `fake.storeEpoch` | bumped by each store sign-out while installed |
 | `fake.config()`, `fake.client()`, `fake.host`, `fake.transport`, `TEST_KEYS`, `signTestEnvelope()` | build your own client |
 

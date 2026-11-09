@@ -2,6 +2,7 @@ package co.mealio.sdk
 
 import android.content.Context
 import android.content.pm.ApplicationInfo
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -28,7 +29,8 @@ import kotlinx.coroutines.withContext
 object MealioCart {
     const val SDK_VERSION = "0.6.0"
 
-    private class State(val client: MealioClient, val host: Host, val sessions: SessionStore, val release: () -> Unit)
+    /** `io` runs the sign-outs' disk work: Dispatchers.IO, or a test's dispatcher (MealioTesting). */
+    private class State(val client: MealioClient, val host: Host, val sessions: SessionStore, val release: () -> Unit, val io: CoroutineDispatcher)
 
     @Volatile private var state: State? = null
 
@@ -100,15 +102,22 @@ object MealioCart {
     /**
      * Make `client` the configured one (configure, and MealioTesting).
      * Whatever the old client had loading is cancelled; its add runs on and
-     * its page is released after it, in the shared queue.
+     * its page is released after it, in the shared queue. `io` runs the
+     * store sign-outs' disk work.
      */
-    internal fun install(host: Host, sessions: SessionStore, release: () -> Unit, makeClient: (JobQueue) -> MealioClient): MealioClient {
+    internal fun install(
+        host: Host,
+        sessions: SessionStore,
+        release: () -> Unit,
+        io: CoroutineDispatcher = Dispatchers.IO,
+        makeClient: (JobQueue) -> MealioClient,
+    ): MealioClient {
         val client = makeClient(queue)
         // Carry the user over to the new client, without a store sign-out.
         val u = userState.value
         if (u.tracked) client.setUser(u.id)
         val old = state
-        state = State(client, host, sessions, release)
+        state = State(client, host, sessions, release, io)
         if (old != null) {
             old.client.cancelJobs()
             queueExclusive(scope, client) { old.release() }
@@ -225,7 +234,7 @@ object MealioCart {
             signOutSteps(
                 { if (hosts != null) s.sessions.clearStore(hosts) },
                 { s.host.resetPage() },
-                { withContext(Dispatchers.IO) { s.sessions.bumpEpoch() } },
+                { withContext(s.io) { s.sessions.bumpEpoch() } },
             )
         }
     }
@@ -262,7 +271,7 @@ object MealioCart {
     private suspend fun clearAllStores(s: State) = signOutSteps(
         { s.sessions.clearAll() },
         { s.host.resetPage() },
-        { withContext(Dispatchers.IO) { s.sessions.bumpEpoch() } },
+        { withContext(s.io) { s.sessions.bumpEpoch() } },
     )
 
     private fun current(): State =

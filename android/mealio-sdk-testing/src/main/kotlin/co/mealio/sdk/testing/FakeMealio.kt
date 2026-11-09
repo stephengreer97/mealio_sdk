@@ -30,6 +30,8 @@ import co.mealio.sdk.StoreLocation
 import co.mealio.sdk.StorePreferences
 import co.mealio.sdk.TestSessions
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters
 import org.bouncycastle.crypto.signers.Ed25519Signer
 import org.json.JSONArray
@@ -265,12 +267,20 @@ class FakeMealio @JvmOverloads constructor(
      * setUser, the sign-outs and MealioCartButton's sheet then run the real
      * client against it. No Context needed. Store sign-outs bump [storeEpoch]
      * instead of touching cookies. Call [uninstall] after the test.
+     *
+     * `io` runs the sign-outs' IO work (Dispatchers.IO by default). Under
+     * runTest, pass the test's dispatcher (`StandardTestDispatcher(testScheduler)`,
+     * the one you set as Main): otherwise that work runs on a real thread
+     * while virtual time can jump past the SDK's sign-out timeouts.
      */
     @JvmOverloads
     @OptIn(MealioTestingHook::class)
-    fun install(sessionTokenProvider: suspend () -> String = this.sessionTokenProvider): MealioClient {
+    fun install(
+        sessionTokenProvider: suspend () -> String = this.sessionTokenProvider,
+        io: CoroutineDispatcher = Dispatchers.IO,
+    ): MealioClient {
         val cfg = config(sessionTokenProvider, epochProvider = { memory.epoch() }, platform = "android")
-        return MealioTesting.install(host, memory) { q -> MealioClient(cfg, host, transport, q) }
+        return MealioTesting.install(host, memory, io) { q -> MealioClient(cfg, host, transport, q) }
     }
 
     companion object {
