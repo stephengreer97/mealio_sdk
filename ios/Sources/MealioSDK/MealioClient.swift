@@ -459,6 +459,7 @@ public final class MealioClient {
         do {
             try await queue.run(cancel: cancel) { () async throws -> Void in
                 try MealioClient.stopIf(cancel)
+                try await self.runner.hostReady()
                 await self.cleanPageIfDirty()
                 try MealioClient.stopIf(cancel)
                 let a = self.about()
@@ -714,6 +715,9 @@ public final class MealioClient {
         }
         return try await queue.run(cancel: cancel) { () async throws -> T in
             if let c = cancel { try MealioClient.stopIf(c) }
+            // No job starts on a host that is not safe to use (on iOS: the
+            // network block of checkout paths is not in place).
+            try await self.runner.hostReady()
             await self.cleanPageIfDirty()
             if let c = cancel { try MealioClient.stopIf(c) }
             return try await fn()

@@ -8,6 +8,15 @@
 // A request the guard lets through either reaches that handler or fails in
 // WebKit; both count as "sent". Only the guard's own refusal ("mealio guard:
 // <reason>") counts as blocked. Every wait here is bounded to a few seconds.
+//
+// Most tests here test the in-page guard ALONE: their pages leave out the
+// network block list (NetworkBlock.swift) that the SDK's own pages carry.
+// The "network block" tests at the end add it.
+//
+// Each page is shown in a window, as WebViewHost parks its hidden page in
+// the key window. A WKWebView in no window counts as hidden: WebKit throttles
+// its timers (and may suspend its process), which made a long test's
+// setTimeout-based waits outlive their bounds on a cold simulator.
 
 #if canImport(UIKit) && canImport(WebKit)
 import UIKit
@@ -60,6 +69,48 @@ private final class Once: @unchecked Sendable {
 
 final class GuardBrowserTests: XCTestCase {
 
+    /// The windows this test's pages are shown in, taken down after it.
+    @MainActor private var windows: [UIWindow] = []
+
+    override func tearDown() async throws {
+        await MainActor.run {
+            for w in self.windows {
+                w.subviews.forEach { $0.removeFromSuperview() }
+                w.isHidden = true
+            }
+            self.windows = []
+        }
+        try await super.tearDown()
+    }
+
+    /// The application, if the test process has one. Read through the
+    /// runtime: UIApplication.shared is not optional, and a test bundle run
+    /// without a host application has none.
+    @MainActor
+    private static func application() -> UIApplication? {
+        typealias Shared = @convention(c) (AnyClass, Selector) -> UIApplication?
+        let sel = NSSelectorFromString("sharedApplication")
+        guard let m = class_getClassMethod(UIApplication.self, sel) else { return nil }
+        return unsafeBitCast(method_getImplementation(m), to: Shared.self)(UIApplication.self, sel)
+    }
+
+    /// A window for a page, on the app's scene when there is one.
+    @MainActor
+    private func show(_ web: WKWebView) {
+        let frame = CGRect(x: 0, y: 0, width: 320, height: 480)
+        let scene = GuardBrowserTests.application()?.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        let window: UIWindow
+        if let scene = scene {
+            window = UIWindow(windowScene: scene)
+            window.frame = frame
+        } else {
+            window = UIWindow(frame: frame)
+        }
+        window.addSubview(web)
+        window.isHidden = false
+        windows.append(window)
+    }
+
     /// The run's first page load has happened (it may take longer).
     @MainActor private static var firstLoadDone = false
 
@@ -69,16 +120,22 @@ final class GuardBrowserTests: XCTestCase {
     /// start), or with the guard only in the main frame's own markup. `arm`:
     /// then inject the per-script copy, as the runner does before a script.
     @MainActor
-    private func page(allFrames: Bool = true, pages given: TestPages? = nil, arm: Bool = true) async throws -> WKWebView {
+    /// `rules`: with the SDK's network block list, as its own pages have it.
+    private func page(allFrames: Bool = true, pages given: TestPages? = nil, arm: Bool = true,
+                      rules: Bool = false) async throws -> WKWebView {
         let pages = given ?? TestPages()
         let config: WKWebViewConfiguration
+        var list: WKContentRuleList?
+        if rules { list = try await BlockedPathRules.shared.list() }
         if allFrames {
-            config = WebViewHost.makeConfiguration(handler: ScriptHandler())
+            config = WebViewHost.makeConfiguration(handler: ScriptHandler(), rules: list)
         } else {
             config = WKWebViewConfiguration()
+            if let list = list { config.userContentController.add(list) }
         }
         config.setURLSchemeHandler(pages, forURLScheme: TestPages.scheme)
         let web = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480), configuration: config)
+        show(web)
         _ = web.load(URLRequest(url: URL(string: TestPages.home)!))
         // Bounded: 3 seconds at most, 20 for the run's first page, which
         // also starts WebKit's processes on a cold simulator.
@@ -176,6 +233,11 @@ final class GuardBrowserTests: XCTestCase {
             r.navigated = await t(() => window.frames[1].fetch('/graphql', { method: 'POST', body: M }));
             r.innerHtml = await t(() => window.frames[2].fetch('/graphql', { method: 'POST', body: M }));
             r.xhr = await xhr(a.contentWindow);
+            // WebKit runs the document-start copy in an added about:blank frame
+            // too (Chromium's init script does not), so that frame's guard is
+            // its own, and this Blob is from another realm. Before round 6 the
+            // guard knew a Blob by instanceof, missed it and sent it; it now
+            // knows one by its brand (Blob's own size getter), from any frame.
             r.blobFromTop = await t(() => a.contentWindow.fetch('/graphql', { method: 'POST', body: new Blob([M]) }));
             r.allowed = await t(() => a.contentWindow.fetch('/graphql', { method: 'POST', body: '{"operationName":"cartItemsV2"}' }));
             """)
@@ -438,6 +500,266 @@ final class GuardBrowserTests: XCTestCase {
             """)
         XCTAssertEqual(write, "blocked_operation")
         XCTAssertEqual(pages.reached.filter { $0.contains("checkout") || $0.contains("graphql") }, [])
+    }
+
+    // MARK: round 6: the guard decides with captured built-ins
+    // Mirrors packages/core/test/round6.browser.test.ts (all but the popup
+    // test, which needs a WKUIDelegate). Guard only: no block list.
+
+    private static let placeOrder = #"{"operationName":"PlaceOrder","query":"mutation PlaceOrder { placeOrder { id } }"}"#
+
+    /// `body` in the page, with round6.browser.test.ts's `t` and `PO`; it
+    /// returns a value, which comes back as JSON.
+    @MainActor
+    private func run6(_ web: WKWebView, _ body: String) async throws -> JSONValue {
+        let text = try await js(web, """
+            const t = async (f) => { try { const r = await f(); return r === false ? 'false' : 'sent'; } catch (e) { return String(e && e.message || e).replace('mealio guard: ', ''); } };
+            const PO = \(MealioScripts.jsStringLiteral(GuardBrowserTests.placeOrder));
+            const result = await (async () => { \(body) })();
+            return JSON.stringify(result);
+            """)
+        return try XCTUnwrap(JSONValue.parse(text), "not JSON: \(text)")
+    }
+
+    @MainActor
+    func testDecidesWithTheBuiltInsItCapturedWhateverThePageReplacesLater() async throws {
+        let pages = TestPages()
+        let web = try await page(pages: pages)
+        let poisons: [(String, String)] = [
+            ("RegExp.prototype.test", "RegExp.prototype.test = function () { return false; }"),
+            ("RegExp.prototype.exec", "RegExp.prototype.exec = function () { return null; }"),
+            ("window.URL", "window.URL = function () { return { pathname: \"/ok\", search: \"\" }; }"),
+            ("URL.prototype.pathname", "Object.defineProperty(URL.prototype, \"pathname\", { get: function () { return \"/ok\"; }, configurable: true })"),
+            ("Blob.prototype.text", "Blob.prototype.text = function () { return Promise.resolve(\"\"); }"),
+            ("String", "window.String = function () { return \"\"; }"),
+            ("JSON.parse", "JSON.parse = function () { return {}; }"),
+            ("Array.prototype.push", "Array.prototype.push = function () { return 0; }"),
+            ("Promise.prototype.then", "Promise.prototype.then = function (ok) { ok(\"\"); }"),
+        ]
+        let want: JSONValue = ["path": "blocked_path", "json": "blocked_operation", "blob": "blocked_operation", "doc": "blocked_operation"]
+        for (name, poison) in poisons {
+            // Each call runs, and the original is put back, inside one evaluation.
+            let got = try await run6(web, """
+                const saved = { t: RegExp.prototype.test, x: RegExp.prototype.exec, U: window.URL, p: Object.getOwnPropertyDescriptor(URL.prototype, 'pathname'),
+                  b: Blob.prototype.text, S: window.String, j: JSON.parse, i: String.prototype.indexOf, a: Array.prototype.push, th: Promise.prototype.then,
+                  c: Function.prototype.call, ap: Function.prototype.apply };
+                const go = (f) => { try { return f(); } catch (e) { return Promise.reject(e); } };
+                const doc = 'query=' + encodeURIComponent('mutation { placeOrder { id } }'), blob = new Blob([PO]);
+                \(poison);
+                const out = {};
+                const done = [];
+                done[0] = go(() => fetch('/checkout/a', { method: 'POST' }));
+                done[1] = go(() => fetch('/graphql', { method: 'POST', body: PO }));
+                done[2] = go(() => fetch('/graphql', { method: 'POST', body: blob }));
+                done[3] = go(() => fetch('/graphql', { method: 'POST', body: doc }));
+                RegExp.prototype.test = saved.t; RegExp.prototype.exec = saved.x; window.URL = saved.U; Object.defineProperty(URL.prototype, 'pathname', saved.p);
+                Blob.prototype.text = saved.b; window.String = saved.S; JSON.parse = saved.j; String.prototype.indexOf = saved.i; Array.prototype.push = saved.a;
+                Promise.prototype.then = saved.th; Function.prototype.call = saved.c; Function.prototype.apply = saved.ap;
+                out.path = await t(() => done[0]);
+                out.json = await t(() => done[1]);
+                out.blob = await t(() => done[2]);
+                out.doc = await t(() => done[3]);
+                return out;
+                """)
+            XCTAssertEqual(got, want, name)
+        }
+        XCTAssertEqual(pages.reached, [])
+    }
+
+    @MainActor
+    func testNeverHandsThePageAnOriginalThroughFunctionPrototypeCallOrApply() async throws {
+        let web = try await page()
+        let leaked = try await run6(web, """
+            const seen = [], C = Function.prototype.call, A = Function.prototype.apply, R = Reflect.apply;
+            Function.prototype.call = function (self, ...args) { seen.push(this); return R(this, self, args); };
+            Function.prototype.apply = function (self, args) { seen.push(this); return R(this, self, args || []); };
+            const frame = document.createElement('iframe');
+            let pending;
+            try {
+              pending = fetch('/graphql/ok', { method: 'POST', body: '{"operationName":"Search"}' });
+              navigator.sendBeacon('/graphql/ok2', 'x=1');
+              const x = new XMLHttpRequest(); x.open('POST', '/graphql/ok3'); x.send('x=1');
+              document.body.appendChild(frame); void frame.contentWindow;
+            } finally { Function.prototype.call = C; Function.prototype.apply = A; }
+            try { await pending; } catch (e) {}
+            const originals = [];
+            for (const f of seen) {
+              if (typeof f !== 'function' || !/\\[native code\\]/.test(Function.prototype.toString.call(f))) continue;
+              if (f === window.fetch || f === navigator.sendBeacon || f === XMLHttpRequest.prototype.send || f === XMLHttpRequest.prototype.open) continue;
+              if (/^(fetch|sendBeacon|send|open|get contentWindow|appendChild)$/.test(f.name)) originals.push(f.name);
+            }
+            return originals;
+            """)
+        XCTAssertEqual(leaked, [])
+    }
+
+    @MainActor
+    func testReadsAStringObjectOrAnObjectWithToStringAsItsTextInFetchXHRAndBeacons() async throws {
+        let pages = TestPages()
+        let web = try await page(pages: pages)
+        let got = try await run6(web, """
+            const H = { 'content-type': 'application/json' };
+            return {
+              fetchString: await t(() => fetch('/graphql/1', { method: 'POST', headers: H, body: new String(PO) })),
+              fetchObject: await t(() => fetch('/graphql/2', { method: 'POST', headers: H, body: { toString: () => PO } })),
+              xhr: await t(() => new Promise((ok, no) => { const x = new XMLHttpRequest(); x.open('POST', '/graphql/3'); x.onload = ok; x.onerror = no; x.send(new String(PO)); })),
+              beacon: await t(() => navigator.sendBeacon('/graphql/4', new String(PO))),
+              innocent: await t(() => fetch('/graphql/5', { method: 'POST', headers: H, body: new String('{"operationName":"Search"}') })),
+            };
+            """)
+        XCTAssertEqual(got, ["fetchString": "blocked_operation", "fetchObject": "blocked_operation", "xhr": "blocked_operation",
+                             "beacon": "false", "innocent": "sent"])
+        XCTAssertEqual(pages.reached, ["/graphql/5"])
+    }
+
+    @MainActor
+    func testJudgesFormSubmissionsSubmitRequestSubmitAndAButtonClick() async throws {
+        let pages = TestPages()
+        let web = try await page(pages: pages)
+        let got = try await run6(web, """
+            const frame = document.createElement('iframe'); frame.name = 'tgt'; document.body.appendChild(frame);
+            const form = (action, field) => {
+              const f = document.createElement('form'); f.method = 'POST'; f.action = action; f.target = 'tgt';
+              const i = document.createElement('input'); i.name = field[0]; i.value = field[1]; f.appendChild(i);
+              const b = document.createElement('button'); b.type = 'submit'; f.appendChild(b);
+              document.body.appendChild(f); return f;
+            };
+            const out = {};
+            out.submitPath = await t(() => form('/checkout/f1', ['x', '1']).submit());
+            out.submitBody = await t(() => form('/graphql/f2', ['operationName', 'PlaceOrder']).submit());
+            out.requestSubmit = await t(() => form('/checkout/f3', ['x', '1']).requestSubmit());
+            const f4 = form('/graphql/f4', ['query', 'mutation { submitOrder { id } }']);
+            let seen = 'no event'; f4.addEventListener('submit', (e) => { seen = e.defaultPrevented ? 'prevented' : 'went'; });
+            f4.querySelector('button').click();
+            out.click = seen;
+            const f5 = form('/graphql/f5', ['x', '1']);
+            f5.querySelector('button').setAttribute('formaction', '/checkout/f5');
+            out.formaction = await t(() => f5.requestSubmit(f5.querySelector('button')));
+            out.innocent = await t(() => form('/search', ['q', 'milk']).submit());
+            await new Promise((res) => setTimeout(res, 500));
+            return out;
+            """)
+        // The click's event never reached the page's own listener: the guard stopped it first.
+        XCTAssertEqual(got, ["submitPath": "blocked_path", "submitBody": "blocked_operation", "requestSubmit": "blocked_path",
+                             "click": "no event", "formaction": "blocked_path", "innocent": "sent"])
+        for _ in 0..<300 where !pages.reached.contains("/search") {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(pages.reached, ["/search"])
+    }
+
+    @MainActor
+    func testArmingArmsAFrameThatSitsInAnOpenShadowRoot() async throws {
+        let pages = TestPages()
+        let web = try await page(pages: pages, arm: false)
+        // The store, before arming: a widget whose frames live in nested open shadow roots.
+        _ = try await js(web, """
+            await new Promise((done) => {
+              const host = document.createElement('div'); document.body.appendChild(host);
+              const outer = host.attachShadow({ mode: 'open' });
+              const inner = document.createElement('div'); outer.appendChild(inner);
+              const deep = inner.attachShadow({ mode: 'open' });
+              const a = document.createElement('iframe'); a.src = '/frame'; a.onload = () => done(); outer.appendChild(a);
+              const b = document.createElement('iframe'); deep.appendChild(b);
+              window.__w = [a.contentWindow, b.contentWindow];
+              setTimeout(done, 3000);
+            });
+            return 'ok';
+            """)
+        try await arm(web)
+        let got = try await run6(web, """
+            const out = [];
+            for (const w of window.__w) {
+              let r; try { await w.fetch('/checkout/s', { method: 'POST' }); r = 'sent'; } catch (e) { r = e.message; }
+              out.push(w.__mealioArmed() + ' ' + r);
+            }
+            return out;
+            """)
+        XCTAssertEqual(got, ["true mealio guard: blocked_path", "true mealio guard: blocked_path"])
+        XCTAssertEqual(pages.reached, [])
+    }
+
+    // MARK: round 6: the network block list (NetworkBlock.swift)
+
+    @MainActor
+    func testTheNetworkBlockListCompilesInWebKit() async throws {
+        let list = try await BlockedPathRules.shared.list()
+        XCTAssertEqual(list.identifier, NetworkBlock.identifier)
+    }
+
+    /// Page code has replaced RegExp.prototype.test and window.URL, which the
+    /// in-page guard reads. A fetch, an XHR, a form posted into an iframe and
+    /// a frame navigated to a checkout path still never reach the handler:
+    /// WebKit refuses them outside the page. The same four to an ordinary
+    /// path do reach it, so the handler would have seen them. Run with the
+    /// guard unarmed (the store's own code, which the guard never judges)
+    /// and armed.
+    @MainActor
+    func testTheNetworkBlockStopsCheckoutRequestsThePageGuardCannotEvenWhenPageCodeTamperedWithIt() async throws {
+        for armed in [false, true] {
+            let pages = TestPages()
+            let web = try await page(pages: pages, arm: armed, rules: true)
+            let tag = armed ? "armed" : "unarmed"
+            _ = try await run(web, """
+                RegExp.prototype.test = function () { return false; };
+                window.URL = function () { return { pathname: '/', search: '', protocol: 'https:', href: location.href }; };
+                // An innocent body: these test the path alone.
+                const B = '{"operationName":"cartItemsV2"}';
+                const xhr = (u) => new Promise((res) => {
+                  const x = new XMLHttpRequest();
+                  x.onload = () => res('loaded'); x.onerror = () => res('error');
+                  try { x.open('POST', u); x.send(B); } catch (e) { res('threw'); }
+                  setTimeout(() => res('late'), 1500);
+                });
+                const post = (action, sink) => {
+                  const f = document.createElement('iframe'); f.name = sink; document.body.appendChild(f);
+                  const form = document.createElement('form'); form.method = 'POST'; form.action = action; form.target = sink;
+                  const i = document.createElement('input'); i.name = 'operationName'; i.value = 'cartItemsV2'; form.appendChild(i);
+                  document.body.appendChild(form);
+                  HTMLFormElement.prototype.submit.call(form);
+                };
+                const navigate = async (to) => {
+                  const g = document.createElement('iframe'); g.src = '/frame'; document.body.appendChild(g);
+                  await Promise.race([new Promise((res) => g.addEventListener('load', res)), wait(2000)]);
+                  g.contentWindow.location.href = to;
+                };
+                for (const [base, n] of [['/checkout/\(tag)', 'blocked'], ['/api/\(tag)', 'open']]) {
+                  r[n + 'Fetch'] = await t(() => fetch(base + '-fetch', { method: 'POST', body: B }));
+                  r[n + 'Xhr'] = await xhr(base + '-xhr');
+                  post(base + '-form', n + 'sink');
+                  await navigate(base + '-nav');
+                }
+                """)
+            // The ordinary four arrive (bounded wait); the blocked four have had as long.
+            let open = ["fetch", "xhr", "form", "nav"].map { "/api/\(tag)-\($0)" }
+            for _ in 0..<300 where !open.allSatisfy({ pages.reached.contains($0) }) {
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            try await Task.sleep(nanoseconds: 500_000_000)
+            XCTAssertEqual(open.filter { !pages.reached.contains($0) }, [], "\(tag): the handler never saw \(pages.reached)")
+            XCTAssertEqual(pages.reached.filter { $0.contains("checkout") }, [], tag)
+        }
+    }
+
+    /// The block list judges the path and query, never the host, and reads
+    /// a path a server would decode: %63heckout is checkout.
+    @MainActor
+    func testTheNetworkBlockReadsThePathNotTheHostAndRefusesEncodedLetters() async throws {
+        let pages = TestPages()
+        let web = try await page(pages: pages, arm: false, rules: true)
+        _ = try await run(web, """
+            // A frame, not a fetch: a cross-origin fetch to a custom scheme may be refused before it is sent.
+            { const f = document.createElement('iframe'); f.src = '\(TestPages.scheme)://checkout.heb.com/api/host'; document.body.appendChild(f); }
+            r.encoded = await t(() => fetch('/%63heckout/encoded', { method: 'POST', body: '{}' }));
+            r.twice = await t(() => fetch('/%2563heckout/twice', { method: 'POST', body: '{}' }));
+            r.query = await t(() => fetch('/api/q?next=%2Fcart&q=green%20beans', { method: 'POST', body: '{}' }));
+            """)
+        for _ in 0..<300 where !(["checkout.heb.com/api/host", "/api/q"].allSatisfy { pages.reached.contains($0) }) {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(pages.reached.contains("checkout.heb.com/api/host"), "\(pages.reached)")
+        XCTAssertTrue(pages.reached.contains("/api/q"), "\(pages.reached)")
+        XCTAssertEqual(pages.reached.filter { $0.contains("encoded") || $0.contains("twice") }, [])
     }
 }
 #endif

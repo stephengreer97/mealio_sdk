@@ -28,6 +28,11 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    testOptions {
+        // Robolectric (NetworkBlockWiringTest) reads the merged manifest and resources.
+        unitTests.isIncludeAndroidResources = true
+    }
+
     kotlinOptions {
         jvmTarget = "17"
         // Interface defaults (Host.pagesLost, HttpTransport.get) as real JVM
@@ -55,6 +60,8 @@ dependencies {
     // implementation on the test classpath takes its place.
     // VERIFY: AGP puts this ahead of the android.jar stub on the unit-test classpath.
     testImplementation("org.json:json:20231013")
+    // A real android.webkit WebView/WebViewClient for the network-block wiring test.
+    testImplementation("org.robolectric:robolectric:4.11.1")
 }
 
 // Maven Central: co.mealio:mealio-sdk. Signed only when a key is present (the

@@ -10,7 +10,6 @@ import co.mealio.sdk.StoreLocation
 import co.mealio.sdk.StorePreferences
 import org.json.JSONArray
 import org.json.JSONObject
-import org.json.JSONTokener
 
 // The one script format every kit reads: the JSON form of TypeScript's
 // FakeScript (createFakeMealio), with its field names. Swift's
@@ -28,15 +27,11 @@ import org.json.JSONTokener
  * A script from its JSON text (TypeScript FakeScript field names). Throws
  * IllegalArgumentException when it is not one: text that JSON.parse would
  * refuse (trailing text included), an unknown field or a value of the wrong
- * type at any level. The message names the field.
+ * type at any level. The message names the field. Read as JSON.parse reads
+ * it: a repeated key keeps its last value.
  */
 fun fakeScriptFromJson(json: String): FakeScript {
-    strictJsonCheck(json)
-    val root = try {
-        JSONTokener(json).nextValue()
-    } catch (e: Exception) {
-        throw IllegalArgumentException("The fake Mealio script is not JSON", e)
-    }
+    val root = strictJsonParse(json)
     val o = root as? JSONObject ?: throw IllegalArgumentException("The fake Mealio script must be a JSON object")
     return fakeScriptFromJson(o)
 }
@@ -82,7 +77,9 @@ fun fakeItemFromJson(o: JSONObject): FakeItem {
         options = o.objects("options").map { Product.fromJson(it) },
         remembered = o.string("remembered"),
         ingredient = o.string("ingredient"),
-        quantity = (o.opt("quantity") as? Number)?.toInt() ?: 1,
+        // TS `quantity?: number`: a fraction is accepted (and truncated, the SDK's
+        // quantities are whole); a huge one saturates instead of wrapping.
+        quantity = (o.opt("quantity") as? Number)?.toDouble()?.toInt() ?: 1,
         rememberedPreferenceId = o.string("rememberedPreferenceId"),
         rememberedUnavailable = o.opt("rememberedUnavailable") == true,
         startUnchecked = o.opt("startUnchecked") == true,
@@ -97,7 +94,7 @@ fun fakeErrorFromJson(v: Any?): FakeError {
     checkError(v, "error")
     return when (v) {
         is String -> FakeError(v)
-        else -> (v as JSONObject).let { FakeError(it.string("code")!!, it.string("message"), (it.opt("status") as? Number)?.toInt()) }
+        else -> (v as JSONObject).let { FakeError(it.string("code")!!, it.string("message"), (it.opt("status") as? Number)?.toDouble()?.toInt()) }
     }
 }
 
@@ -134,10 +131,10 @@ private class Fields(val o: JSONObject, val path: String, known: Set<String>, re
         if (oneOf != null && v !in oneOf) bad(at(k), "must be one of ${oneOf.joinToString()}, not \"$v\"")
     }
 
-    fun number(k: String, nullable: Boolean = false, integer: Boolean = false) {
+    /** TS `number`: any number, fractions included. */
+    fun number(k: String, nullable: Boolean = false) {
         if (!has(k) || (nullable && isNull(k))) return
-        val v = o.opt(k) as? Number ?: bad(at(k), if (nullable) "must be a number or null" else "must be a number")
-        if (integer && v.toDouble() != Math.floor(v.toDouble())) bad(at(k), "must be a whole number")
+        o.opt(k) as? Number ?: bad(at(k), if (nullable) "must be a number or null" else "must be a number")
     }
 
     fun boolean(k: String, nullable: Boolean = false) {
@@ -183,7 +180,7 @@ private fun checkItem(o: JSONObject, path: String) {
         "startUnchecked", "weightLb", "recipes", "unavailable"), setOf("key"))
     f.string("key")
     f.string("ingredient")
-    f.number("quantity", integer = true)
+    f.number("quantity")
     f.objects("options", ::checkProduct)
     f.string("remembered", nullable = true)
     f.string("rememberedPreferenceId", nullable = true)
@@ -191,7 +188,7 @@ private fun checkItem(o: JSONObject, path: String) {
     f.boolean("startUnchecked")
     f.number("weightLb")
     f.objects("recipes") { r, p ->
-        Fields(r, p, setOf("id", "title", "quantity"), setOf("id", "title", "quantity")).run { string("id"); string("title", nullable = true); number("quantity", integer = true) }
+        Fields(r, p, setOf("id", "title", "quantity"), setOf("id", "title", "quantity")).run { string("id"); string("title", nullable = true); number("quantity") }
     }
     f.string("unavailable")
 }
@@ -210,7 +207,7 @@ private fun checkProduct(o: JSONObject, path: String) {
     f.objects("preferences") { p, at -> Fields(p, at, setOf("id", "label"), setOf("id", "label")).run { string("id"); string("label") } }
     f.number("unitPrice", nullable = true)
     f.boolean("estimated")
-    f.number("maxQuantity", nullable = true, integer = true)
+    f.number("maxQuantity", nullable = true)
     f.boolean("soldByWeight")
     f.list("weightOptions") { v, at -> if (v !is Number) bad(at, "must be a number") }
     f.number("pricePerLb", nullable = true)
@@ -225,62 +222,91 @@ private fun checkLocation(o: JSONObject, path: String) {
 private fun checkError(v: Any?, path: String) {
     if (v is String) return
     val o = v as? JSONObject ?: bad(path, "must be a code or {code, message?, status?}")
-    Fields(o, path, setOf("code", "message", "status"), setOf("code")).run { string("code"); string("message"); number("status", integer = true) }
+    Fields(o, path, setOf("code", "message", "status"), setOf("code")).run { string("code"); string("message"); number("status") }
 }
 
 /**
- * JSON.parse's grammar, checked before org.json reads the text: its tokener
- * takes single quotes, bare words, comments and text after the value.
+ * JSON.parse, building org.json values: its grammar exactly (org.json's
+ * tokener takes single quotes, bare words, comments and text after the
+ * value), a repeated key keeps its last value (the tokener throws), and a
+ * number is read as JSON.parse reads it, a double: a whole one that fits an
+ * Int or Long comes back as one (3000000000 is a Long, never wrapped), any
+ * other as a Double.
  */
-internal fun strictJsonCheck(s: String) {
+internal fun strictJsonParse(s: String): Any {
     var i = 0
     fun fail(what: String): Nothing = throw IllegalArgumentException("The fake Mealio script is not JSON: $what at offset $i")
     fun ws() { while (i < s.length && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) i++ }
-    fun str() {
+    fun str(): String {
+        val sb = StringBuilder()
         i++
         while (true) {
             if (i >= s.length) fail("unterminated string")
             val c = s[i++]
-            if (c == '"') return
+            if (c == '"') return sb.toString()
             if (c < ' ') fail("control character in a string")
-            if (c == '\\') {
-                if (i >= s.length) fail("unterminated string")
-                when (s[i++]) {
-                    '"', '\\', '/', 'b', 'f', 'n', 'r', 't' -> {}
-                    'u' -> { if (i + 4 > s.length || (0 until 4).any { s[i + it] !in "0123456789abcdefABCDEF" }) fail("bad \\u escape"); i += 4 }
-                    else -> fail("bad escape")
+            if (c != '\\') { sb.append(c); continue }
+            if (i >= s.length) fail("unterminated string")
+            when (s[i++]) {
+                '"' -> sb.append('"')
+                '\\' -> sb.append('\\')
+                '/' -> sb.append('/')
+                'b' -> sb.append('\b')
+                'f' -> sb.append('\u000C')
+                'n' -> sb.append('\n')
+                'r' -> sb.append('\r')
+                't' -> sb.append('\t')
+                'u' -> {
+                    if (i + 4 > s.length || (0 until 4).any { s[i + it] !in "0123456789abcdefABCDEF" }) fail("bad \\u escape")
+                    sb.append(s.substring(i, i + 4).toInt(16).toChar())
+                    i += 4
                 }
+                else -> fail("bad escape")
             }
         }
     }
     fun digits() { if (i >= s.length || s[i] !in '0'..'9') fail("expected a digit"); while (i < s.length && s[i] in '0'..'9') i++ }
-    fun value(depth: Int) {
+    fun number(): Any {
+        val start = i
+        if (s[i] == '-') i++
+        if (i < s.length && s[i] == '0') i++ else digits()
+        if (i < s.length && s[i] == '.') { i++; digits() }
+        if (i < s.length && (s[i] == 'e' || s[i] == 'E')) { i++; if (i < s.length && (s[i] == '+' || s[i] == '-')) i++; digits() }
+        val d = s.substring(start, i).toDouble()
+        if (d.isInfinite()) fail("number out of range")
+        if (d != Math.rint(d) || Math.abs(d) >= 9.007199254740992E15 || (d == 0.0 && 1.0 / d < 0)) return d
+        val l = d.toLong()
+        return if (l in Int.MIN_VALUE..Int.MAX_VALUE) l.toInt() else l
+    }
+    fun value(depth: Int): Any {
         if (depth > 512) fail("nested too deep")
         ws()
         if (i >= s.length) fail("expected a value")
-        when (val c = s[i]) {
+        return when (val c = s[i]) {
             '{' -> {
+                val o = JSONObject()
                 i++; ws()
-                if (i < s.length && s[i] == '}') { i++; return }
+                if (i < s.length && s[i] == '}') { i++; return o }
                 while (true) {
                     ws()
                     if (i >= s.length || s[i] != '"') fail("expected a quoted key")
-                    str(); ws()
+                    val k = str(); ws()
                     if (i >= s.length || s[i] != ':') fail("expected ':'")
                     i++
-                    value(depth + 1); ws()
+                    o.put(k, value(depth + 1)); ws()
                     if (i < s.length && s[i] == ',') { i++; continue }
-                    if (i < s.length && s[i] == '}') { i++; return }
+                    if (i < s.length && s[i] == '}') { i++; return o }
                     fail("expected ',' or '}'")
                 }
             }
             '[' -> {
+                val a = JSONArray()
                 i++; ws()
-                if (i < s.length && s[i] == ']') { i++; return }
+                if (i < s.length && s[i] == ']') { i++; return a }
                 while (true) {
-                    value(depth + 1); ws()
+                    a.put(value(depth + 1)); ws()
                     if (i < s.length && s[i] == ',') { i++; continue }
-                    if (i < s.length && s[i] == ']') { i++; return }
+                    if (i < s.length && s[i] == ']') { i++; return a }
                     fail("expected ',' or ']'")
                 }
             }
@@ -289,16 +315,14 @@ internal fun strictJsonCheck(s: String) {
                 val w = when (c) { 't' -> "true"; 'f' -> "false"; else -> "null" }
                 if (!s.startsWith(w, i)) fail("unexpected text")
                 i += w.length
+                when (c) { 't' -> true; 'f' -> false; else -> JSONObject.NULL }
             }
-            else -> {
-                if (s[i] == '-') i++
-                if (i < s.length && s[i] == '0') i++ else digits()
-                if (i < s.length && s[i] == '.') { i++; digits() }
-                if (i < s.length && (s[i] == 'e' || s[i] == 'E')) { i++; if (i < s.length && (s[i] == '+' || s[i] == '-')) i++; digits() }
-            }
+            '-', in '0'..'9' -> number()
+            else -> fail("unexpected text")
         }
     }
-    value(0)
+    val v = value(0)
     ws()
     if (i != s.length) fail("trailing text")
+    return v
 }

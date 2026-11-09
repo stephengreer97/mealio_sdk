@@ -273,9 +273,109 @@ export function mutationNames(doc: string): string[] {
  * or the end. Parts named operationName, query and operations are judged as
  * the form fields of the same names. The name may be double-quoted,
  * single-quoted or bare (`name=operations`), as servers accept all three; a
- * longer name (`operationsX`) is a different field. Copy it exactly (flags: g).
+ * longer name (`operationsX`) is a different field.
+ *
+ * This is the SPEC, not the implementation: run as a regex it takes time
+ * quadratic in the body (a body of `name=query\n` lines rescans every line
+ * from every name). multipartFields finds exactly the same matches in one
+ * pass; every SDK ports multipartFields and tests it against this regex.
  */
 export const MULTIPART_FIELD = String.raw`name=["']?(operationName|query|operations)(?=["';\s]|$)[^\r\n]*\r?\n(?:[^\r\n]+\r?\n)*\r?\n([\s\S]*?)(?=\r?\n--|$)`;
+
+/**
+ * JavaScript's `\s`, which MULTIPART_FIELD's lookahead uses. Other
+ * languages' `\s` differ (Kotlin's and Swift's), so ports test this set.
+ */
+export function isJsSpace(c: number): boolean {
+  return c === 0x20 || (c >= 0x09 && c <= 0x0d) || c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a)
+    || c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000 || c === 0xfeff;
+}
+
+const PART_NAMES = ['operationName', 'query', 'operations'];
+
+/**
+ * Every match of MULTIPART_FIELD (flag g) in a body, as [name, value] pairs,
+ * in one linear pass. Port it line for line:
+ *
+ * 1. Find the next `name=` at or after `from`. Skip one `"` or `'` after it.
+ *    The name is operationName, query or operations (tried in that order),
+ *    followed by the end, `"`, `'`, `;` or a JS space (isJsSpace). Otherwise
+ *    try the next `name=` one character later.
+ * 2. The header line runs to the first CR or LF. It must end in LF or CRLF.
+ * 3. Then any number of non-empty lines, each ending in LF or CRLF, then an
+ *    empty line (LF or CRLF). The value starts after it. A line ending in a
+ *    lone CR, or the end of the body, means no match.
+ * 4. The value runs to the first `\n--` or `\r\n--` at or after its start,
+ *    or to the end. The next search starts where the value ends.
+ *
+ * Two caches keep it linear. Step 2's first break is cached as a range: every
+ * later name before that break shares it. Step 3's outcome is cached for the
+ * run of lines it walked: a later header that ends inside that run reaches
+ * the same blank line (or the same failure), so the run is never walked twice.
+ */
+export function multipartFields(body: string): Array<[string, string]> {
+  const out: Array<[string, string]> = [];
+  const n = body.length;
+  // nextBreak(p) for p in [brkFrom, brkAt] is brkAt.
+  let brkFrom = -1, brkAt = -1;
+  // valueStart(p) for p in [runFrom, runTo] is runValue (-1: no match).
+  let runFrom = -1, runTo = -1, runValue = -1;
+  let from = 0;
+  for (;;) {
+    const c = body.indexOf('name=', from);
+    if (c < 0) break;
+    from = c + 1;
+    let k = c + 5;
+    if (body[k] === '"' || body[k] === "'") k += 1;
+    let name = '';
+    for (const x of PART_NAMES) if (body.startsWith(x, k)) { name = x; break; }
+    if (!name) continue;
+    const j = k + name.length;
+    if (j < n) {
+      const ch = body.charCodeAt(j);
+      if (ch !== 0x22 && ch !== 0x27 && ch !== 0x3b && !isJsSpace(ch)) continue;
+    }
+    // 2. The header line.
+    let q: number;
+    if (j >= brkFrom && j <= brkAt) q = brkAt;
+    else {
+      q = j;
+      while (q < n && body.charCodeAt(q) !== 0x0d && body.charCodeAt(q) !== 0x0a) q += 1;
+      brkFrom = j; brkAt = q;
+    }
+    let p: number;
+    if (q < n && body.charCodeAt(q) === 0x0a) p = q + 1;
+    else if (q + 1 < n && body.charCodeAt(q) === 0x0d && body.charCodeAt(q + 1) === 0x0a) p = q + 2;
+    else continue;
+    // 3. Header lines, then the blank line.
+    let v: number;
+    if (p >= runFrom && p <= runTo) v = runValue;
+    else {
+      let s = p;
+      v = -1;
+      for (;;) {
+        if (s >= n) break;
+        const h = body.charCodeAt(s);
+        if (h === 0x0a) { v = s + 1; break; }
+        if (h === 0x0d) { if (s + 1 < n && body.charCodeAt(s + 1) === 0x0a) v = s + 2; break; }
+        let e = s;
+        while (e < n && body.charCodeAt(e) !== 0x0d && body.charCodeAt(e) !== 0x0a) e += 1;
+        if (e < n && body.charCodeAt(e) === 0x0a) s = e + 1;
+        else if (e + 1 < n && body.charCodeAt(e) === 0x0d && body.charCodeAt(e + 1) === 0x0a) s = e + 2;
+        else break;
+      }
+      runFrom = p; runTo = s; runValue = v;
+    }
+    if (v < 0) continue;
+    // 4. The value.
+    let end = body.indexOf('\n--', v);
+    if (end < 0) end = n;
+    else if (end > v && body.charCodeAt(end - 1) === 0x0d) end -= 1;
+    out.push([name, body.slice(v, end)]);
+    from = end;
+  }
+  return out;
+}
 
 /**
  * Does a request body name a blocked operation? Reads `operationName` the way
@@ -283,7 +383,7 @@ export const MULTIPART_FIELD = String.raw`name=["']?(operationName|query|operati
  * for a single request or a batch, or form-encoded, and the names of every
  * mutation it carries (see mutationNames). A GraphQL multipart upload's
  * `operations` field is JSON and is judged like a JSON body, whether it comes
- * form-encoded or as raw multipart text (MULTIPART_FIELD). A leading byte
+ * form-encoded or as raw multipart text (multipartFields). A leading byte
  * order mark is dropped first, as a server's JSON reader would. A persisted
  * query that sends only an innocent name and a hash cannot be read here; the
  * signature on the envelope covers it. The guard script applies the same rule
@@ -338,11 +438,10 @@ function judged(body: string | null | undefined, depth: number): boolean {
       else if (m[1] === 'operations') { if (judged(v, depth + 1)) return true; }
       else names.push(v);
     }
-    const part = new RegExp(MULTIPART_FIELD, 'g');
-    for (let m = part.exec(body); m; m = part.exec(body)) {
-      if (m[1] === 'query') docs.push(m[2]);
-      else if (m[1] === 'operations') { if (judged(m[2], depth + 1)) return true; }
-      else names.push(m[2]);
+    for (const [name, value] of multipartFields(body)) {
+      if (name === 'query') docs.push(value);
+      else if (name === 'operations') { if (judged(value, depth + 1)) return true; }
+      else names.push(value);
     }
   }
   for (const d of docs) names.push(...mutationNames(d));

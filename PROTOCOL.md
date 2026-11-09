@@ -394,12 +394,67 @@ never touch `BLOCKED_PATTERNS`.
 
 ## Guard script
 
-`GUARD_SCRIPT` (in `packages/core/src/guard.ts`) is defense in depth: the
-signature is the primary control. Once armed, it wraps `window.fetch`,
-`XMLHttpRequest` and `navigator.sendBeacon` in the page so a request whose URL
-matches `BLOCKED_PATTERNS`, or whose body is a blocked operation, throws (or,
-for a beacon, returns false) instead of leaving the device. It caps requests
-at 240 per minute per window, and refuses `blob:` and `data:` workers.
+`GUARD_SCRIPT` (in `packages/core/src/guard.ts`) runs inside the store page.
+Once armed, it wraps `window.fetch`, `XMLHttpRequest`, `navigator.sendBeacon`
+and form submission in the page so a request whose URL matches
+`BLOCKED_PATTERNS`, or whose body is a blocked operation, throws (or, for a
+beacon, returns false) instead of leaving the device. It caps requests at 240
+per minute per window, and refuses `blob:` and `data:` workers.
+
+### Threat model
+
+The controls, strongest first:
+
+1. **Signed instructions.** Every instruction is signed by Mealio, and the SDK
+   runs nothing else. This is the primary control.
+2. **The SDK's own allowlist and blocked paths.** Every page load and `fetch`
+   op the SDK makes is checked against the store's hosts and
+   `BLOCKED_PATTERNS`, and every `fetch` body against the body rules below,
+   in native code (or the React Native JS runtime) that page code cannot reach.
+3. **Native network blocking (iOS and Android only).** The native SDKs refuse
+   every request the store page itself makes whose path matches
+   `BLOCKED_PATTERNS`: documents, frames, form posts, fetch and XHR, in the
+   hidden WebView and the sign-in sheet. iOS compiles a `WKContentRuleList`
+   with a block rule per pattern; Android answers such a request in
+   `shouldInterceptRequest` with an empty 403 and refuses such a navigation in
+   `shouldOverrideUrlLoading`, in every frame. It runs outside the page, so
+   page code cannot turn it off. It checks paths only, not bodies.
+   **React Native and Flutter have no native blocking**: their WebView plugins
+   give no hook on the page's own subresource requests. On those two platforms
+   the page's own requests rely on controls 1 and 2 and the in-page guard.
+4. **The in-page guard (every platform).** Best-effort defense in depth.
+   Code already running in the store page can defeat any in-page check, so
+   the guard raises the cost of a mistake or a careless script; it is not a
+   boundary against a hostile page.
+
+What the guard covers, once armed: `fetch`, XHR and beacons in the page and
+in its same-origin frames (frames in open shadow roots included) and
+same-origin popups; form `submit()`, `requestSubmit()` and submit events;
+`blob:` and `data:` workers. It captures the built-ins it decides with when it
+installs (`RegExp.prototype.exec`, `URL` and its getters, `Blob.prototype.text`,
+`String`, `JSON.parse`, `Function.prototype.call` and `apply`,
+`Promise.prototype.then`, `Date.now` and the DOM getters it reads), so page code
+that replaces them later changes nothing. It reads a body's text once and
+sends that same text, so an object cannot show one text and send another.
+
+What it does not cover (native blocking does, on iOS and Android, for paths):
+
+- Requests it never sees: images, scripts, stylesheets, `<link>` prefetches,
+  `<a ping>`, CSS URLs, navigations by `location` or links, and any request
+  made by a frame or window it is not in: a sandboxed frame without
+  `allow-same-origin`, a `data:` frame, a cross-origin frame, a frame in a
+  closed shadow root the page never exposes, a store-served worker or a
+  service worker.
+- Page code that runs before the guard installs. Where the guard arrives
+  only with the per-script copy (no document-start copy), the page may have
+  kept the original `fetch`, defined `__mealioGuard` or `__mealioArm` itself,
+  or replaced built-ins before they were captured.
+- Page code that rewrites what the guard still reads at call time: Array,
+  Object and String prototype methods and index setters (the guard avoids most
+  of them but not all), the object it is given (a `FormData` file entry, a
+  Request already in use), or a `formdata` event listener that adds fields
+  after the guard judged a form.
+- Persisted queries that send only an innocent name and a hash.
 
 ### Two copies, and arming
 
@@ -435,12 +490,15 @@ What each state does:
   until the page navigates (a new document starts unarmed). It arms every
   same-origin frame the window has now (`window.frames`, and frame elements in
   the document), installing the guard into any that lack it, recursively.
+  Frames inside open shadow roots, at any depth, are armed too.
   Calling it again does nothing. `window.__mealioArm`, `window.__mealioArmed`
   and `window.__mealioGuard` are non-writable, non-configurable properties, so
   the page cannot swap or remove them once the guard is in.
 - **Armed**: every check is on. A same-origin frame added later is armed as
   it is added (the DOM hooks below) or as it loads: the document-start copy in
-  a new frame arms itself when its parent's `__mealioArmed()` is true.
+  a new frame arms itself when its parent's `__mealioArmed()` is true, and
+  the copy in a popup arms itself when its opener is same-origin and armed.
+  A window an armed page gets from `window.open` is armed at once.
 
 A cross-origin frame never gets the guard. The very first thing
 `GUARD_SCRIPT` does is check that it is the top window or that `window.top`
@@ -496,13 +554,34 @@ the vectors; `BODY_MAX_DEPTH` and `BODY_MAX_TEXT` in `allowlist.ts`):
    could hide a blocked name in escapes that no text match would see.
 
 A body that cannot be read, such as a stream, is allowed, but its path is
-still checked.
+still checked. Any other body that is not a string, `URLSearchParams`,
+`FormData`, `Blob`, `ArrayBuffer` or view, stream or document (a `String`
+object, an object with `toString`) is converted to text once with `String()`,
+judged, and that text is what is sent. An `ArrayBuffer` body is copied into a
+`Blob` once, read, and the copy is sent.
+
+**Raw multipart text** is scanned by `multipartFields` (`allowlist.ts`), which
+finds exactly the matches of the regex `MULTIPART_FIELD` (flag `g`) in one
+pass, linear in the body. Do not run `MULTIPART_FIELD` as a regex: it walks
+every following line again from every `name=`, so a body of `name=query\n`
+lines under 1 MB takes minutes. Port `multipartFields` step for step (its
+comment lists the steps), use `isJsSpace` for the name lookahead (JavaScript's
+`\s`; Kotlin's and Swift's `\s` are different sets), and test the port
+against the regex on fuzzed text and against `multipartScan` in the vectors
+(each judged in well under a second).
+
+**Form submissions.** `form.submit()` and `form.requestSubmit()` are hooked,
+and a capturing `submit` listener on the window covers buttons and the Enter
+key. The action (or the submitter's `formaction`) is checked as a path, and
+the form's `operationName`, `query` and `operations` fields as a
+form-encoded body. A refused `submit()` or `requestSubmit()` throws; a refused
+submit event is cancelled and stopped before the page's own listeners see it.
 
 `Request`, `Blob`, `ArrayBuffer`,
 `URLSearchParams` and `FormData` bodies are read before the check. A beacon
 cannot wait for a body to be read, so a beacon whose body is not text is
 refused. The cases every SDK must agree on are in `protocol/test-vectors.json`
-(`blockedBodies`, `jsonBodies`, `bodyLimits`), and `node protocol/check-rails.mjs` confirms none of the
+(`blockedBodies`, `jsonBodies`, `bodyLimits`, `multipartScan`), and `node protocol/check-rails.mjs` confirms none of the
 rails' own paths or operations are blocked.
 
 ## Rate caps

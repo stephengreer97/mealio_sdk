@@ -119,10 +119,12 @@ void main() {
         expect(got, want, reason: c);
       }
       expect(jsonEncode(decodeJsonLimited('{"a":[1,{"x":[[]]},3],"b":2}', maxDepth: 2)), '{"a":[1,{},3],"b":2}');
-      // Bad JSON past the limit is still bad.
-      for (final String c in <String>['[[[1,]]]', '[[{"a" 1}]]', '[[{"a":1}]', '[[[}]]']) {
-        expect(() => decodeJsonLimited(c, maxDepth: 1), throwsFormatException, reason: c);
+      // Past the limit only the brackets are matched, as TypeScript parseJson
+      // does (round 6): what is inside is never read. Unclosed is still bad.
+      for (final String c in <String>['[[[1,]]]', '[[{"a" 1}]]', '[[[}]]']) {
+        expect(jsonEncode(decodeJsonLimited(c, maxDepth: 1)), '[[]]', reason: c);
       }
+      expect(() => decodeJsonLimited('[[{"a":1}]', maxDepth: 1), throwsFormatException);
     });
   });
 
@@ -160,7 +162,7 @@ void main() {
       expect(err(<String, Object?>{'locations': <Object?>[<String, Object?>{'id': 'l', 'name': 'L', 'address': 'A', 'zip': null, 'x': 1}]}),
           contains('script.locations[0].x'));
       expect(err(<String, Object?>{'warm': <String, Object?>{'signedIn': 'yes'}}), contains('script.warm.signedIn'));
-      expect(err(<String, Object?>{'items': <Object?>[<String, Object?>{'key': 'a', 'quantity': 1.5}]}), contains('script.items[0].quantity'));
+      expect(err(<String, Object?>{'items': <Object?>[<String, Object?>{'key': 'a', 'quantity': '1'}]}), contains('script.items[0].quantity'));
       expect(() => MealioFakeItem.fromJson(<String, Object?>{'options': <Object?>[]}), throwsFormatException);
       expect(() => MealioFakeError.fromJson(<String, Object?>{'message': 'm'}), throwsFormatException);
     });

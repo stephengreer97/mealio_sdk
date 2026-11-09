@@ -809,6 +809,50 @@
       "blocked": true
     }
   ],
+  "multipartScan": [
+    {
+      "prefix": "",
+      "fill": "name=query\n",
+      "times": 95000,
+      "suffix": "",
+      "blocked": false
+    },
+    {
+      "prefix": "",
+      "fill": "name=\"query\"\r\n",
+      "times": 74000,
+      "suffix": "",
+      "blocked": false
+    },
+    {
+      "prefix": "",
+      "fill": "name=operations\r",
+      "times": 65000,
+      "suffix": "",
+      "blocked": false
+    },
+    {
+      "prefix": "",
+      "fill": "name=query ",
+      "times": 95000,
+      "suffix": "",
+      "blocked": false
+    },
+    {
+      "prefix": "--b\r\nContent-Disposition: form-data; ",
+      "fill": "name=operationName\n",
+      "times": 55000,
+      "suffix": "\nPlaceOrder\r\n--b--",
+      "blocked": true
+    },
+    {
+      "prefix": "--b\r\nContent-Disposition: form-data; ",
+      "fill": "name=operationName\n",
+      "times": 55000,
+      "suffix": "\nSearch\r\n--b--",
+      "blocked": false
+    }
+  ],
   "deepMessages": [
     {
       "prefix": "{\"type\":\"X\",\"a\":",

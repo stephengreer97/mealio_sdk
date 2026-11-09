@@ -226,6 +226,19 @@ const vectors = {
     { rule: 'size', prefix: '--b\r\nContent-Disposition: form-data; name=operations\r\n\r\n{"operationName":"Search"}\r\n--b\r\nContent-Disposition: form-data; name="0"\r\n\r\n', fill: 'x\n', times: 600000, suffix: '\r\n--b--', blocked: true },
     { rule: 'size', prefix: '--b\r\nContent-Disposition: form-data; name=operations\r\n\r\n{"query":"mutation { placeOrder { id } }"}\r\n--b\r\nContent-Disposition: form-data; name="0"\r\n\r\n', fill: 'x\n', times: 600000, suffix: '\r\n--b--', blocked: true },
   ],
+  // 0.6 round 6. The raw multipart scan (multipartFields in allowlist.ts) is
+  // linear in the body. Each body is prefix + fill repeated `times` times +
+  // suffix, under BODY_MAX_TEXT, and must be judged in well under a second.
+  // A regex scan (MULTIPART_FIELD run as a regex) takes minutes on these: it
+  // walks every following line again from every name.
+  multipartScan: [
+    { prefix: '', fill: 'name=query\n', times: 95000, suffix: '', blocked: false },
+    { prefix: '', fill: 'name="query"\r\n', times: 74000, suffix: '', blocked: false },
+    { prefix: '', fill: 'name=operations\r', times: 65000, suffix: '', blocked: false },
+    { prefix: '', fill: 'name=query ', times: 95000, suffix: '', blocked: false },
+    { prefix: '--b\r\nContent-Disposition: form-data; ', fill: 'name=operationName\n', times: 55000, suffix: '\nPlaceOrder\r\n--b--', blocked: true },
+    { prefix: '--b\r\nContent-Disposition: form-data; ', fill: 'name=operationName\n', times: 55000, suffix: '\nSearch\r\n--b--', blocked: false },
+  ],
   // 0.6 round 5. A message a page posts is parsed with a depth limit of 512.
   // The top container is depth 1. Containers down to depth 512 are built; a
   // container at depth 513 is kept, empty, in its place, and its contents are

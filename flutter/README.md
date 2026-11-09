@@ -430,6 +430,27 @@ Every failure is a `MealioException(code, message)`.
   `document.write`, then a MutationObserver and each frame's load), and wraps
   `Worker` and `SharedWorker`. It never enters a cross-origin frame. The
   signature on every envelope stays the primary control.
+- **No native network blocking.** The iOS and Android SDKs also refuse
+  checkout paths natively, for every request the store page makes
+  (a WKContentRuleList on iOS, `shouldInterceptRequest` on Android), where
+  page code cannot turn it off. The Flutter SDK does not: webview_flutter
+  gives no way to see or refuse a page's subresource requests (fetch, XHR,
+  form posts, frames). Its `NavigationDelegate` sees only navigations, so the
+  SDK refuses blocked top-frame navigations there and nothing more. Flutter
+  relies on three things instead:
+  1. the Mealio signature on every instruction, checked before anything runs;
+  2. the SDK's own allowlist and blocked paths, which check every page load
+     and `fetch` op the SDK itself makes, and every sign-in navigation;
+  3. the in-page guard above, armed before each Mealio script.
+
+  The guard is best-effort defense in depth. It sees only what the page sends
+  through the calls it wraps (fetch, XHR, beacons, form submission, workers),
+  and code already running in the store page can get around any in-page
+  check. It captures the built-ins it decides with when it installs, and on
+  Flutter that is at Mealio's first script, so page code that ran before then
+  may already have replaced them. PROTOCOL.md "Guard script" lists what it
+  covers and what it does not. React Native is in the same position on
+  native blocking, for the same reason.
 - **Store sign-in.** A visible WebView that shares the hidden WebView's
   cookie store. While a cart flow sheet is open, `WebViewHost.login` (a
   `ValueNotifier<MealioLoginView?>`) hands it to that sheet, which shows it

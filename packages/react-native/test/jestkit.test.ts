@@ -97,3 +97,36 @@ describe('the Jest kit loaded inside beforeAll', () => {
     }
   });
 });
+
+// 0.6 round 6: real Jest does NOT throw there. Once tests have started it
+// records "Cannot add a hook after tests have started running", which fails
+// the whole file. The mock reads jest-circus's state (an unregistered symbol
+// named JEST_STATE_SYMBOL) and adds no hook once hasStarted is set. Checked
+// against real Jest 29 and 30 by scripts/check-jest-mock.mjs.
+describe('the Jest kit loaded after Jest has started running tests', () => {
+  it('adds no hook when jest-circus says tests have started', () => {
+    const state = expect.getState();
+    expect.setState({ currentTestName: undefined });
+    const sym = Symbol('JEST_STATE_SYMBOL');
+    const path = require.resolve('../jest.js');
+    let hooks = 0;
+    (globalThis as any).afterEach = () => { hooks += 1; }; // records, never throws, as Jest
+    (globalThis as any).expect = expect;
+    try {
+      (globalThis as any)[sym] = { hasStarted: true };
+      delete require.cache[path];
+      const m = require('../jest.js');
+      expect(hooks).toBe(0);
+      expect(m.setupMealioMock()).toBe(false);
+      // Before the run starts (a setup file, a file's top level) it registers.
+      (globalThis as any)[sym] = { hasStarted: false };
+      expect(m.setupMealioMock()).toBe(true);
+      expect(hooks).toBe(1);
+    } finally {
+      delete (globalThis as any)[sym];
+      delete (globalThis as any).afterEach;
+      delete (globalThis as any).expect;
+      expect.setState({ currentTestName: state.currentTestName });
+    }
+  });
+});

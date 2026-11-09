@@ -16,7 +16,10 @@ function loadPlaywright(): any {
 
 async function launch(pw: any): Promise<any> {
   if (!pw) return null;
-  for (const opts of [{ channel: 'chrome' }, {}]) {
+  // No host resolves: a request the routes below miss (a sandboxed frame's
+  // can) fails instead of reaching a real store.
+  const args = ['--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE localhost'];
+  for (const opts of [{ channel: 'chrome', args }, { args }]) {
     try { return await pw.chromium.launch(opts); } catch { /* try the next */ }
   }
   return null;

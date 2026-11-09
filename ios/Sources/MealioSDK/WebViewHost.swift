@@ -13,6 +13,9 @@
 // - show_login: while a MealioCartFlow sheet is open, the sign-in WebView is
 //   published in `login` and the flow draws it inside its own sheet (one sheet
 //   for the whole flow). With no flow open, the host presents its own sheet.
+// - Both WebViews carry a WKContentRuleList that blocks every checkout path
+//   for every request in every frame (NetworkBlock.swift). Nothing loads in
+//   them without it, and jobs are refused if it cannot be compiled.
 
 #if canImport(UIKit) && canImport(WebKit)
 import Combine
@@ -52,6 +55,8 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
     }
 
     private var hidden: WKWebView?
+    /// The hidden page has the checkout-path block list.
+    private var hiddenHasRules = false
     private var hiddenStore = ""
     /// The load one job is waiting for. Events and its timer settle it and no other.
     var pageWait: JobWaiter<PageOpenOutcome>?
@@ -99,11 +104,20 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
     public init(presenter: Presenter? = nil) {
         self.presenter = presenter ?? { WebViewHost.topViewController() }
         super.init()
+        // The checkout-path block list compiles now, off the page loads' path.
+        BlockedPathRules.shared.prepare()
+    }
+
+    /// Jobs run only with the network block in place. MealioHost.
+    public func ready() async throws {
+        _ = try await BlockedPathRules.shared.list()
     }
 
     // MARK: - Configuration shared by both WebViews
 
-    static func makeConfiguration(handler: WKScriptMessageHandler) -> WKWebViewConfiguration {
+    /// `rules`: the checkout-path block list (NetworkBlock). The SDK's own
+    /// pages always pass it; only tests of the in-page guard alone leave it out.
+    static func makeConfiguration(handler: WKScriptMessageHandler, rules: WKContentRuleList? = nil) -> WKWebViewConfiguration {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = WKWebsiteDataStore.default()
         let content = WKUserContentController()
@@ -119,14 +133,25 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
         // script adds and uses in the same tick).
         content.addUserScript(WKUserScript(source: MealioScripts.guardScript, injectionTime: .atDocumentStart, forMainFrameOnly: false))
         content.add(handler, name: Bridge.messageHandlerName)
+        if let rules = rules { content.add(rules) }
         config.userContentController = content
         return config
     }
 
-    private func hiddenWebView() -> WKWebView {
-        if let web = hidden { return web }
+    /// The hidden page. Made without the block list only by `userAgent()`,
+    /// which loads nothing; `openPage` adds the list before any load.
+    private func hiddenWebView(rules: WKContentRuleList? = nil) -> WKWebView {
+        if let web = hidden {
+            if let rules = rules, !hiddenHasRules {
+                web.configuration.userContentController.add(rules)
+                hiddenHasRules = true
+            }
+            return web
+        }
         let handler = ScriptHandler { [weak self] body in self?.hiddenMessage(body) }
-        let web = WKWebView(frame: CGRect(x: 0, y: 0, width: 1, height: 1), configuration: WebViewHost.makeConfiguration(handler: handler))
+        let web = WKWebView(frame: CGRect(x: 0, y: 0, width: 1, height: 1),
+                            configuration: WebViewHost.makeConfiguration(handler: handler, rules: rules))
+        hiddenHasRules = rules != nil
         web.navigationDelegate = self
         web.isUserInteractionEnabled = false
         web.alpha = 0.01
@@ -171,6 +196,7 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
             web.removeFromSuperview()
         }
         hidden = nil
+        hiddenHasRules = false
     }
 
     /// This host is being replaced (MealioCart.configure ran again). Drops the
@@ -187,7 +213,14 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
 
     public func openPage(store: String, url: String, timeoutMs: Int) async throws -> PageOpenOutcome {
         guard let target = URL(string: url) else { return PageOpenOutcome(ok: false, error: "load_failed") }
-        let web = hiddenWebView()
+        // Never a load without the checkout-path block list.
+        let rules: WKContentRuleList
+        do {
+            rules = try await BlockedPathRules.shared.list(waitingAtMost: min(max(timeoutMs, 0), NetworkBlock.waitMs))
+        } catch {
+            return PageOpenOutcome(ok: false, error: "no_network_block")
+        }
+        let web = hiddenWebView(rules: rules)
         hiddenStore = store
         // A load still waiting from before is superseded. Its timer is its own.
         pageWait?.settle(PageOpenOutcome(ok: false, error: "superseded"))
@@ -243,7 +276,12 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
         if request.cancel?.cancelled == true {
             return LoginOutcome(outcome: .cancelled, messages: [])
         }
-        let sheet = LoginSheet(request: request)
+        // Never a sign-in page without the checkout-path block list.
+        let rules = try await BlockedPathRules.shared.list()
+        if request.cancel?.cancelled == true {
+            return LoginOutcome(outcome: .cancelled, messages: [])
+        }
+        let sheet = LoginSheet(request: request, rules: rules)
         if flowHosts > 0 {
             // Inside the open flow sheet: publish it, the flow draws it.
             let publish: @MainActor (LoginSheet?) -> Void = { [weak self, weak sheet] shown in
@@ -523,7 +561,8 @@ final class LoginSheet: NSObject, WKNavigationDelegate, WKUIDelegate, UIAdaptive
     /// How long a modal presentation may take to start before it counts as refused.
     static let presentCheckMs = 1000
 
-    init(request: LoginRequest) {
+    /// `rules`: the checkout-path block list. WebViewHost always passes it.
+    init(request: LoginRequest, rules: WKContentRuleList? = nil) {
         self.request = request
         if let source = request.doneWhenUrl, !source.isEmpty {
             // A JS regex source with no flags. Most sources mean the same in
@@ -533,7 +572,7 @@ final class LoginSheet: NSObject, WKNavigationDelegate, WKUIDelegate, UIAdaptive
             doneUrlRegex = nil
         }
         let proxy = ScriptHandler()
-        webView = WKWebView(frame: .zero, configuration: WebViewHost.makeConfiguration(handler: proxy))
+        webView = WKWebView(frame: .zero, configuration: WebViewHost.makeConfiguration(handler: proxy, rules: rules))
         super.init()
         proxy.onMessage = { [weak self] body in self?.received(body) }
         webView.navigationDelegate = self

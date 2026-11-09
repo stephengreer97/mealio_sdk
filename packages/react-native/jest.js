@@ -8,9 +8,9 @@
 // setMockUser('u1') signs someone in, setMockUser(undefined) stops tracking.
 // Everything resets after each test: mocked answers, the user, and recorded
 // calls. Loaded at a file's top level (the usual jest.mock line), it registers
-// that afterEach itself. Loaded inside a test or a hook (a lazy require,
-// jest.isolateModules, a require in beforeAll), where Jest refuses new hooks,
-// it does not; then add
+// that afterEach itself. Loaded once tests have started (a require inside a
+// test or a hook such as beforeAll, a lazy require, jest.isolateModules),
+// where Jest refuses new hooks, it does not; then add
 //   require('@mealio/react-native-cart/jest').setupMealioMock();
 // to a setup file (Jest's setupFilesAfterEnv) to register it for every test
 // file. It registers once however often it is called.
@@ -138,6 +138,35 @@ function insideTest() {
 }
 
 /**
+ * Jest's test-runner state (jest-circus). Jest keeps it on the global under a
+ * symbol named JEST_STATE_SYMBOL that it does not register, so it is found by
+ * its name; Symbol.for is tried first in case a later Jest registers it.
+ */
+function jestState() {
+  try {
+    const g = typeof globalThis !== 'undefined' ? globalThis : global;
+    const named = g[Symbol.for('JEST_STATE_SYMBOL')];
+    if (named) return named;
+    const syms = Object.getOwnPropertySymbols(g);
+    for (let i = 0; i < syms.length; i += 1) {
+      if (String(syms[i]) === 'Symbol(JEST_STATE_SYMBOL)') return g[syms[i]];
+    }
+  } catch (e) { /* not Jest */ }
+  return null;
+}
+
+/**
+ * True once Jest has started running tests (in beforeAll, a test, any hook).
+ * There Jest refuses a new hook WITHOUT throwing: it records an error that
+ * fails the whole file ("Cannot add a hook after tests have started
+ * running"), so the hook must not be added at all.
+ */
+function testsStarted() {
+  const state = jestState();
+  return !!(state && state.hasStarted);
+}
+
+/**
  * Reset the mock after every test. Call it from a Jest setup file
  * (setupFilesAfterEnv) when the mock may first load inside a test. Returns
  * false where hooks cannot be added (no afterEach, or inside a test).
@@ -145,9 +174,8 @@ function insideTest() {
 let registered = false;
 function setupMealioMock() {
   if (registered) return true;
-  if (typeof afterEach !== 'function' || insideTest()) return false;
-  // Jest also refuses a hook from inside beforeAll (or any hook), where no
-  // test name is set yet; there it throws, and loading the mock must not.
+  if (typeof afterEach !== 'function' || insideTest() || testsStarted()) return false;
+  // Another runner may refuse a hook by throwing; loading the mock must not.
   try {
     afterEach(() => resetMealioMock());
   } catch (e) {

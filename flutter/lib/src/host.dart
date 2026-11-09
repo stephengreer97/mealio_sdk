@@ -2,6 +2,7 @@
 // UI. Mirrors the `Host` interface in packages/core/src/runner.ts. The Runner
 // does all checking (signature, allowlist, rate caps) before it calls a Host.
 
+import 'guard.dart' show guardArmScript;
 import 'protocol.dart';
 import 'runner.dart' show CancelToken;
 
@@ -25,19 +26,19 @@ class ScriptRun {
 
 /// Everything the login sheet needs.
 class LoginRequest {
-  const LoginRequest({
+  LoginRequest({
     required this.store,
     required this.url,
     required this.title,
     required this.guard,
-    this.armGuard = '',
+    String? armGuard,
     required this.check,
     required this.doneWhen,
     required this.doneWhenUrl,
     required this.timeoutMs,
     required this.allowNavigation,
     this.cancel,
-  });
+  }) : armGuard = armGuard ?? guardArmScript;
   final String store;
   final String url;
   final String title;
@@ -45,7 +46,8 @@ class LoginRequest {
   final String guard;
 
   /// The per-script copy that arms the guard: injected right before each
-  /// `check.script`.
+  /// `check.script`. Defaults to [guardArmScript], so a request built without
+  /// it still arms the guard (an empty one would leave it off).
   final String armGuard;
   final LoginCheck? check;
   final List<MessageMatcher> doneWhen;

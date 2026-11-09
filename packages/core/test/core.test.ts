@@ -104,7 +104,7 @@ describe('guard script', () => {
       location: { href: 'https://www.heb.com/' },
       navigator: { sendBeacon: (u: string) => { beacons.push(u); return true; } },
       ReactNativeWebView: { postMessage: (s: string) => posted.push(s) },
-      URL, Date, JSON, Promise, Error, RegExp, String,
+      URL, Date, JSON, Promise, Error, RegExp, String, Blob, // the guard captures Blob when it installs
     };
     win.window = win;
     vm.createContext(win);
@@ -112,7 +112,7 @@ describe('guard script', () => {
     expect(vm.runInContext(`navigator.sendBeacon('/analytics', 'x=1')`, win)).toBe(true);
     expect(vm.runInContext(`navigator.sendBeacon('/checkout/place-order', 'x')`, win)).toBe(false);
     expect(vm.runInContext(`navigator.sendBeacon('/graphql', '{"query":"mutation { confirmOrder { id } }"}')`, win)).toBe(false);
-    expect(vm.runInContext(`navigator.sendBeacon('/graphql', new Blob(['x']))`, Object.assign(win, { Blob }))).toBe(false);
+    expect(vm.runInContext(`navigator.sendBeacon('/graphql', new Blob(['x']))`, win)).toBe(false);
     expect(beacons).toEqual(['/analytics']);
   });
 

@@ -19,7 +19,6 @@ fun parseMessage(raw: String?): JSONObject? {
     if (raw == null) return null
     val v = StrictJson.parse(raw, MESSAGE_DEPTH)
     if (v !is Map<*, *>) return null
-    // org.json refuses a number JSON.parse reads as Infinity (1e400): the message is dropped, as before.
     return try {
         toOrgJson(v) as JSONObject
     } catch (e: JSONException) {
@@ -32,8 +31,13 @@ private fun toOrgJson(v: Any?): Any = when (v) {
     null -> JSONObject.NULL
     is Map<*, *> -> JSONObject().also { o -> for ((k, x) in v) o.put(k as String, toOrgJson(x)) }
     is List<*> -> JSONArray().also { a -> for (x in v) a.put(toOrgJson(x)) }
+    // A number JSON.parse reads as Infinity (1e400) cannot go into org.json. The
+    // message is kept, as TS and Dart keep it, with the value as null: what
+    // JSON.stringify sends the server for it. (Unlike TS, a matcher comparing
+    // that field to null at the top level sees it as equal.)
+    is Double -> if (v.isInfinite()) JSONObject.NULL
     // A whole number reads back as Int or Long, as org.json's tokener gave it.
-    is Double -> if (v == Math.rint(v) && !v.isInfinite() && Math.abs(v) < 9.007199254740992E15 && !(v == 0.0 && 1.0 / v < 0)) {
+    else if (v == Math.rint(v) && !v.isInfinite() && Math.abs(v) < 9.007199254740992E15 && !(v == 0.0 && 1.0 / v < 0)) {
         val l = v.toLong()
         if (l in Int.MIN_VALUE..Int.MAX_VALUE) l.toInt() else l
     } else v

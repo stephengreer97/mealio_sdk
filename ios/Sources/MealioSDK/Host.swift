@@ -119,10 +119,17 @@ public protocol MealioHost: AnyObject {
     /// page). Called before a job when earlier exclusive work outlived its
     /// cap. Optional: the default does nothing.
     func resetPage()
+
+    /// Throws when this host cannot run a job safely. Called before every
+    /// job's first instruction. WebViewHost waits (bounded) for its network
+    /// block of checkout paths and refuses without it. Optional: the default
+    /// is always ready.
+    func ready() async throws
 }
 
 public extension MealioHost {
     func resetPage() {}
+    func ready() async throws {}
 }
 
 /// Resumes a continuation exactly once, from any thread. Used by every wait

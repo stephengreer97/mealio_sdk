@@ -580,6 +580,25 @@ their password into the store's page; neither your app nor Mealio sees it.
   from iframes are ignored.
 - Closing the sign-in raises `login_cancelled` (via the server).
 
+### What protects the user's money
+
+- **Signed instructions.** Every instruction is signed by Mealio, and the SDK
+  checks every page load and fetch it makes against its own allowlist and
+  blocked paths.
+- **Native network blocking.** Both WebViews carry a `WKContentRuleList` that
+  blocks every request the store page makes, in every frame and of every kind
+  (pages, frames, fetch, XHR, form posts), whose path or query names
+  checkout, payment, billing, a wallet, a gift card, placing or confirming an
+  order, or changing the account's password or addresses. A path or query
+  that percent-encodes a letter, `-` or `_` is blocked too, since a server
+  could decode it into one of those. WebKit applies the list outside the
+  page, so page code cannot turn it off. It is compiled once when you call
+  `configure`; pages wait for it (at most 10 seconds), and if it cannot be
+  compiled every job fails with `unsupported` rather than run without it.
+- **The in-page guard** is defense in depth only. It also stops requests whose
+  body names a checkout or order mutation, and caps the page's request rate,
+  but code already running in the store page can defeat any in-page check.
+
 To sign a user out of stores (for example from your app's settings):
 
 ```swift

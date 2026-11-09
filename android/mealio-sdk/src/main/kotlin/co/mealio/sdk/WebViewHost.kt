@@ -11,7 +11,6 @@ import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
-import android.webkit.WebViewClient
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import kotlinx.coroutines.CompletableDeferred
@@ -97,6 +96,9 @@ internal fun configureMealioWebView(wv: WebView, bridge: MealioNativeBridge, all
     s.allowFileAccess = false
     s.allowContentAccess = false
     s.mediaPlaybackRequiresUserGesture = true
+
+    // Service worker requests skip the WebViewClient; refuse blocked ones there too.
+    installServiceWorkerBlock()
 
     val cm = CookieManager.getInstance()
     cm.setAcceptCookie(true)
@@ -208,7 +210,7 @@ class WebViewHost(context: Context) : Host {
      * The server's scripts are written for that; if a store ever needs a window,
      * attach the WebView to a 1x1 invisible view in the current activity.
      */
-    private fun ensureWebView(): WebView {
+    internal fun ensureWebView(): WebView {
         webView?.let { return it }
         val wv = WebView(appContext)
         val setup = configureMealioWebView(wv, MealioNativeBridge { raw -> sink?.trySend(raw) }, allowlist)
@@ -238,7 +240,7 @@ class WebViewHost(context: Context) : Host {
         return a.check(store, url, UrlUse.PAGE).ok || a.check(store, url, UrlUse.LOGIN).ok
     }
 
-    private inner class HiddenClient : WebViewClient() {
+    private inner class HiddenClient : BlockingWebViewClient() {
         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
             // Backstop for navigations shouldOverrideUrlLoading does not see
             // (form POSTs): leave at once and report the load as blocked.
@@ -269,7 +271,13 @@ class WebViewHost(context: Context) : Host {
         // never land on a blocked path. The runner already checked the URL that
         // page_open asked for.
         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-            if (request == null || !request.isForMainFrame) return false
+            if (request == null) return false
+            // A blocked path, in any frame (iframes included), never loads.
+            if (navigationBlocked(request)) {
+                if (request.isForMainFrame) pendingLoad?.complete(PageLoad(ok = false, finalUrl = request.url?.toString(), error = "blocked"))
+                return true
+            }
+            if (!request.isForMainFrame) return false
             val u = request.url?.toString() ?: return true
             if (!hiddenMayGo(u)) {
                 pendingLoad?.complete(PageLoad(ok = false, finalUrl = u, error = "blocked"))

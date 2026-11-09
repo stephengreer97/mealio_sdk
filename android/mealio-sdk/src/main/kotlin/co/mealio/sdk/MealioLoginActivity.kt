@@ -18,7 +18,6 @@ import android.webkit.CookieManager
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -161,9 +160,12 @@ internal class LoginWebController(
         return session.request.allowNavigation(url)
     }
 
-    private inner class LoginClient : WebViewClient() {
+    private inner class LoginClient : BlockingWebViewClient() {
         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-            if (request == null || !request.isForMainFrame) return false
+            if (request == null) return false
+            // A blocked path, in any frame (iframes included), never loads.
+            if (navigationBlocked(request)) return true
+            if (!request.isForMainFrame) return false
             val url = request.url?.toString() ?: return true
             return !admit(url)
         }

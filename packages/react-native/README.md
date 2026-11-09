@@ -33,7 +33,7 @@ jest.mock('@mealio/react-native-cart', () => require('@mealio/react-native-cart/
 
 `mockCart()` gives a cart with every CartSession member. To test a guest, call `setMockUser(null)` from `@mealio/react-native-cart/jest`: `hasUser` is false and the button calls `onSignInRequired`.
 The mock resets itself after every test (`resetMealioMock()`), so `setMockUser` and scripted answers never leak into the next one. Its functions are `jest.fn()`s, typed so `useMealio().prepareCart.mockResolvedValue(mockCart())` type-checks.
-If the mock first loads inside a test (a lazy `require`, `jest.isolateModules`), Jest allows no new hooks there, so add `require('@mealio/react-native-cart/jest').setupMealioMock();` to a `setupFilesAfterEnv` file to keep the reset.
+If the mock first loads after Jest has started running tests (a `require` inside `beforeAll` or a test, a lazy `require`), it loads fine but adds no hook, since Jest allows none there; add `require('@mealio/react-native-cart/jest').setupMealioMock();` to a `setupFilesAfterEnv` file to keep the reset.
 
 To test your own screens built on `useMealio()` against the real client, use the testing kit. No network, no WebView, no `transformIgnorePatterns`, and no `react-native-webview` mock: with `testing` set the provider never loads it:
 
@@ -49,6 +49,8 @@ render(<MealioProvider publishableKey="pk" getSessionToken={async () => 't'} tes
 ```
 
 A prepare that is cancelled fails with `code: 'cancelled'` and a `reason`: `user_changed` (prepare again for the new user), `closed`, or `cancelled`.
+
+Security: every instruction the SDK runs is signed by Mealio, and the SDK checks every page it opens and every request it makes against the store's hosts and blocked checkout paths. Inside the store page an in-page guard also refuses checkout requests; it is best-effort, since code already in the page can get around it. Unlike the iOS and Android SDKs, React Native has no native network blocking: `react-native-webview` gives no hook on the page's own requests. See PROTOCOL.md, "Guard script".
 
 Get keys and read the full guide at https://developers.mealio.co.
 

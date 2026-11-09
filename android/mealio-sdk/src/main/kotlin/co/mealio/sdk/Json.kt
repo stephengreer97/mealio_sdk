@@ -133,9 +133,63 @@ internal object StrictJson {
     private val SKIP_LIST = Skipped(false)
 
     fun parse(text: String, keep: Int = Int.MAX_VALUE): Any? = try {
-        P(text, keep).run()
+        P(if (keep == Int.MAX_VALUE) text else blankDeep(text, keep), keep).run()
     } catch (e: Bad) {
         INVALID
+    }
+
+    /**
+     * packages/core/src/matcher.ts parseJson's first pass, exactly: every
+     * container deeper than `keep` is replaced by an empty one of its own
+     * kind, found by bracket and string matching alone. What is inside it is
+     * never read for its grammar (mismatched brackets, `1,,` and all), so a
+     * message TS accepts is accepted here too. The grammar check that follows
+     * reads the rest.
+     */
+    internal fun blankDeep(text: String, keep: Int): String {
+        var out: StringBuilder? = null
+        var last = 0
+        var depth = 0
+        var inString = false
+        var i = 0
+        val n = text.length
+        while (i < n) {
+            val c = text[i]
+            if (inString) {
+                if (c == '\\') i++ else if (c == '"') inString = false
+                i++
+                continue
+            }
+            if (c == '"') { inString = true; i++; continue }
+            if (c == '[' || c == '{') {
+                depth++
+                if (depth <= keep) { i++; continue }
+                // Too deep: find where this container closes, and keep it empty.
+                var d = 1
+                var str = false
+                var j = i + 1
+                while (j < n && d > 0) {
+                    val k = text[j]
+                    if (str) {
+                        if (k == '\\') j++ else if (k == '"') str = false
+                    } else if (k == '"') str = true
+                    else if (k == '[' || k == '{') d++
+                    else if (k == ']' || k == '}') d--
+                    j++
+                }
+                if (d > 0) break // never closes: not JSON, and the grammar check says so
+                val sb = out ?: StringBuilder(n).also { out = it }
+                sb.append(text, last, i).append(if (c == '[') "[]" else "{}")
+                last = j
+                i = j
+                depth--
+                continue
+            }
+            if (c == ']' || c == '}') depth--
+            i++
+        }
+        val sb = out ?: return text
+        return sb.append(text, last, n).toString()
     }
 
     private class P(val s: String, val keep: Int) {

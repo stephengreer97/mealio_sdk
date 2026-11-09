@@ -156,8 +156,13 @@ public final class Allowlist {
     /// `$` (no m flag) is the very end of the text, which ICU spells `\z`.
     /// The name may be double-quoted, single-quoted or bare; a longer name
     /// (`operationsX`) is a different field.
+    ///
+    /// This is the SPEC, not the implementation: run as a regex it takes time
+    /// quadratic in the body. `multipartFields` finds the same matches in one
+    /// pass; tests check it against this regex.
     public static let multipartField = #"name=["']?(operationName|query|operations)(?=["';\s]|$)[^\r\n]*\r?\n(?:[^\r\n]+\r?\n)*\r?\n([\s\S]*?)(?=\r?\n--|$)"#
-    private static let multipartFieldRegex: NSRegularExpression = {
+    /// MULTIPART_FIELD as a regex, for tests that check `multipartFields`.
+    static let multipartFieldRegex: NSRegularExpression = {
         // ICU spellings: `$` is `\z`, and JS \s adds \v and U+FEFF to ICU's.
         let icu = multipartField
             .replacingOccurrences(of: "|$)", with: "|\\z)")
@@ -390,9 +395,7 @@ public final class Allowlist {
                     names.append(v)
                 }
             }
-            for m in multipartFieldRegex.matches(in: body, options: [], range: NSRange(location: 0, length: ns.length)) {
-                let v = ns.substring(with: m.range(at: 2))
-                let field = ns.substring(with: m.range(at: 1))
+            for (field, v) in multipartFields(body) {
                 if field == "query" {
                     docs.append(v)
                 } else if field == "operations" {
@@ -406,6 +409,126 @@ public final class Allowlist {
         return names.contains { n in
             blockedOperationRegex.firstMatch(in: n, options: [], range: NSRange(location: 0, length: (n as NSString).length)) != nil
         }
+    }
+
+    /// JavaScript's `\s`, which MULTIPART_FIELD's lookahead uses (isJsSpace
+    /// in allowlist.ts). Swift's and ICU's differ.
+    static func isJsSpace(_ c: UInt16) -> Bool {
+        c == 0x20 || (c >= 0x09 && c <= 0x0d) || c == 0xa0 || c == 0x1680 || (c >= 0x2000 && c <= 0x200a)
+            || c == 0x2028 || c == 0x2029 || c == 0x202f || c == 0x205f || c == 0x3000 || c == 0xfeff
+    }
+
+    private static let partNameStrings = ["operationName", "query", "operations"]
+    private static let partNames: [[UInt16]] = partNameStrings.map { Array($0.utf16) }
+    private static let nameEq: [UInt16] = Array("name=".utf16)
+
+    /// Every match of MULTIPART_FIELD in a body, as (name, value) pairs, in
+    /// one linear pass. A line-for-line port of multipartFields in
+    /// allowlist.ts (UTF-16 offsets, as JS strings): see there for the steps
+    /// and the two caches that keep it linear.
+    static func multipartFields(_ text: String) -> [(String, String)] {
+        let ns = text as NSString
+        let body = Array(text.utf16)
+        let n = body.count
+        var out: [(String, String)] = []
+        func at(_ i: Int) -> UInt16 { i < n ? body[i] : 0 }
+        func startsWith(_ x: [UInt16], _ k: Int) -> Bool {
+            guard k + x.count <= n else { return false }
+            for i in 0..<x.count where body[k + i] != x[i] { return false }
+            return true
+        }
+        func indexOf(_ x: [UInt16], _ from: Int) -> Int {
+            var i = max(from, 0)
+            while i + x.count <= n {
+                if startsWith(x, i) { return i }
+                i += 1
+            }
+            return -1
+        }
+        let lf: UInt16 = 0x0a, cr: UInt16 = 0x0d
+        let valueEnd: [UInt16] = [lf, 0x2d, 0x2d] // "\n--"
+        // nextBreak(p) for p in [brkFrom, brkAt] is brkAt.
+        var brkFrom = -1, brkAt = -1
+        // valueStart(p) for p in [runFrom, runTo] is runValue (-1: no match).
+        var runFrom = -1, runTo = -1, runValue = -1
+        var from = 0
+        while true {
+            let c = indexOf(nameEq, from)
+            if c < 0 { break }
+            from = c + 1
+            var k = c + 5
+            if k < n && (body[k] == 0x22 || body[k] == 0x27) { k += 1 }
+            var nameIndex = -1
+            for (i, x) in partNames.enumerated() where startsWith(x, k) {
+                nameIndex = i
+                break
+            }
+            if nameIndex < 0 { continue }
+            let j = k + partNames[nameIndex].count
+            if j < n {
+                let ch = body[j]
+                if ch != 0x22 && ch != 0x27 && ch != 0x3b && !isJsSpace(ch) { continue }
+            }
+            // 2. The header line.
+            var q: Int
+            if j >= brkFrom && j <= brkAt {
+                q = brkAt
+            } else {
+                q = j
+                while q < n && body[q] != cr && body[q] != lf { q += 1 }
+                brkFrom = j
+                brkAt = q
+            }
+            var p: Int
+            if q < n && body[q] == lf {
+                p = q + 1
+            } else if q + 1 < n && body[q] == cr && body[q + 1] == lf {
+                p = q + 2
+            } else {
+                continue
+            }
+            // 3. Header lines, then the blank line.
+            var v: Int
+            if p >= runFrom && p <= runTo {
+                v = runValue
+            } else {
+                var s = p
+                v = -1
+                while true {
+                    if s >= n { break }
+                    let h = body[s]
+                    if h == lf { v = s + 1; break }
+                    if h == cr {
+                        if s + 1 < n && body[s + 1] == lf { v = s + 2 }
+                        break
+                    }
+                    var e = s
+                    while e < n && body[e] != cr && body[e] != lf { e += 1 }
+                    if e < n && body[e] == lf {
+                        s = e + 1
+                    } else if e + 1 < n && body[e] == cr && body[e + 1] == lf {
+                        s = e + 2
+                    } else {
+                        break
+                    }
+                }
+                runFrom = p
+                runTo = s
+                runValue = v
+            }
+            if v < 0 { continue }
+            // 4. The value.
+            var end = indexOf(valueEnd, v)
+            if end < 0 {
+                end = n
+            } else if end > v && at(end - 1) == cr {
+                end -= 1
+            }
+            // Through NSString: a lone surrogate stays as it is, as in a JS slice.
+            out.append((partNameStrings[nameIndex], ns.substring(with: NSRange(location: v, length: end - v))))
+            from = end
+        }
+        return out
     }
 
     /// Last two labels, with a short list of two-label public suffixes.

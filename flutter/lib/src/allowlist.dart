@@ -276,6 +276,105 @@ final RegExp _opsRe = RegExp(blockedGraphqlOperation, caseSensitive: false);
 const String multipartField =
     r'''name=["']?(operationName|query|operations)(?=["';\s]|$)[^\r\n]*\r?\n(?:[^\r\n]+\r?\n)*\r?\n([\s\S]*?)(?=\r?\n--|$)''';
 
+/// Every match of [multipartField] (all of them, as `allMatches` finds) in
+/// [s], as (name, value) pairs, in one linear pass. multipartFields in
+/// allowlist.ts, step for step. Run as a regex, [multipartField] is quadratic
+/// (a body of `name=query\n` lines rescans every line from every name), so it
+/// is the spec and this the implementation; round6_test checks them against
+/// each other. Two caches keep it linear: the first line break after a name,
+/// shared by every later name before it, and the end of a run of header
+/// lines, which a later header ending inside the run reaches too.
+List<(String, String)> multipartFields(String s) {
+  final n = s.length;
+  final out = <(String, String)>[];
+  var nextBreak = -1; // first \r or \n at or after nextBreakFrom
+  var nextBreakFrom = n + 1;
+  var runFrom = n + 1, runEnd = -1; // a run of header lines from runFrom ends at runEnd
+  bool isBreak(int c) => c == 0x0a || c == 0x0d;
+  // `\r?\n` at i: the index after it, or -1.
+  int lineBreak(int i) {
+    if (i < n && s.codeUnitAt(i) == 0x0a) return i + 1;
+    if (i + 1 < n && s.codeUnitAt(i) == 0x0d && s.codeUnitAt(i + 1) == 0x0a) return i + 2;
+    return -1;
+  }
+
+  var from = 0;
+  while (from < n) {
+    final p = s.indexOf('name=', from);
+    if (p < 0) break;
+    from = p + 1;
+    // ["']? then one of the names (at most one can match: they differ before
+    // either ends), then (?=["';\s]|$).
+    var i = p + 5;
+    if (i < n && (s.codeUnitAt(i) == 0x22 || s.codeUnitAt(i) == 0x27)) i++;
+    String? name;
+    for (final String w in const <String>['operationName', 'query', 'operations']) {
+      if (s.startsWith(w, i)) {
+        name = w;
+        break;
+      }
+    }
+    if (name == null) continue;
+    i += name.length;
+    if (i < n && !_partNameEnd(s.codeUnitAt(i))) continue;
+    // [^\r\n]*\r?\n: to the first break, which must be \n or \r\n.
+    if (nextBreakFrom > i || nextBreak < i) {
+      var j = i;
+      while (j < n && !isBreak(s.codeUnitAt(j))) {
+        j++;
+      }
+      nextBreak = j;
+    }
+    nextBreakFrom = i;
+    final e1 = lineBreak(nextBreak);
+    if (e1 < 0) continue;
+    // (?:[^\r\n]+\r?\n)*: every non-empty line that ends in \n or \r\n, as
+    // many as there are (giving one back never helps: the blank line cannot
+    // start with a character a line has). The run from any line start inside
+    // one already scanned ends where that one did.
+    int f;
+    if (e1 >= runFrom && e1 <= runEnd) {
+      f = runEnd;
+    } else {
+      f = e1;
+      while (true) {
+        var j = f;
+        while (j < n && !isBreak(s.codeUnitAt(j))) {
+          j++;
+        }
+        if (j == f) break;
+        final k = lineBreak(j);
+        if (k < 0) break;
+        f = k;
+      }
+      runFrom = e1;
+      runEnd = f;
+    }
+    // \r?\n, the blank line.
+    final vs = lineBreak(f);
+    if (vs < 0) continue;
+    // ([\s\S]*?)(?=\r?\n--|$): up to the first \n-- or \r\n--, or the end.
+    var ve = n;
+    for (var j = vs; j < n; j++) {
+      final c = s.codeUnitAt(j);
+      if ((c == 0x0a && s.startsWith('\n--', j)) || (c == 0x0d && s.startsWith('\r\n--', j))) {
+        ve = j;
+        break;
+      }
+    }
+    out.add((name, s.substring(vs, ve)));
+    from = ve; // the next match starts where this one ended
+    if (from == p) from = p + 1;
+  }
+  return out;
+}
+
+// ["';\s] in a JavaScript regex: quote, apostrophe, semicolon, or whitespace.
+bool _partNameEnd(int c) =>
+    c == 0x22 || c == 0x27 || c == 0x3b || c == 0x20 || (c >= 0x09 && c <= 0x0d) || c == 0xa0 || c == 0x1680 ||
+    (c >= 0x2000 && c <= 0x200a) || c == 0x2028 || c == 0x2029 || c == 0x202f || c == 0x205f || c == 0x3000 ||
+    c == 0xfeff;
+
 final RegExp _rawOperationRe = RegExp(r'"operationName"\s*:\s*"([^"]*)"');
 final RegExp _ignoredRe = RegExp(r'"""(?:\\"""|[\s\S])*?"""|"(?:[^"\\]|\\.)*"|#[^\n\r]*');
 final RegExp _tokenRe = RegExp(r'[A-Za-z_][A-Za-z0-9_]*|\.\.\.|[{}():@]');
@@ -466,11 +565,10 @@ bool _judged(String? body, int depth) {
         names.add(v);
       }
     }
-    for (final Match m in RegExp(multipartField).allMatches(body)) {
-      final v = m.group(2)!;
-      if (m.group(1) == 'query') {
+    for (final (String name, String v) in multipartFields(body)) {
+      if (name == 'query') {
         docs.add(v);
-      } else if (m.group(1) == 'operations') {
+      } else if (name == 'operations') {
         if (_judged(v, depth + 1)) return true;
       } else {
         names.add(v);

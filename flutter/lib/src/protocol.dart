@@ -37,8 +37,9 @@ const int maxRecipes = 10;
 
 String _str(Object? v, [String fallback = '']) => v is String ? v : fallback;
 String? _strOrNull(Object? v) => v is String ? v : null;
-int _int(Object? v, int fallback) => v is num ? v.toInt() : fallback;
-int? _intOrNull(Object? v) => v is num ? v.toInt() : null;
+// 1e400 decodes to Infinity, which has no int (toInt throws): no number.
+int _int(Object? v, int fallback) => v is num && v.isFinite ? v.toInt() : fallback;
+int? _intOrNull(Object? v) => v is num && v.isFinite ? v.toInt() : null;
 double? _doubleOrNull(Object? v) => v is num ? v.toDouble() : null;
 bool _bool(Object? v, [bool fallback = false]) => v is bool ? v : fallback;
 

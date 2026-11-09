@@ -122,8 +122,11 @@ final class VectorTests: XCTestCase {
         XCTAssertEqual(MealioScripts.guardArmScript, MealioScripts.guardScript + "\n" + MealioScripts.guardArm)
     }
 
-    func testTheGuardJudgesRawMultipartWithTheSamePatternAsBodyBlocked() {
-        XCTAssertTrue(MealioScripts.guardScript.contains("  var PART = " + MealioScripts.jsStringLiteral(Allowlist.multipartField) + ";\n"))
+    /// Round 6: the guard scans raw multipart with the linear multipartFields
+    /// (as Allowlist does), not the MULTIPART_FIELD regex.
+    func testTheGuardJudgesRawMultipartWithTheLinearScan() {
+        XCTAssertTrue(MealioScripts.guardScript.contains("function multipartFields(body)"))
+        XCTAssertFalse(MealioScripts.guardScript.contains("var PART = "))
     }
 
     func testABodyWithOnlyAByteOrderMarkIsNotBlocked() {

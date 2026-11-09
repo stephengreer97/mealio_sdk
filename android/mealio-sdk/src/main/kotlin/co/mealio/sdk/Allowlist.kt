@@ -360,48 +360,76 @@ private val GRAPHQL_KINDS = setOf("mutation", "query", "subscription", "fragment
  * stack. The pattern never needs to backtrack into a line it has read, so a
  * scan finds the same matches. The name may be double-quoted, single-quoted or
  * bare; `operationsX` is another field.
+ *
+ * Linear in the body length (0.6 round 6): a port, line for line, of
+ * multipartFields in packages/core/src/allowlist.ts. Two caches keep it
+ * linear. The header line's first break is cached as a range: every later
+ * name before that break shares it. The header-lines outcome is cached for
+ * the run of lines it walked: a later header that ends inside that run
+ * reaches the same blank line (or the same failure).
  */
 internal fun multipartFields(b: String): List<Pair<String, String>> {
     val out = ArrayList<Pair<String, String>>()
     val n = b.length
+    // nextBreak(p) for p in [brkFrom, brkAt] is brkAt.
+    var brkFrom = -1
+    var brkAt = -1
+    // valueStart(p) for p in [runFrom, runTo] is runValue (-1: no match).
+    var runFrom = -1
+    var runTo = -1
+    var runValue = -1
     var from = 0
     fun eol(c: Char) = c == '\r' || c == '\n'
-    /** `\r?\n` at i: the index after it, or -1. */
-    fun newline(i: Int): Int = when {
-        i < n && b[i] == '\n' -> i + 1
-        i + 1 < n && b[i] == '\r' && b[i + 1] == '\n' -> i + 2
-        else -> -1
-    }
     while (true) {
-        val p = b.indexOf("name=", from)
-        if (p < 0) break
-        from = p + 1
-        var i = p + 5
-        if (i < n && (b[i] == '"' || b[i] == '\'')) i++
-        val name = MULTIPART_NAMES.firstOrNull { b.startsWith(it, i) } ?: continue
-        i += name.length
-        if (i < n && b[i] != '"' && b[i] != '\'' && b[i] != ';' && !isJsSpace(b[i])) continue
-        while (i < n && !eol(b[i])) i++
-        i = newline(i)
-        if (i < 0) continue
+        val c = b.indexOf("name=", from)
+        if (c < 0) break
+        from = c + 1
+        var k = c + 5
+        if (k < n && (b[k] == '"' || b[k] == '\'')) k++
+        val name = MULTIPART_NAMES.firstOrNull { b.startsWith(it, k) } ?: continue
+        val j = k + name.length
+        if (j < n && b[j] != '"' && b[j] != '\'' && b[j] != ';' && !isJsSpace(b[j])) continue
+        // The header line.
+        val q: Int
+        if (j in brkFrom..brkAt) q = brkAt
+        else {
+            var e = j
+            while (e < n && !eol(b[e])) e++
+            q = e
+            brkFrom = j; brkAt = q
+        }
+        val p = when {
+            q < n && b[q] == '\n' -> q + 1
+            q + 1 < n && b[q] == '\r' && b[q + 1] == '\n' -> q + 2
+            else -> continue
+        }
         // Header lines, then the blank line.
-        while (i < n && !eol(b[i])) {
-            var k = i
-            while (k < n && !eol(b[k])) k++
-            val next = newline(k)
-            if (next < 0) break
-            i = next
+        val v: Int
+        if (p in runFrom..runTo) v = runValue
+        else {
+            var s = p
+            var found = -1
+            while (s < n) {
+                val h = b[s]
+                if (h == '\n') { found = s + 1; break }
+                if (h == '\r') { if (s + 1 < n && b[s + 1] == '\n') found = s + 2; break }
+                var e = s
+                while (e < n && !eol(b[e])) e++
+                s = when {
+                    e < n && b[e] == '\n' -> e + 1
+                    e + 1 < n && b[e] == '\r' && b[e + 1] == '\n' -> e + 2
+                    else -> break
+                }
+            }
+            v = found
+            runFrom = p; runTo = s; runValue = v
         }
-        i = newline(i)
-        if (i < 0) continue
+        if (v < 0) continue
         // The value: up to the first \r?\n-- after it, or the end.
-        val dash = b.indexOf("\n--", i)
-        val end = when {
-            dash < 0 -> n
-            dash - 1 >= i && b[dash - 1] == '\r' -> dash - 1
-            else -> dash
-        }
-        out.add(name to b.substring(i, end))
+        var end = b.indexOf("\n--", v)
+        if (end < 0) end = n
+        else if (end > v && b[end - 1] == '\r') end--
+        out.add(name to b.substring(v, end))
         from = end
     }
     return out

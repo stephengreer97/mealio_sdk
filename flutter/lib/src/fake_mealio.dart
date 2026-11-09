@@ -190,7 +190,9 @@ void _checkItem(Object? json, String path) {
   }, const <String>{'key'})
     ..string('key')
     ..string('ingredient')
-    ..number('quantity', integer: true)
+    // A number in TypeScript, so 1.5 is accepted; the cart reads it as the
+    // client reads any quantity from the server (whole packages).
+    ..number('quantity')
     ..list('options', _checkProduct)
     ..string('remembered', nullable: true)
     ..string('rememberedPreferenceId', nullable: true)
@@ -201,7 +203,7 @@ void _checkItem(Object? json, String path) {
       _Fields(r, p, const <String>{'id', 'title', 'quantity'}, const <String>{'id', 'title', 'quantity'})
         ..string('id')
         ..string('title', nullable: true)
-        ..number('quantity', integer: true);
+        ..number('quantity');
     })
     ..string('unavailable');
 }
@@ -251,6 +253,10 @@ void _checkError(Object? v, String path) {
     ..number('status', integer: true);
 }
 
+// A quantity as the client reads one from the server: whole packages. 1e400 is
+// Infinity, which JSON.stringify sends as null, so it is no quantity.
+int? _wholeOrNull(Object? v) => v is num && v.isFinite ? v.toInt() : null;
+
 List<Product> _products(Object? json, String what) => _listOf(json, what).map(Product.fromJson).toList();
 
 /// One line of a cart script.
@@ -276,7 +282,7 @@ class MealioFakeItem {
     return MealioFakeItem(
       key: m['key']! as String,
       ingredient: m['ingredient'] as String?,
-      quantity: (m['quantity'] as num?)?.toInt(),
+      quantity: _wholeOrNull(m['quantity']),
       options: m['options'] == null ? const <Product>[] : _products(m['options'], 'options'),
       remembered: m['remembered'] as String?,
       rememberedPreferenceId: m['rememberedPreferenceId'] as String?,

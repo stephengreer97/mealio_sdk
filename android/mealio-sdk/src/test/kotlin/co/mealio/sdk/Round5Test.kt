@@ -61,7 +61,8 @@ class Round5Test {
         assertNull(parseMessage("{\"type\":'A'}"))
         assertNull(parseMessage("{type:\"A\"}"))
         assertNull(parseMessage("{\"type\":\"A\"} x"))
-        assertNull(parseMessage("{\"type\":\"A\",\"n\":1e400}"))
+        // 0.6 round 6: kept, as TS and Dart keep it (Infinity, sent as null).
+        assertTrue(parseMessage("{\"type\":\"A\",\"n\":1e400}")!!.isNull("n"))
         val m = parseMessage("{\"type\":\"A\",\"n\":3,\"f\":1.5,\"big\":12345678901,\"z\":null,\"b\":true}")!!
         assertEquals(listOf<Any>(3, 1.5, 12345678901L, true), listOf(m.get("n"), m.get("f"), m.get("big"), m.get("b")))
         assertTrue(m.isNull("z"))

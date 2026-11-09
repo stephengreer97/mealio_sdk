@@ -170,6 +170,11 @@ public final class Runner {
         host.resetPage()
     }
 
+    /// The host can run a job (MealioHost.ready); throws when it cannot.
+    func hostReady() async throws {
+        try await host.ready()
+    }
+
     public init(host: MealioHost, allowlist: Allowlist = Allowlist(), keys: [String: String] = MealioKeys.all) {
         self.host = host
         self.allowlist = allowlist
