@@ -367,12 +367,15 @@ enum class ItemStatus(val wire: String) {
 data class ItemRecipe(
     val id: String,
     val title: String? = null,
-    /** This recipe's share of the item's quantity. */
-    val quantity: Int = 1,
+    /** This recipe's share of the item's quantity. A share can be part of a package (0.5), as in TypeScript's `number`. */
+    val quantity: Double = 1.0,
 ) {
+    /** A whole share. */
+    constructor(id: String, title: String?, quantity: Int) : this(id, title, quantity.toDouble())
+
     companion object {
         fun fromJson(o: JSONObject): ItemRecipe =
-            ItemRecipe(o.str("id") ?: "", o.str("title"), o.num("quantity")?.toInt() ?: 1)
+            ItemRecipe(o.str("id") ?: "", o.str("title"), o.num("quantity")?.takeIf { it.isFinite() } ?: 1.0)
     }
 }
 

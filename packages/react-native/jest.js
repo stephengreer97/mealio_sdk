@@ -7,13 +7,15 @@
 // calls onSignInRequired (its own, else the provider's), or is disabled.
 // setMockUser('u1') signs someone in, setMockUser(undefined) stops tracking.
 // Everything resets after each test: mocked answers, the user, and recorded
-// calls. Loaded at a file's top level (the usual jest.mock line), it registers
-// that afterEach itself. Loaded once tests have started (a require inside a
-// test or a hook such as beforeAll, a lazy require, jest.isolateModules),
-// where Jest refuses new hooks, it does not; then add
+// calls. On Jest, loaded while a file is being collected (the usual jest.mock
+// line at the top, or a require in a describe body), it registers that
+// afterEach itself, on the file's root block, so it runs after every test in
+// the file. Loaded once tests have started (a require inside a test or a hook
+// such as beforeAll, a lazy require, jest.isolateModules), where Jest refuses
+// new hooks, it does not. The reliable path everywhere is a setup file
+// (Jest's setupFilesAfterEnv) with
 //   require('@mealio/react-native-cart/jest').setupMealioMock();
-// to a setup file (Jest's setupFilesAfterEnv) to register it for every test
-// file. It registers once however often it is called.
+// It registers once however often it is called.
 // To run your screens on the real client and a fake server instead, see
 // require('@mealio/react-native-cart/testing').
 // Plain JS on purpose: partners' Jest loads it untransformed.
@@ -170,16 +172,30 @@ function testsStarted() {
  * Reset the mock after every test. Call it from a Jest setup file
  * (setupFilesAfterEnv) when the mock may first load inside a test. Returns
  * false where hooks cannot be added (no afterEach, or inside a test).
+ *
+ * A hook added while a describe block is being collected belongs to that
+ * block alone, so a mock first required inside one describe would reset
+ * only that block's tests. On Jest the hook is added to the file's root
+ * block instead, so it runs after every test in the file. Where that cannot
+ * be done (another runner inside a describe), no hook is added and the
+ * return is false: a setup file is the reliable path.
  */
 let registered = false;
 function setupMealioMock() {
   if (registered) return true;
   if (typeof afterEach !== 'function' || insideTest() || testsStarted()) return false;
+  const state = jestState();
+  const cur = state && state.currentDescribeBlock;
+  const root = state && state.rootDescribeBlock;
+  const nested = !!(cur && root && cur !== root);
   // Another runner may refuse a hook by throwing; loading the mock must not.
   try {
+    if (nested) state.currentDescribeBlock = root;
     afterEach(() => resetMealioMock());
   } catch (e) {
     return false;
+  } finally {
+    if (nested) state.currentDescribeBlock = cur;
   }
   registered = true;
   return true;

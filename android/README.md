@@ -499,7 +499,7 @@ typealias StepListener = (Step, Instruction) -> Unit
 fun stepOf(ins: Instruction): Step
 data class StoreInfo(val id: String, val name: String, val via: String)
 data class CartRecipe(val id: String, val title: String?)
-data class ItemRecipe(val id: String, val title: String?, val quantity: Int)
+data class ItemRecipe(val id: String, val title: String?, val quantity: Double)   // a share can be 0.5; ItemRecipe(id, title, 2) also works
 const val MAX_RECIPES = 10
 fun forRecipes(cart: CartSession, key: String): String?   // "For Tacos and Pasta"; null unless 2+ recipes
 fun forRecipes(cart: CartSession, key: String, text: TextTools): String?   // the same, in the partner's words
@@ -600,7 +600,7 @@ FakeMealio.uninstall()                          // in @After
 |---|---|
 | `FakeMealio.fromJson(json)`, `FakeScript.fromJson(json)` | a script as JSON with the TypeScript field names, the same text `createFakeMealio` and Swift's `FakeMealio(json:)` take (`signIn: "cancelled"`, `errors: {"search": "network"}`, `add: {"fail": ...}`, `warm: {"signedIn": false}` or `null`). `protocol/fake-script.json` is one every kit runs |
 | `FakeScript` | `store`, `storeName`, `items`, `recipes`, `warnings`, `search` (query to products) or `searchWith`, `add` or `addFail`, `signIn` (a `LoginOutcome`, null = already signed in), `errors` (by `FakeKind`: `PREPARE`, `SEARCH`, `ADD`, `WARM`, `STORES`, `PREFERENCES`, `LOCATIONS`, `SESSION`), `stores`, `preferences`, `locations`, `warmSignedIn` |
-| `FakeItem` | `key`, `options`, `remembered`, `ingredient`, `quantity`, `rememberedPreferenceId`, `rememberedUnavailable`, `startUnchecked`, `weightLb`, `recipes`, `unavailable` |
+| `FakeItem` | `key`, `options`, `remembered`, `ingredient`, `quantity` (any `Number`, kept as given, as TypeScript's `number`: `1.5`, `3000000000L`; a script's `1e400` is Infinity and is sent as null), `rememberedPreferenceId`, `rememberedUnavailable`, `startUnchecked`, `weightLb`, `recipes`, `unavailable` |
 | `FakeError(code, message?, status?)` | with `status`: an HTTP error; without: a job that fails with `code` |
 | `fake.requests` / `fake.hostCalls` | what the client sent (`FakeRequest(kind, path, body, token)`) and what the store page was asked |
 | `fake.hold(kind)` | holds the next request of that kind until the returned function is called (test cancels and user switches) |
@@ -631,9 +631,26 @@ not have.
 - **Native network blocking.** While Mealio drives a store page (from right
   before its first script until the page loads a new main document or the
   store changes), the SDK's WebViews refuse requests to checkout, payment and
-  the other blocked paths on that store's own hosts with an empty 403. The
-  store's own boot requests before that, and every third-party host (payment
-  and captcha iframes included), are never blocked.
+  the other blocked paths on that store's own hosts and its store-owned
+  sign-in hosts (albertsons.com and albertsons.okta.com for the Albertsons
+  banners, kroger.com and login.kroger.com for the Kroger family) with an
+  empty 403. Shared identity providers (`SHARED_IDENTITY_HOSTS`, from
+  `protocol/shared-identity-hosts.json`: Google, Apple, Facebook, Microsoft,
+  Okta's own pages and other tenants, Auth0, mealio.co) are never blocked. The
+  store's own boot requests before the first script, and every third-party
+  host (payment and captcha iframes included), are never blocked.
+- **Known limit: redirects of fetch, XHR and subresources.** Android WebView
+  shows `shouldInterceptRequest` only the URL a request starts with, not the
+  redirects that follow. So a fetch to an ordinary path that the store
+  redirects to a checkout path is not refused natively (the in-page guard
+  still judges what the page asked for). Redirects of a navigation, in any
+  frame, reach `shouldOverrideUrlLoading` and are refused.
+- **Known limit: the gap between pages.** Blocking turns off when a new main
+  document is requested, not when it starts drawing, so the new page's own
+  requests are never refused. Until that page commits, the old page runs
+  without native blocking (its in-page guard is still on). A main-frame
+  request that never becomes a page (a 204, a download) leaves native
+  blocking off until Mealio's next script.
 - **Service worker requests are outside native blocking.** They do not pass
   through a `WebViewClient`, and the SDK never sets the process-wide
   `ServiceWorkerClient`, so any client your app sets stays yours. The in-page

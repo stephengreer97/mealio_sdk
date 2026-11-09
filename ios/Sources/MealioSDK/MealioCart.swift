@@ -123,9 +123,12 @@ public enum MealioCart {
             guard let allowlist = client?.allowlist else { return false }
             return allowlist.check(store, url, .page).ok || allowlist.check(store, url, .login).ok
         }
-        // The network block's hosts: the store's own, with any signed widening.
+        // The network block's hosts: the store's own and its store-owned
+        // sign-in hosts, with any signed widening, never a shared identity
+        // provider.
         host.storeHosts = { [weak client] store in
-            client?.allowlist.hostsFor(store)?.hosts ?? WebViewHost.bundledHosts(store)
+            if let s = client?.allowlist.hostsFor(store) { return SharedIdentity.nativeBlockHosts(s) }
+            return WebViewHost.bundledHosts(store)
         }
         MealioCart.host = host
         MealioCart.client = client

@@ -1,10 +1,10 @@
-// Native network blocking of checkout paths (0.6, round 7: store hosts only,
-// while Mealio drives the page).
+// Native network blocking of checkout paths (0.6, round 7: the store's hosts
+// and store-owned sign-in hosts, while Mealio drives the page).
 //
 // A WKContentRuleList blocks every request, in every frame and of every
 // resource type (documents, subframes, fetch, XHR, form posts, beacons,
-// workers' loads), whose HOST is one of the current store's own hosts (or a
-// subdomain of one) and whose path + query matches a BLOCKED_PATTERNS entry.
+// workers' loads), whose HOST is one of the current store's blocking hosts
+// (or a subdomain of one) and whose path + query matches a BLOCKED_PATTERNS entry.
 // Page code cannot turn it off: WebKit applies it outside the page.
 //
 // Round 6 blocked those paths on every host from the first page load. That
@@ -12,8 +12,10 @@
 // third-party frames (a Stripe or captcha iframe whose path says "payment")
 // before Mealio did anything, as the in-page guard did before round 5. So:
 //
-// - Only the store's own hosts, from the SDK allowlist with any signed
-//   widening (`StoreHosts.hosts`, never its sign-in hosts). WebKit's
+// - Only the store's blocking hosts, from the SDK allowlist with any signed
+//   widening: its hosts and its store-owned sign-in hosts (albertsons.okta.com,
+//   kroger.com), never a shared identity provider such as accounts.google.com
+//   or login.okta.com (SharedIdentity.nativeBlockHosts). WebKit's
 //   `if-domain` reads the page's (top document's) domain, not the request's,
 //   so each filter anchors the request's own host instead:
 //   `^scheme://[userinfo@][sub.]store.com[:port]` then the path. A request to
@@ -21,8 +23,10 @@
 // - Only while Mealio drives the page. WebViewHost adds the list to the
 //   hidden page's user content controller right before the first server
 //   script for a page (when the in-page guard arms) and removes it when the
-//   page commits a new document; the sign-in sheet adds it before each check
-//   script. A store page's boot requests before that are never blocked.
+//   top frame's response for a new document arrives, before WebKit commits
+//   it (so before that document's first subresource, and never after a
+//   script armed the new page); the sign-in sheet does the same around each
+//   check script. A store page's boot requests before that are never blocked.
 //
 // WebKit's url-filter is a small regex language with no `|`, matched against
 // the whole URL. So each pattern is expanded into one filter per

@@ -14,10 +14,12 @@
 //   published in `login` and the flow draws it inside its own sheet (one sheet
 //   for the whole flow). With no flow open, the host presents its own sheet.
 // - While Mealio drives a page, it carries a WKContentRuleList that blocks
-//   every checkout path on the store's own hosts, for every request in every
+//   every checkout path on the store's own hosts and store-owned sign-in
+//   hosts (never a shared identity provider), for every request in every
 //   frame (NetworkBlock.swift): added right before the first server script
 //   for a document (the hidden page) or before each check script (sign-in),
-//   dropped when the page commits a new document. Other hosts are never
+//   dropped when the top frame's response for a new document arrives
+//   (decidePolicyFor navigationResponse, before WebKit commits it). Other hosts are never
 //   blocked by it, nor is a store page's boot before Mealio drives it. No
 //   page loads or runs a script without its store's list compiled, and jobs
 //   are refused if WebKit cannot compile the rules.
@@ -59,13 +61,15 @@ public final class WebViewHost: NSObject, MealioHost, ObservableObject {
         return allowlist.check(store, url, .page).ok || allowlist.check(store, url, .login).ok
     }
 
-    /// A store's own hosts (StoreHosts.hosts), whose checkout paths the
-    /// network block refuses. MealioCart sets it to the client's allowlist,
-    /// with any signed widening; until then the bundled allowlist answers.
+    /// The hosts whose checkout paths the network block refuses for a store:
+    /// its own hosts and its store-owned sign-in hosts, never a shared
+    /// identity provider (SharedIdentity.nativeBlockHosts, round 7).
+    /// MealioCart sets it to the client's allowlist, with any signed
+    /// widening; until then the bundled allowlist answers.
     var storeHosts: (_ store: String) -> [String] = WebViewHost.bundledHosts
 
     nonisolated static func bundledHosts(_ store: String) -> [String] {
-        Allowlist().hostsFor(store)?.hosts ?? []
+        Allowlist().hostsFor(store).map(SharedIdentity.nativeBlockHosts) ?? []
     }
 
     private(set) var hidden: WKWebView?
@@ -563,11 +567,29 @@ extension WebViewHost: WKNavigationDelegate {
         }
     }
 
-    /// A new document in the top frame: Mealio is not driving it (yet), so
-    /// the block list comes off, as the in-page guard starts unarmed.
-    public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-        guard webView === hidden else { return }
-        disarmRules(on: webView)
+    /// The top frame's response for a new document is in: Mealio is not
+    /// driving that document (yet), so the block list comes off HERE, before
+    /// WebKit is told to go on, so before the new document's first byte and
+    /// first subresource (round 7). Not at didCommit: that callback reaches
+    /// the app after the web process has committed, so the new page's first
+    /// subresources could still meet the old list, and a script that armed
+    /// the new page in between would lose its list. Re-armed only by
+    /// runScript. Same-document navigations have no response and keep it.
+    public func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
+                        decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        if webView === hidden, WebViewHost.startsNewDocument(navigationResponse) {
+            disarmRules(on: webView)
+        }
+        // WebKit's own default when no delegate answers.
+        decisionHandler(navigationResponse.canShowMIMEType ? .allow : .cancel)
+    }
+
+    /// A top-frame response that becomes a new document: one WebKit can show,
+    /// and not a 204 or 205 (which leave the current document in place).
+    static func startsNewDocument(_ r: WKNavigationResponse) -> Bool {
+        guard r.isForMainFrame, r.canShowMIMEType else { return false }
+        if let http = r.response as? HTTPURLResponse, http.statusCode == 204 || http.statusCode == 205 { return false }
+        return true
     }
 
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -624,7 +646,7 @@ final class LoginSheet: NSObject, WKNavigationDelegate, WKUIDelegate, UIAdaptive
     private(set) var failure: MealioError?
     /// The store's block list, added before each check script.
     private let rules: WKContentRuleList?
-    /// It is on the sheet's page now (until the page commits a new document).
+    /// It is on the sheet's page now (until a new document's response arrives).
     private var rulesOn = false
 
     /// How long a modal presentation may take to start before it counts as refused.
@@ -824,13 +846,17 @@ final class LoginSheet: NSObject, WKNavigationDelegate, WKUIDelegate, UIAdaptive
         decisionHandler(allowed ? .allow : .cancel)
     }
 
-    /// A new document: Mealio is not driving it until the next check, so the
-    /// block list comes off.
-    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-        if rulesOn {
+    /// A new document's response: Mealio is not driving it until the next
+    /// check, so the block list comes off before WebKit goes on (not at
+    /// didCommit, which can come after the new page's first subresources and
+    /// after a check already armed it; see WebViewHost).
+    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
+                 decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        if rulesOn, WebViewHost.startsNewDocument(navigationResponse) {
             webView.configuration.userContentController.removeAllContentRuleLists()
             rulesOn = false
         }
+        decisionHandler(navigationResponse.canShowMIMEType ? .allow : .cancel)
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

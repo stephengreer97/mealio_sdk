@@ -241,7 +241,9 @@ class WebViewHost(context: Context) : Host {
 
     private inner class HiddenClient : BlockingWebViewClient(networkBlock) {
         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-            newMainDocument()
+            // Blocking already turned off when this document was requested
+            // (BlockingWebViewClient); turning it off here, after the commit,
+            // would undo a script armed in between.
             // Backstop for navigations shouldOverrideUrlLoading does not see
             // (form POSTs): leave at once and report the load as blocked.
             if (url != null && !hiddenMayGo(url)) {
@@ -283,7 +285,7 @@ class WebViewHost(context: Context) : Host {
                 pendingLoad?.complete(PageLoad(ok = false, finalUrl = u, error = "blocked"))
                 return true
             }
-            return false
+            return mainFrameAllowed(request)
         }
 
         // API 26+. Without this a crashed renderer takes the app down with it.

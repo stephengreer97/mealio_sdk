@@ -170,11 +170,12 @@ internal class LoginWebController(
             if (navigationBlocked(request)) return true
             if (!request.isForMainFrame) return false
             val url = request.url?.toString() ?: return true
-            return !admit(url)
+            if (!admit(url)) return true
+            return mainFrameAllowed(request)
         }
 
         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-            newMainDocument()
+            // Blocking turned off when this document was requested, not here (after the commit).
             if (!docStartScript) view?.evaluateJavascript(bootstrap, null)
             // Backstop for navigations shouldOverrideUrlLoading does not see
             // (POST form submissions).

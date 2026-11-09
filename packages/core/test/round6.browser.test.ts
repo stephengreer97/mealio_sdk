@@ -167,10 +167,12 @@ describe.skipIf(!browser)('round 6: the guard in Chromium', () => {
       out.formaction = await t(() => f5.requestSubmit(f5.querySelector('button')));
       out.innocent = await t(() => form('/search', ['q', 'milk']).submit());
       return out;`);
-    // The click's event never reached the page's own listener: the guard stopped it first.
+    // Round 7: a submit event is judged after the page's own listeners (which
+    // see it, not prevented) and refused by preventDefault, not by a throw.
+    // Nothing blocked reaches the server either way.
     expect(got).toEqual({
-      submitPath: 'blocked_path', submitBody: 'blocked_operation', requestSubmit: 'blocked_path', click: 'no event',
-      formaction: 'blocked_path', innocent: 'sent',
+      submitPath: 'blocked_path', submitBody: 'blocked_operation', requestSubmit: 'sent', click: 'went',
+      formaction: 'sent', innocent: 'sent',
     });
     await s.page.waitForTimeout(500);
     expect(s.reached).toEqual(['POST /search']);

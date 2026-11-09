@@ -1,6 +1,7 @@
 export * from './protocol';
 export * from './matcher';
 export * from './allowlist';
+export * from './identity';
 export * from './guard';
 export * from './keys';
 export * from './strings';

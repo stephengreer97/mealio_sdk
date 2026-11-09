@@ -585,25 +585,55 @@ their password into the store's page; neither your app nor Mealio sees it.
 - **Signed instructions.** Every instruction is signed by Mealio, and the SDK
   checks every page load and fetch it makes against its own allowlist and
   blocked paths.
-- **Native network blocking: store hosts only, while Mealio drives the
+- **Native network blocking: the store's hosts, while Mealio drives the
   page.** A `WKContentRuleList` blocks every request to the store's own hosts
-  (and their subdomains, from the SDK's allowlist with any signed widening),
-  in every frame and of every kind (pages, frames, images, fetch, XHR, form
+  and its store-owned sign-in hosts (and their subdomains, from the SDK's
+  allowlist with any signed widening: `albertsons.com` and
+  `albertsons.okta.com` for an Albertsons banner, `kroger.com` and
+  `login.kroger.com` for the Kroger family), in every frame and of every kind (pages, frames, images, fetch, XHR, form
   posts), whose path or query names checkout, payment, billing, a wallet, a
   gift card, placing or confirming an order, or changing the account's
   password or addresses. A path or query that percent-encodes a letter, `-`
   or `_` is blocked too, since a server could decode it into one of those.
   Requests to any other host (a payment or captcha frame) are never blocked
-  by it. It goes on the hidden WebView right before Mealio's first script
+  by it, nor are shared identity providers (Google, Apple, Facebook,
+  Microsoft, generic Okta and Auth0 hosts, `mealio.co`: the list in
+  `protocol/shared-identity-hosts.json`), except a tenant named for the
+  store, such as `albertsons.okta.com`. It goes on the hidden WebView right before Mealio's first script
   for a page, and on the sign-in sheet before each sign-in check, and comes
-  off when the page loads a new document; the store page's own loading
-  before that is never blocked. WebKit applies the list outside the page, so
+  off when the response for a new top-level document arrives, before WebKit
+  shows it (so before that document's first image, script or fetch); the
+  store page's own loading before Mealio's next script is never blocked. WebKit applies the list outside the page, so
   page code cannot turn it off. Each store's list is compiled once (pages
   wait for it, at most 10 seconds), and if WebKit cannot compile it every
   job fails with `unsupported` rather than run without it.
 - **The in-page guard** is defense in depth only. It also stops requests whose
   body names a checkout or order mutation, and caps the page's request rate,
   but code already running in the store page can defeat any in-page check.
+
+### Known limits
+
+- **Redirects.** WebKit judges every hop of a redirect against the content
+  rules, so an ordinary request the store answers with a 3xx to a checkout
+  path is refused at that hop, for pages, frames, images, fetch and XHR. The
+  browser test `testTheNetworkBlockAlsoRefusesARedirectToACheckoutPath`
+  checks this against a local HTTP server on 127.0.0.1; where the simulator
+  will not load that page, the test is skipped and this stays unverified.
+  (Android differs: its WebView does not show the SDK redirects of fetch,
+  XHR or subresources, only of navigations.)
+- **While no script has run in a page,** nothing is blocked natively there:
+  the store's own boot code must run untouched. Only the signed allowlist
+  limits what the hidden page loads before then.
+- **A navigation that gets its response but never shows it** (the load
+  fails after the response) leaves the old page without the list until the
+  next script puts it back. The in-page guard stays armed there.
+- **The in-page guard** judges a form submission after the page's own
+  handlers, and leaves alone any form the page sends itself in JavaScript
+  (it called `preventDefault`); what such a page then sends with `fetch` or
+  XHR is judged as usual. A synchronous XHR whose body is a Blob is sent at
+  once with only its path judged, since its body cannot be read in time.
+- **A page restored from the back/forward cache** keeps whatever list was on
+  (it has no new response). That only ever blocks more, never less.
 
 To sign a user out of stores (for example from your app's settings):
 

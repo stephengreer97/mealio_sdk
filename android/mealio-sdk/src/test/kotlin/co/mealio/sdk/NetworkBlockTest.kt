@@ -92,8 +92,8 @@ class NetworkBlockTest {
     @Test fun onlyTheCurrentStoresHosts() {
         val b = NetworkBlock().apply { arm(blockHostsFor(Allowlist(), "safeway")) }
         assertTrue(b.blocks("https://www.safeway.com/checkout"))
-        // Sign-in hosts are not blocked: they are often shared providers.
-        assertFalse(b.blocks("https://www.albertsons.com/payment"))
+        // Round 7: the store-owned sign-in host is covered too (SharedIdentityHostsTest has the shared ones).
+        assertTrue(b.blocks("https://www.albertsons.com/payment"))
         // Another store's host is not this store's.
         assertFalse(b.blocks("https://www.heb.com/checkout"))
         // The store changes: arming again replaces the hosts.
@@ -114,9 +114,9 @@ class NetworkBlockTest {
         val a = Allowlist()
         a.widen(AllowlistPayload(1, 0.0, mapOf("aldi" to StoreHostsPatch(hosts = listOf("shop.aldi.us")))))
         assertTrue(blockHostsFor(a, "aldi").contains("shop.aldi.us"))
-        // A widened sign-in host is not a store host.
+        // Round 7: a widened store-owned sign-in host is covered too.
         a.widen(AllowlistPayload(1, 0.0, mapOf("aldi" to StoreHostsPatch(authHosts = listOf("aldi.instacart.com")))))
-        assertFalse(blockHostsFor(a, "aldi").contains("aldi.instacart.com"))
+        assertTrue(blockHostsFor(a, "aldi").contains("aldi.instacart.com"))
         assertTrue(blockHostsFor(Allowlist(), "nope").isEmpty())
     }
 

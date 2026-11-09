@@ -77,9 +77,10 @@ fun fakeItemFromJson(o: JSONObject): FakeItem {
         options = o.objects("options").map { Product.fromJson(it) },
         remembered = o.string("remembered"),
         ingredient = o.string("ingredient"),
-        // TS `quantity?: number`: a fraction is accepted (and truncated, the SDK's
-        // quantities are whole); a huge one saturates instead of wrapping.
-        quantity = (o.opt("quantity") as? Number)?.toDouble()?.toInt() ?: 1,
+        // TS `quantity?: number`: the value as JSON.parse reads it, kept (1.5,
+        // 3000000000 and 1e400, which is Infinity, are not truncated, clamped
+        // or refused). The cart sends it as JSON.stringify would.
+        quantity = jsNumber(o.opt("quantity")) ?: 1,
         rememberedPreferenceId = o.string("rememberedPreferenceId"),
         rememberedUnavailable = o.opt("rememberedUnavailable") == true,
         startUnchecked = o.opt("startUnchecked") == true,
@@ -99,6 +100,25 @@ fun fakeErrorFromJson(v: Any?): FakeError {
 }
 
 private fun JSONObject.string(k: String): String? = opt(k) as? String
+
+/**
+ * A number JSON.parse read past Double's range (1e400 is Infinity, -1e400
+ * -Infinity). org.json refuses a non-finite Number in an object or array, so
+ * the parser stores this instead; it is not a Number, so readers that want a
+ * finite one skip it, as the server's JSON.stringify turns it into null.
+ */
+internal class JsNonFinite(val value: Double) {
+    override fun toString() = if (value > 0) "Infinity" else "-Infinity"
+}
+
+/** A JSON number as a Kotlin one, its value kept: Int, Long or Double, or ±Infinity for [JsNonFinite]. */
+internal fun jsNumber(v: Any?): Number? = when (v) {
+    is JsNonFinite -> v.value
+    is Number -> v
+    else -> null
+}
+
+private fun isJsNumber(v: Any?) = v is Number || v is JsNonFinite
 
 private fun JSONObject.objects(k: String): List<JSONObject> {
     val a = opt(k) as? JSONArray ?: return emptyList()
@@ -134,7 +154,7 @@ private class Fields(val o: JSONObject, val path: String, known: Set<String>, re
     /** TS `number`: any number, fractions included. */
     fun number(k: String, nullable: Boolean = false) {
         if (!has(k) || (nullable && isNull(k))) return
-        o.opt(k) as? Number ?: bad(at(k), if (nullable) "must be a number or null" else "must be a number")
+        if (!isJsNumber(o.opt(k))) bad(at(k), if (nullable) "must be a number or null" else "must be a number")
     }
 
     fun boolean(k: String, nullable: Boolean = false) {
@@ -209,7 +229,7 @@ private fun checkProduct(o: JSONObject, path: String) {
     f.boolean("estimated")
     f.number("maxQuantity", nullable = true)
     f.boolean("soldByWeight")
-    f.list("weightOptions") { v, at -> if (v !is Number) bad(at, "must be a number") }
+    f.list("weightOptions") { v, at -> if (!isJsNumber(v)) bad(at, "must be a number") }
     f.number("pricePerLb", nullable = true)
 }
 
@@ -273,7 +293,8 @@ internal fun strictJsonParse(s: String): Any {
         if (i < s.length && s[i] == '.') { i++; digits() }
         if (i < s.length && (s[i] == 'e' || s[i] == 'E')) { i++; if (i < s.length && (s[i] == '+' || s[i] == '-')) i++; digits() }
         val d = s.substring(start, i).toDouble()
-        if (d.isInfinite()) fail("number out of range")
+        // JSON.parse reads 1e400 as Infinity; so does this.
+        if (d.isInfinite()) return JsNonFinite(d)
         if (d != Math.rint(d) || Math.abs(d) >= 9.007199254740992E15 || (d == 0.0 && 1.0 / d < 0)) return d
         val l = d.toLong()
         return if (l in Int.MIN_VALUE..Int.MAX_VALUE) l.toInt() else l

@@ -1,6 +1,6 @@
 // Loads the React Native Jest mock the way partners do, on real Jest 29 and
-// 30, from the packed tarballs: at a file's top level (it must reset itself
-// after every test) and inside beforeAll (it must load without adding a hook,
+// 30, from the packed tarballs: at a file's top level and first inside a
+// describe body (it must reset itself after every test of the file) and inside beforeAll (it must load without adding a hook,
 // which Jest would turn into a failed file). Needs the npm registry for Jest.
 //   node scripts/check-jest-mock.mjs [29 30]
 import { execSync } from 'node:child_process';
@@ -19,6 +19,20 @@ const tests = {
 beforeAll(() => { m = require('@mealio/react-native-cart/jest'); });
 test('loads and works', () => { m.setMockUser(null); expect(m.useMealio().hasUser).toBe(false); expect(m.setupMealioMock()).toBe(false); });
 test('a second test runs', () => { expect(typeof m.resetMealioMock).toBe('function'); });
+`,
+  // First required inside a describe body: the reset must cover the next describe too.
+  'describe.test.js': `jest.mock('@mealio/react-native-cart', () => require('@mealio/react-native-cart/jest'));
+describe('cart screen', () => {
+  const m = require('@mealio/react-native-cart');
+  test('guest', () => { m.setMockUser(null); expect(m.useMealio().hasUser).toBe(false); });
+  test('starts clean', () => { expect(m.useMealio().hasUser).toBe(true); });
+});
+describe('account screen', () => {
+  const m = require('@mealio/react-native-cart');
+  test('guest', () => { m.setMockUser(null); m.useMealio().prepareCart.mockRejectedValue(new Error('x')); expect(m.useMealio().hasUser).toBe(false); });
+  test('starts clean', () => { expect(m.useMealio().hasUser).toBe(true); expect(jest.isMockFunction(m.useMealio().prepareCart)).toBe(true); });
+});
+test('after both describes, still clean', async () => { const m = require('@mealio/react-native-cart'); expect(m.useMealio().hasUser).toBe(true); await expect(m.useMealio().prepareCart()).resolves.toBeTruthy(); });
 `,
   'toplevel.test.js': `jest.mock('@mealio/react-native-cart', () => require('@mealio/react-native-cart/jest'));
 const { setMockUser, useMealio } = require('@mealio/react-native-cart');

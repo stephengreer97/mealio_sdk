@@ -32,8 +32,8 @@ jest.mock('@mealio/react-native-cart', () => require('@mealio/react-native-cart/
 ```
 
 `mockCart()` gives a cart with every CartSession member. To test a guest, call `setMockUser(null)` from `@mealio/react-native-cart/jest`: `hasUser` is false and the button calls `onSignInRequired`.
-The mock resets itself after every test (`resetMealioMock()`), so `setMockUser` and scripted answers never leak into the next one. Its functions are `jest.fn()`s, typed so `useMealio().prepareCart.mockResolvedValue(mockCart())` type-checks.
-If the mock first loads after Jest has started running tests (a `require` inside `beforeAll` or a test, a lazy `require`), it loads fine but adds no hook, since Jest allows none there; add `require('@mealio/react-native-cart/jest').setupMealioMock();` to a `setupFilesAfterEnv` file to keep the reset.
+The mock resets (`resetMealioMock()`) after every test, so `setMockUser` and scripted answers never leak into the next one, when its after-each hook is registered. Its functions are `jest.fn()`s, typed so `useMealio().prepareCart.mockResolvedValue(mockCart())` type-checks.
+The reliable way to register that hook is a `setupFilesAfterEnv` file with `require('@mealio/react-native-cart/jest').setupMealioMock();`: it then runs after every test of every file. Without it, on Jest 29 and 30, the mock registers the hook itself when it first loads while a file is being collected (the usual `jest.mock` line, or a `require` in a `describe` body), on the file's root so it covers every test in the file. When it first loads after tests have started (a `require` inside `beforeAll` or a test, a lazy `require`), it adds no hook, since Jest allows none there, and nothing resets. On other runners it registers only at a file's top level.
 
 To test your own screens built on `useMealio()` against the real client, use the testing kit. No network, no WebView, no `transformIgnorePatterns`, and no `react-native-webview` mock: with `testing` set the provider never loads it:
 

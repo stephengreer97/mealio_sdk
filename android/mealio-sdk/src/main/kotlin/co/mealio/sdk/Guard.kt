@@ -64,9 +64,12 @@ val GUARD_SCRIPT: String = """(function(){
   var reqUrl = getter(window.Request, 'url'), reqMethod = getter(window.Request, 'method'), reqClone = method(window.Request, 'clone'), reqText = method(window.Request, 'text');
   var rsLocked = getter(window.ReadableStream, 'locked');
   var docUrl = getter(window.Document, 'URL'), XS = typeof window.XMLSerializer === 'function' ? window.XMLSerializer : null, xsString = method(XS, 'serializeToString');
-  var formAction = getter(window.HTMLFormElement, 'action'), getAttr = method(window.Element, 'getAttribute'), shadowOf = getter(window.Element, 'shadowRoot');
-  var evTarget = getter(window.Event, 'target'), evSubmitter = getter(window.SubmitEvent, 'submitter');
+  var formAction = getter(window.HTMLFormElement, 'action'), formMethod = getter(window.HTMLFormElement, 'method'), formElements = getter(window.HTMLFormElement, 'elements');
+  var getAttr = method(window.Element, 'getAttribute'), shadowOf = getter(window.Element, 'shadowRoot');
+  var evTarget = getter(window.Event, 'target'), evSubmitter = getter(window.SubmitEvent, 'submitter'), evPrevented = getter(window.Event, 'defaultPrevented');
   var evPrevent = method(window.Event, 'preventDefault'), evStop = method(window.Event, 'stopImmediatePropagation');
+  var addEL = method(window.EventTarget, 'addEventListener'), gpo = Object.getPrototypeOf;
+  var construct = typeof Reflect === 'object' && Reflect && typeof Reflect.construct === 'function' ? Reflect.construct : null;
   var BLOCK = new RegExp(${jsStringLiteral(BLOCKED_PATTERNS.joinToString("|"))}, 'i');
   var OPS = new RegExp(${jsStringLiteral(BLOCKED_GRAPHQL_OPERATION)}, 'i');
   var MAX_DEPTH = 8, MAX_TEXT = 1048576;
@@ -383,13 +386,15 @@ val GUARD_SCRIPT: String = """(function(){
       X.prototype.open = function (m, u) {
         var a = arguments;
         if (armed && a.length > 1) { a = copyArgs(a); a[1] = Str(u); }
-        if (a.length > 1) { try { if (wmSet) wmSet(urls, this, a[1]); else this.__mealioUrl = a[1]; } catch (e) {} }
+        // [url, synchronous]: open's third argument, when given, false (or undefined) means synchronous.
+        if (a.length > 1) { var rec = [a[1], a.length > 2 && !a[2]]; try { if (wmSet) wmSet(urls, this, rec); else this.__mealioUrl = rec; } catch (e) {} }
         return apply(open, this, a);
       };
       X.prototype.send = function (body) {
         if (!armed) return apply(send, this, arguments);
-        var self = this, u = null;
-        try { u = wmGet ? wmGet(urls, this) : this.__mealioUrl; } catch (e) {}
+        var self = this, rec = null, u = null, sync = false;
+        try { rec = wmGet ? wmGet(urls, this) : this.__mealioUrl; } catch (e) {}
+        if (rec) { u = rec[0]; sync = rec[1]; }
         if (pathBlocked(u)) throw refuse('blocked_path');
         var b = bodyOf(body), args = arguments.length ? [b.pass] : [];
         function go(text) {
@@ -398,6 +403,9 @@ val GUARD_SCRIPT: String = """(function(){
           return apply(send, self, args);
         }
         if (!isPromise(b.text)) return go(b.text);
+        // A synchronous request must be sent now, and a Blob cannot be read
+        // now: its path was judged above, its body is not (PROTOCOL.md "Known limits").
+        if (sync) return go(null);
         // send() cannot wait, so a Blob is read first and sent after. A refused one never goes.
         var abort = function () { try { self.abort(); } catch (e) {} };
         var sent = settled(b.text, go);
@@ -418,6 +426,11 @@ val GUARD_SCRIPT: String = """(function(){
           try { scheme = URLc && urlProto ? urlProto(new URLc(url, loc.href)) : ''; } catch (e) {}
           if (scheme === 'blob:' || scheme === 'data:') throw refuse('blocked_worker');
         }
+        var args = arguments.length > 1 ? [url, opts] : [url], p = null;
+        // A subclass (class W2 extends Worker) constructs through here with
+        // its own prototype on this: keep it, as new.target would.
+        try { if (this instanceof G) p = gpo(this); } catch (e) {}
+        if (construct && p && p !== G.prototype) { var NT = function () {}; NT.prototype = p; return construct(W, args, NT); }
         return arguments.length > 1 ? new W(url, opts) : new W(url);
       };
       G.prototype = W.prototype;
@@ -427,36 +440,77 @@ val GUARD_SCRIPT: String = """(function(){
     }
     guardWorker('Worker');
     guardWorker('SharedWorker');
-    // Form submissions: the action (or the submitter's formaction) is checked
-    // as a path, and the form's fields as a form-encoded body. form.submit()
-    // fires no event, so it and requestSubmit() are hooked; a capturing submit
-    // listener covers buttons and the Enter key.
+    // Form submissions: the action (or the submitter's formaction; with
+    // neither, the page's own URL, where the form really goes) is checked as a
+    // path, and the form's fields as a form-encoded body. The fields are read
+    // from the form's controls, not with new FormData: that would fire the
+    // page's formdata listeners a second time.
+    function fieldsOf(form, submitter) {
+      var els = null, q = '', n = 0, i, el, name, type, v;
+      try { els = formElements ? formElements(form) : form.elements; n = els.length; } catch (e) { return null; }
+      for (i = 0; i < n; i++) {
+        try {
+          el = els[i]; name = el.name;
+          if (name !== 'operationName' && name !== 'query' && name !== 'operations') continue;
+          if (el.disabled) continue;
+          type = Str(el.type || '');
+          if (has(/^(checkbox|radio)$/i, type) && !el.checked) continue;
+          if (has(/^(submit|image|button|reset)$/i, type) && el !== submitter) continue;
+          if (has(/^file$/i, type)) continue;
+          v = el.value;
+          if (typeof v === 'string') q += (q ? '&' : '') + name + '=' + enc(v);
+        } catch (e) {}
+      }
+      return q;
+    }
+    function isDialog(form, submitter) {
+      var m = null;
+      if (submitter && getAttr) { try { m = getAttr(submitter, 'formmethod'); } catch (e) {} }
+      if (m === null || m === undefined) { try { m = formMethod ? formMethod(form) : form.method; } catch (e) {} }
+      return typeof m === 'string' && has(/^dialog$/i, m);
+    }
     function formCheck(form, submitter) {
-      var action = null, fa = null, text = null;
+      var action = null, fa = null;
+      if (isDialog(form, submitter)) return;
       if (submitter && getAttr) { try { fa = getAttr(submitter, 'formaction'); } catch (e) {} }
       if (fa !== null && fa !== undefined) action = fa;
       else { try { action = formAction ? formAction(form) : form.action; } catch (e) { return; } }
       if (pathBlocked(action)) throw refuse('blocked_path');
-      if (FD && fdGet) { try { text = fromForm(new FD(form)); } catch (e) {} }
-      if (bodyBlocked(text)) throw refuse('blocked_operation');
+      if (bodyBlocked(fieldsOf(form, submitter))) throw refuse('blocked_operation');
     }
+    // form.submit() fires no event, so it is judged here. requestSubmit(),
+    // buttons and the Enter key fire a submit event, judged below.
     var FE = w.HTMLFormElement;
     if (FE && FE.prototype) {
-      var fsubmit = FE.prototype.submit, frequest = FE.prototype.requestSubmit;
+      var fsubmit = FE.prototype.submit;
       if (typeof fsubmit === 'function') FE.prototype.submit = function () { if (armed) formCheck(this, null); return apply(fsubmit, this, arguments); };
-      if (typeof frequest === 'function') FE.prototype.requestSubmit = function (s) { if (armed) formCheck(this, s); return apply(frequest, this, arguments); };
     }
-    if (typeof w.addEventListener === 'function') {
-      w.addEventListener('submit', function (e) {
-        if (!armed) return;
-        var form = null, by = null;
-        try { form = evTarget ? evTarget(e) : e.target; } catch (x) {}
-        try { by = evSubmitter ? evSubmitter(e) : e.submitter; } catch (x) {}
-        try { formCheck(form, by); } catch (x) {
-          try { if (evPrevent) evPrevent(e); else e.preventDefault(); } catch (y) {}
-          try { if (evStop) evStop(e); else e.stopImmediatePropagation(); } catch (y) {}
-        }
-      }, true);
+    // A submit event is judged AFTER the page's own handlers, in the bubble
+    // phase, and only when none of them called preventDefault: a form the
+    // page sends itself in JS (React's onSubmit) is never touched. submit does
+    // not cross a shadow root, so each shadow root gets the same listener: on
+    // attachShadow, and at arming for open roots already there.
+    function onSubmit(e) {
+      if (!armed) return;
+      var form = null, by = null, prevented = false;
+      try { prevented = evPrevented ? evPrevented(e) : e.defaultPrevented; } catch (x) {}
+      if (prevented) return;
+      try { form = evTarget ? evTarget(e) : e.target; } catch (x) {}
+      try { by = evSubmitter ? evSubmitter(e) : e.submitter; } catch (x) {}
+      try { formCheck(form, by); } catch (x) {
+        try { if (evPrevent) evPrevent(e); else e.preventDefault(); } catch (y) {}
+        try { if (evStop) evStop(e); else e.stopImmediatePropagation(); } catch (y) {}
+      }
+    }
+    function listen(t) { try { if (addEL) addEL(t, 'submit', onSubmit, false); else t.addEventListener('submit', onSubmit, false); } catch (e) {} }
+    if (typeof w.addEventListener === 'function') listen(w);
+    var EP = w.Element && w.Element.prototype, attach = EP && EP.attachShadow;
+    if (typeof attach === 'function') {
+      EP.attachShadow = function () {
+        var r = apply(attach, this, arguments);
+        if (r) listen(r);
+        return r;
+      };
     }
     // Frames: through the element's contentWindow and contentDocument, when
     // one is added to the page, and again after each load.
@@ -506,7 +560,7 @@ val GUARD_SCRIPT: String = """(function(){
         for (i = 0; i < all.length; i++) {
           sr = null;
           try { sr = shadowOf(all[i]); } catch (e) {}
-          if (sr) { scan(sr); stack[stack.length] = sr; }
+          if (sr) { listen(sr); scan(sr); stack[stack.length] = sr; }
         }
       }
     }

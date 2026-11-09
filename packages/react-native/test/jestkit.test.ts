@@ -130,3 +130,58 @@ describe('the Jest kit loaded after Jest has started running tests', () => {
     }
   });
 });
+
+// 0.6 round 7: first required inside a describe body (while Jest collects the
+// file), the hook must go on the file's root block, not on that describe, or
+// tests in the next describe never reset. Jest's afterEach adds the hook to
+// jest-circus's state.currentDescribeBlock; the fake below records where it
+// would land. Checked against real Jest 29 and 30 by scripts/check-jest-mock.mjs.
+describe('the Jest kit first required inside a describe', () => {
+  it('registers the reset on the root block and puts the current block back', () => {
+    const state = expect.getState();
+    expect.setState({ currentTestName: undefined });
+    const sym = Symbol('JEST_STATE_SYMBOL');
+    const path = require.resolve('../jest.js');
+    const root = { name: 'ROOT_DESCRIBE_BLOCK' };
+    const inner = { name: 'cart screen', parent: root };
+    const circus: any = { hasStarted: false, rootDescribeBlock: root, currentDescribeBlock: inner };
+    const landed: unknown[] = [];
+    (globalThis as any).afterEach = () => { landed.push(circus.currentDescribeBlock); };
+    (globalThis as any).expect = expect;
+    try {
+      (globalThis as any)[sym] = circus;
+      delete require.cache[path];
+      require('../jest.js');
+      expect(landed).toEqual([root]);
+      expect(circus.currentDescribeBlock).toBe(inner);
+    } finally {
+      delete (globalThis as any)[sym];
+      delete (globalThis as any).afterEach;
+      delete (globalThis as any).expect;
+      expect.setState({ currentTestName: state.currentTestName });
+    }
+  });
+
+  it('puts the current block back even when the runner refuses the hook', () => {
+    const state = expect.getState();
+    expect.setState({ currentTestName: undefined });
+    const sym = Symbol('JEST_STATE_SYMBOL');
+    const path = require.resolve('../jest.js');
+    const root = {}; const inner = {};
+    const circus: any = { hasStarted: false, rootDescribeBlock: root, currentDescribeBlock: inner };
+    (globalThis as any).afterEach = () => { throw new Error('no hooks here'); };
+    (globalThis as any).expect = expect;
+    try {
+      (globalThis as any)[sym] = circus;
+      delete require.cache[path];
+      const m = require('../jest.js');
+      expect(circus.currentDescribeBlock).toBe(inner);
+      expect(m.setupMealioMock()).toBe(false);
+    } finally {
+      delete (globalThis as any)[sym];
+      delete (globalThis as any).afterEach;
+      delete (globalThis as any).expect;
+      expect.setState({ currentTestName: state.currentTestName });
+    }
+  });
+});

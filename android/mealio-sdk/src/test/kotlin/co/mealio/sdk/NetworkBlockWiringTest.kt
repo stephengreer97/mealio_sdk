@@ -71,7 +71,6 @@ class NetworkBlockWiringTest {
         }
         for (url in thirdParty) assertNull(url, client.shouldInterceptRequest(wv, Req(url, false)))
         assertNull(client.shouldInterceptRequest(wv, Req("https://www.heb.com/search?q=milk", false)))
-        assertNull(client.shouldInterceptRequest(wv, Req("https://www.heb.com/", true)))
         assertTrue(client.shouldOverrideUrlLoading(wv, Req("https://www.heb.com/checkout", false)))
         assertFalse(client.shouldOverrideUrlLoading(wv, Req("https://js.stripe.com/payment/frame", false)))
         assertFalse(client.shouldOverrideUrlLoading(wv, Req("https://www.heb.com/frame", false)))
@@ -101,8 +100,8 @@ class NetworkBlockWiringTest {
         assertTrue(host.networkBlock.armed)
         assertOn(wv, client)
 
-        // A new main document turns it off.
-        client.onPageStarted(wv, "https://www.heb.com/next", null)
+        // A new main document turns it off when it is requested.
+        assertNull(client.shouldInterceptRequest(wv, Req("https://www.heb.com/next", true)))
         assertFalse(host.networkBlock.armed)
         assertOff(wv, client)
 
@@ -140,9 +139,70 @@ class NetworkBlockWiringTest {
         assertFalse(client.shouldOverrideUrlLoading(wv, Req("https://www.heb.com/login/next", true)))
 
         // The next main document starts unblocked, until its check script.
-        client.onPageStarted(wv, "https://www.heb.com/login/next", null)
+        assertNull(client.shouldInterceptRequest(wv, Req("https://www.heb.com/login/next", true)))
         assertFalse(c.networkBlock.armed)
         assertOff(wv, client)
+        c.destroy()
+    }
+
+    /**
+     * Round 7, disarm timing: blocking turns off when a new main document is
+     * REQUESTED, so the new page's first subresource with a blocked-looking
+     * path goes through, and the late onPageStarted (posted after the commit)
+     * leaves a script armed in between alone.
+     */
+    @Test fun hiddenPageDisarmsAtTheRequestNotAtPageStarted() {
+        val host = WebViewHost(RuntimeEnvironment.getApplication())
+        val wv = host.ensureWebView()
+        val client = wv.webViewClient
+        drive { host.runScript("heb", GUARD_ARM_SCRIPT, "true;", emptyList(), 10) }
+        assertTrue(host.networkBlock.armed)
+
+        // A main-frame navigation the page starts is allowed by shouldOverrideUrlLoading: off at once.
+        assertFalse(client.shouldOverrideUrlLoading(wv, Req("https://www.heb.com/next", true)))
+        assertFalse(host.networkBlock.armed)
+        // The new page's first subresource, before onPageStarted, is not refused.
+        assertNull(client.shouldInterceptRequest(wv, Req("https://www.heb.com/next/checkout-banner.js", false)))
+
+        // A script armed after the commit stays armed through the late onPageStarted.
+        drive { host.runScript("heb", GUARD_ARM_SCRIPT, "true;", emptyList(), 10) }
+        client.onPageStarted(wv, "https://www.heb.com/next", null)
+        assertTrue(host.networkBlock.armed)
+        assertNotNull(client.shouldInterceptRequest(wv, Req("https://www.heb.com/checkout", false)))
+
+        // A main-frame request (loadUrl, form POST) turns it off too; a refused one does not.
+        assertNotNull(client.shouldInterceptRequest(wv, Req("https://www.heb.com/place-order", true, "POST")))
+        assertTrue(host.networkBlock.armed)
+        assertNull(client.shouldInterceptRequest(wv, Req("https://www.heb.com/after", true, "POST")))
+        assertFalse(host.networkBlock.armed)
+        assertNull(client.shouldInterceptRequest(wv, Req("https://www.heb.com/payment/sdk.js", false)))
+
+        // A subframe navigation is not a new main document.
+        drive { host.runScript("heb", GUARD_ARM_SCRIPT, "true;", emptyList(), 10) }
+        assertFalse(client.shouldOverrideUrlLoading(wv, Req("https://www.heb.com/frame", false)))
+        assertNull(client.shouldInterceptRequest(wv, Req("https://www.heb.com/frame", false)))
+        assertTrue(host.networkBlock.armed)
+    }
+
+    @Test fun loginPageDisarmsAtTheRequestNotAtPageStarted() {
+        val req = LoginRequest(
+            store = "heb", url = "https://www.heb.com/login", title = "H-E-B", guard = GUARD_SCRIPT,
+            check = LoginCheck("true;", 60_000),
+            doneWhen = emptyList(), doneWhenUrl = null, timeoutMs = 1000,
+            allowNavigation = { true },
+        )
+        val c = LoginWebController(RuntimeEnvironment.getApplication(), LoginSession("t", req))
+        val wv = c.webView!!
+        val client = wv.webViewClient
+        client.onPageFinished(wv, "https://www.heb.com/login")
+        assertTrue(c.networkBlock.armed)
+        assertFalse(client.shouldOverrideUrlLoading(wv, Req("https://www.heb.com/login/next", true)))
+        assertFalse(c.networkBlock.armed)
+        assertNull(client.shouldInterceptRequest(wv, Req("https://www.heb.com/login/next/payment.js", false)))
+        // Armed by the next check, then the late onPageStarted: still armed.
+        client.onPageFinished(wv, "https://www.heb.com/login/next")
+        client.onPageStarted(wv, "https://www.heb.com/login/next", null)
+        assertTrue(c.networkBlock.armed)
         c.destroy()
     }
 

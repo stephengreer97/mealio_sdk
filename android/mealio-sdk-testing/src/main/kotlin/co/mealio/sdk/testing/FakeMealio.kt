@@ -80,7 +80,12 @@ data class FakeItem @JvmOverloads constructor(
     /** The remembered product's id. In `options` and in stock: status remembered, pre-selected. */
     val remembered: String? = null,
     val ingredient: String? = null,
-    val quantity: Int = 1,
+    /**
+     * Packages, as TypeScript's `quantity?: number`: any Int, Long or Double,
+     * kept as given (no truncating or clamping to Int). The cart sends it as
+     * JSON.stringify would (a non-finite one as null).
+     */
+    val quantity: Number = 1,
     val rememberedPreferenceId: String? = null,
     /** The remembered product is gone this time: status remembered_unavailable, nothing pre-selected. */
     val rememberedUnavailable: Boolean = false,
@@ -459,16 +464,28 @@ fun fakeCartItem(f: FakeItem): JSONObject {
         rem != null -> "remembered_unavailable"
         else -> "choose"
     }
-    val o = JSONObject().put("key", f.key).put("ingredient", f.ingredient ?: f.key).put("quantity", f.quantity).put("status", status)
+    val o = JSONObject().put("key", f.key).put("ingredient", f.ingredient ?: f.key).put("quantity", wireNumber(f.quantity)).put("status", status)
         .put("options", JSONArray(f.options.map { productJson(it) }))
         .put("selectedId", if (usable) rem!!.id else JSONObject.NULL)
         .put("remembered", if (rem == null) JSONObject.NULL else productJson(if (usable) rem else rem.copy(outOfStock = true)))
     f.rememberedPreferenceId?.let { o.put("rememberedPreferenceId", it) }
     if (f.startUnchecked) o.put("startUnchecked", true)
     f.weightLb?.let { o.put("weightLb", it) }
-    f.recipes?.let { r -> o.put("recipes", JSONArray(r.map { JSONObject().put("id", it.id).put("title", it.title ?: JSONObject.NULL).put("quantity", it.quantity) })) }
+    f.recipes?.let { r -> o.put("recipes", JSONArray(r.map { JSONObject().put("id", it.id).put("title", it.title ?: JSONObject.NULL).put("quantity", wireNumber(it.quantity)) })) }
     if (status == "unavailable") o.put("reason", f.unavailable ?: "not_found")
     return o
+}
+
+/**
+ * A number as JSON.stringify writes it: a non-finite one is null, a whole one
+ * is written without a fraction (2, not 2.0), anything else as it is.
+ */
+internal fun wireNumber(n: Number): Any {
+    if (n is Int || n is Long || n is Short || n is Byte) return n
+    val d = n.toDouble()
+    if (!d.isFinite()) return JSONObject.NULL
+    if (d == Math.rint(d) && Math.abs(d) < 9.007199254740992E15) return d.toLong()
+    return d
 }
 
 /** A Product as the server sends it. */

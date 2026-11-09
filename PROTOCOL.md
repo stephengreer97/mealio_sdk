@@ -411,22 +411,24 @@ The controls, strongest first:
    op the SDK makes is checked against the store's hosts and
    `BLOCKED_PATTERNS`, and every `fetch` body against the body rules below,
    in native code (or the React Native JS runtime) that page code cannot reach.
-3. **Native network blocking (iOS and Android only): store hosts only,
-   while Mealio drives the page.** The native SDKs refuse every request the
-   store page makes to one of the store's own hosts (or a subdomain, from
-   the SDK allowlist with signed widening) whose path matches
-   `BLOCKED_PATTERNS`: documents, frames, form posts, fetch and XHR, in the
-   hidden WebView and the sign-in sheet. Other hosts (a payment or captcha
-   frame) are never refused by it. It starts when the first server script
-   for a document is about to run (when the guard arms; in the sign-in
-   sheet, before each `check.script`) and ends when the page commits a new
-   document or the store changes, so a store page's own boot requests are
-   never refused. iOS compiles a `WKContentRuleList` per store with a block
-   rule per pattern anchored to each store host, and adds it to the page's
-   user content controller only for that time; Android answers such a request in
-   `shouldInterceptRequest` with an empty 403 and refuses such a navigation in
-   `shouldOverrideUrlLoading`, in every frame. It runs outside the page, so
-   page code cannot turn it off. It checks paths only, not bodies.
+3. **Native network blocking (iOS and Android only): the store's own
+   hosts, while Mealio drives the page.** The native SDKs refuse every
+   request the store page makes to one of the store's blocking hosts (below:
+   its hosts and its store-owned sign-in hosts, never a shared identity
+   provider), or a subdomain of one, whose path matches `BLOCKED_PATTERNS`:
+   documents, frames, form posts, fetch and XHR, in the hidden WebView and
+   the sign-in sheet. Other hosts (a payment or captcha frame, Google or
+   Apple sign-in) are never refused by it. It turns on only from
+   `runScript` (when the guard arms) or a login check (before each
+   `check.script` in the sign-in sheet), and turns off when a new main-frame
+   document is requested or the store changes, so a store page's own boot
+   requests are never refused. iOS compiles a `WKContentRuleList` per store
+   with a block rule per pattern anchored to each blocking host, and adds it
+   to the page's user content controller only for that time; Android answers
+   such a request in `shouldInterceptRequest` with an empty 403 and refuses
+   such a navigation in `shouldOverrideUrlLoading`, in every frame. It runs
+   outside the page, so page code cannot turn it off. It checks paths only,
+   not bodies. See "Native blocking hosts" and "Known limits" below.
    **React Native and Flutter have no native blocking**: their WebView plugins
    give no hook on the page's own subresource requests. On those two platforms
    the page's own requests rely on controls 1 and 2 and the in-page guard.
@@ -438,7 +440,24 @@ The controls, strongest first:
 What the guard covers, once armed: `fetch`, XHR and beacons in the page and
 in its same-origin frames (frames in open shadow roots included) and
 same-origin popups; form `submit()`, `requestSubmit()` and submit events;
-`blob:` and `data:` workers. It captures the built-ins it decides with when it
+`blob:` and `data:` workers.
+
+How it judges a form: `submit()` (which fires no event) is judged when it is
+called. Every other submission (`requestSubmit()`, a button, the Enter key)
+is judged by a submit listener in the bubble phase, at the window and at
+every shadow root (submit does not cross a shadow root, so each root gets
+the listener: on `attachShadow`, open or closed, and at arming for open
+roots already there). It acts only when no page handler called
+`preventDefault`: a form the page sends itself in JS (React's `onSubmit`) is
+never touched, and its request is judged as a `fetch` or XHR instead. A form
+that will really submit is judged by where it goes: the submitter's
+`formaction`, else the form's `action`, else (no action attribute) the page's
+own URL; a `dialog` method form is never judged. Its fields (the submitter's
+included) are read from its controls, never with `new FormData`, so the
+page's `formdata` listeners fire once per submission, as without the guard.
+A refused submission is cancelled with `preventDefault`; it does not throw.
+Worker and SharedWorker stay subclassable: a subclass is constructed with
+`Reflect.construct` and its own prototype, as `new.target` would. It captures the built-ins it decides with when it
 installs (`RegExp.prototype.exec`, `URL` and its getters, `Blob.prototype.text`,
 `String`, `JSON.parse`, `Function.prototype.call` and `apply`,
 `Promise.prototype.then`, `Date.now` and the DOM getters it reads), so page code
@@ -464,6 +483,88 @@ the store's own hosts while Mealio drives the page):
   Request already in use), or a `formdata` event listener that adds fields
   after the guard judged a form.
 - Persisted queries that send only an innocent name and a hash.
+- A synchronous XHR (`open(method, url, false)`) whose body is a `Blob`, a
+  buffer or a typed array: such a body cannot be read synchronously, so the
+  guard judges its path only and sends it at once (it does not break the
+  request). An asynchronous one is read first, then judged.
+- A page submit listener added at the window, in the bubble phase, after the
+  guard installed: it runs after the guard's, so a form it would handle in JS
+  is judged as if it really submits. A form in a declarative shadow root
+  (`<template shadowrootmode>`) parsed after arming, and fields of
+  form-associated custom elements, are not read.
+
+### Known limits
+
+- **Android: redirects of fetch, XHR and subresources.** Android WebView
+  does not report a redirect of a `fetch`, XHR or subresource request to
+  `shouldInterceptRequest`: only the first request is seen. A request to an
+  innocent path that the server redirects to a checkout path is not caught by
+  native blocking (the in-page guard judges only the first URL as well).
+  Navigation redirects are caught: `shouldOverrideUrlLoading` sees each
+  redirect of a main-frame or frame navigation.
+- **iOS: redirects.** WebKit content rule lists are evaluated for every
+  load WebKit makes, so a redirect to a blocked path on a blocking host
+  should be refused as well. This is WebKit's documented behavior and is not
+  yet verified by an SDK test (the iOS browser tests use a custom scheme
+  handler, whose redirects do not go through the network stack the same
+  way).
+- **React Native and Flutter** have no native blocking at all (see
+  "Threat model").
+
+### Native blocking hosts
+
+Native blocking (iOS and Android) runs on a store's hosts and its store-owned
+sign-in hosts: `albertsons.com` and `albertsons.okta.com` for an Albertsons
+banner, `kroger.com`, `login.kroger.com` and `api.kroger.com` for every Kroger
+family store (so the Kroger sign-in sheet is covered). It never runs on a
+shared identity provider: `SHARED_IDENTITY_HOSTS`, in
+`protocol/shared-identity-hosts.json`, which every SDK copies and tests
+against:
+
+```
+google.com  gstatic.com  apple.com  facebook.com  microsoftonline.com
+b2clogin.com  ciamlogin.com  live.com  okta.com  auth0.com  mealio.co
+```
+
+The rule (the JSON file's `rule` and `vectors` are the reference):
+
+1. Normalize a host: lowercase, drop one trailing dot.
+2. A host is under an entry `E` when it equals `E` or ends with `.E` (whole
+   labels: `evilgoogle.com` is not under `google.com`).
+3. The store's names: for each of its `hosts` and `authHosts` (bundled plus
+   signed widening) that is under no entry, the first label of its
+   registrable domain. Safeway has `safeway` and `albertsons`; every Kroger
+   banner has `kroger`.
+4. A host under an entry is a shared identity host, unless it is a strict
+   subdomain of the entry whose tenant label (the label just left of the
+   entry) is one of the store's names. `okta.com`, `login.okta.com` and
+   `kroger.okta.com` are shared for Safeway; `albertsons.okta.com` and
+   `www.albertsons.okta.com` are not. A host under no entry is never shared.
+5. The blocking hosts: the store's `hosts`, then its `authHosts`, without
+   repeats, leaving out every shared identity host. Wegmans blocks on
+   `wegmans.com` only (its B2C and Microsoft hosts are shared).
+
+`isSharedIdentityHost` and `nativeBlockHosts` in
+`packages/core/src/identity.ts` are the reference implementation.
+
+### When native blocking is on
+
+- **On** only when Mealio arms the page: right before a server script runs
+  (`runScript`, with `GUARD_ARM_SCRIPT`) and before each sign-in
+  `check.script`. Nothing else turns it on.
+- **Off** when a new main-frame document is requested: Android in
+  `shouldOverrideUrlLoading` for a main-frame navigation, or in
+  `shouldInterceptRequest` for a main-frame document request (whichever comes
+  first, `isForMainFrame` true); iOS in `decidePolicyFor navigationAction`
+  for a main-frame navigation it allows. Not in `onPageStarted` or
+  `didCommit`: by then the new page's first subresources may already have
+  been asked for and refused. So the new page's first subresource with a
+  blocked-looking path is not refused, and a script armed after the new
+  document commits stays armed. Also off when the store changes.
+- Order matters: while blocking is on, a main-frame navigation to a blocking
+  host with a blocked path is refused first (and blocking stays on). Only a
+  main-frame navigation that goes ahead turns blocking off. A navigation
+  redirected to a blocked path is judged again at the redirect.
 
 ### Two copies, and arming
 
@@ -579,12 +680,15 @@ comment lists the steps), use `isJsSpace` for the name lookahead (JavaScript's
 against the regex on fuzzed text and against `multipartScan` in the vectors
 (each judged in well under a second).
 
-**Form submissions.** `form.submit()` and `form.requestSubmit()` are hooked,
-and a capturing `submit` listener on the window covers buttons and the Enter
-key. The action (or the submitter's `formaction`) is checked as a path, and
-the form's `operationName`, `query` and `operations` fields as a
-form-encoded body. A refused `submit()` or `requestSubmit()` throws; a refused
-submit event is cancelled and stopped before the page's own listeners see it.
+**Form submissions.** `form.submit()` is hooked; every other submission is
+judged by a bubble-phase `submit` listener on the window and on every shadow
+root, only when the page did not call `preventDefault` (see "Threat model"
+above). The action (the submitter's `formaction`, else the form's action,
+which is the page URL when the form has none) is checked as a path, and the
+form's `operationName`, `query` and `operations` controls (the submitter
+included) as a form-encoded body. A refused `submit()` throws; a refused
+submit event is cancelled with `preventDefault` after the page's own
+listeners ran.
 
 `Request`, `Blob`, `ArrayBuffer`,
 `URLSearchParams` and `FormData` bodies are read before the check. A beacon
