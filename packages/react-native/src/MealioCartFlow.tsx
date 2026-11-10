@@ -233,6 +233,19 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cart]);
 
+  /**
+   * "Choose a different store" on the sign-in page: stop the cart that asked
+   * for it (its sign-in goes with it) and show the stores. Not while adding:
+   * an add's sign-in is for the cart already chosen.
+   */
+  const storeFromSignIn = useCallback(() => {
+    if (adding.current) return;
+    stop();
+    internal.login?.cancel();
+    openStores('error');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [internal.login, openStores]);
+
   const close = useCallback(() => {
     // Every way of closing lands here. An add cannot be stopped, so it stays
     // open, but a sign-in the add asked for can still be dismissed.
@@ -266,6 +279,11 @@ export function MealioCartFlow(props: MealioCartFlowProps) {
           {internal.login ? (
             <View style={s.flex}>
               <Text style={s.loginNote}>{ui.tr('loginNote', { store: storeName })}</Text>
+              {phase !== 'adding' ? (
+                <Pressable onPress={storeFromSignIn} accessibilityRole="button" hitSlop={8} style={s.loginStore} testID="mealio-signin-different-store">
+                  <Text style={[s.small, { color: t.accent }]}>{ui.tr('differentStore')}</Text>
+                </Pressable>
+              ) : null}
               <View style={s.loginWeb}>{internal.login.webview}</View>
             </View>
           ) : phase === 'loading' ? (
@@ -999,6 +1017,7 @@ function make(t: MealioTheme) {
     bold: { ...f, fontWeight: '700', color: t.text },
     center: { textAlign: 'center' },
     loginNote: { ...f, fontSize: 13, color: t.muted, paddingHorizontal: 20, paddingBottom: 8 },
+    loginStore: { alignSelf: 'flex-start', paddingHorizontal: 20, paddingBottom: 10 },
     loginWeb: { flex: 1, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: t.border },
     steps: { gap: 18, marginVertical: 12 },
     stepRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },

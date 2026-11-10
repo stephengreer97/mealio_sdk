@@ -630,6 +630,17 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
     return recipes.length > 1 ? ui.tr('meals', <String, Object?>{'count': recipes.length}) : null;
   }
 
+  /// "Choose a different store" on the sign-in page: stop the cart that
+  /// asked for it (its sign-in goes with it) and show the stores. Not while
+  /// adding: an add's sign-in is for the cart already chosen.
+  void _storeFromSignIn() {
+    if (_adding) return;
+    _stop();
+    _login?.cancel();
+    _login = null;
+    unawaited(_openStores(_Phase.error));
+  }
+
   void _close() {
     // Every way of closing lands here. An add cannot be stopped, so the sheet
     // stays open, but a sign-in the add asked for can still be dismissed.
@@ -685,6 +696,26 @@ class _MealioCartFlowState extends State<MealioCartFlow> {
               style: t.style(size: 13, color: t.muted),
             ),
           ),
+          if (!_adding)
+            // Signed out of the saved store: pick another without signing in to it.
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
+                child: Semantics(
+                  button: true,
+                  child: GestureDetector(
+                    key: const ValueKey<String>('mealio-signin-different-store'),
+                    behavior: HitTestBehavior.opaque,
+                    onTap: _storeFromSignIn,
+                    child: Text(
+                      ui.tr('differentStore'),
+                      style: t.style(size: 13, weight: FontWeight.w600, color: t.accent),
+                    ),
+                  ),
+                ),
+              ),
+            ),
           Expanded(
             child: Container(
               decoration: BoxDecoration(border: Border(top: BorderSide(color: t.border, width: 0.5))),

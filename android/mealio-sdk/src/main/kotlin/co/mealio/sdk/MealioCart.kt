@@ -27,7 +27,7 @@ import kotlinx.coroutines.withContext
  * ```
  */
 object MealioCart {
-    const val SDK_VERSION = "0.6.0"
+    const val SDK_VERSION = "0.6.1"
 
     /** `io` runs the sign-outs' disk work: Dispatchers.IO, or a test's dispatcher (MealioTesting). */
     private class State(val client: MealioClient, val host: Host, val sessions: SessionStore, val release: () -> Unit, val io: CoroutineDispatcher)

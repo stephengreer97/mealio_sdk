@@ -254,6 +254,18 @@ internal class CartFlowModel(
         start(id)
     }
 
+    /**
+     * "Choose a different store" on the sign-in page: stop the cart that asked
+     * for it (its sign-in goes with it) and show the stores. Not while adding:
+     * an add's sign-in is for the cart already chosen.
+     */
+    fun storeFromSignIn() {
+        if (finished || adding) return
+        stop()
+        login.cancel()
+        openStores(Phase.ERROR)
+    }
+
     /** Try again, with the store as it stands now. */
     fun retry() {
         restarts = 0
