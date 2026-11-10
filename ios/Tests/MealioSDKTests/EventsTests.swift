@@ -242,8 +242,12 @@ final class EventsTests: XCTestCase {
     /// goes, and the stores show. Never while adding.
     @MainActor
     func testADifferentStoreFromSignInStopsTheCartAndShowsTheStores() async throws {
-        defer { reset(); StubURLProtocol.hangs = false }
-        StubURLProtocol.hangs = true
+        defer { reset() }
+        // Every request is answered (never left hanging into the next test):
+        // the stores, and location_required for any cart.
+        let stores = (200, jsonData(["stores": [["id": "heb", "name": "H-E-B", "via": "device"], ["id": "aldi", "name": "ALDI", "via": "device"]]]))
+        let location = problem("location_required", status: 409)
+        StubURLProtocol.handler = { req, _ in req.url?.path == "/api/v1/stores" ? stores : location }
         MealioCart.client = makeClient()
         let log = listen()
         let model = MealioFlowModel()
@@ -258,10 +262,14 @@ final class EventsTests: XCTestCase {
         XCTAssertNil(model.login)
         XCTAssertEqual(model.phase, .stores)
         XCTAssertEqual(model.sheetStep, .stores)
+        try await waitFor { model.stores?.count == 2 }
+        // The HEB cart's late answer changes nothing: it was stopped.
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(model.phase, .stores)
         model.pick("aldi")
         XCTAssertEqual(model.store, "aldi")
-        XCTAssertEqual(model.phase, .loading)
-        XCTAssertEqual(log.events, [.sheetOpened(recipes: 1), .signinShown(store: "heb"), .storePicked(store: "aldi")])
+        try await waitFor { model.phase == .location }
+        XCTAssertEqual(log.events, [.sheetOpened(recipes: 1), .signinShown(store: "heb"), .storePicked(store: "aldi"), .locationAsked(store: "aldi")])
 
         // Mid-add, a sign-in belongs to the add: the link does nothing.
         model.phase = .adding
