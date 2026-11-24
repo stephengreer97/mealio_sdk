@@ -141,7 +141,8 @@ void main() {
               'addItems_one': 'Añadir {count} a {store}',
               'a11yLeaveOut': 'Quitar {item}',
             },
-            child: MealioCartList(session: _session(), onAdd: () {}),
+            // Saffron is skipped, so the CTA adds rather than reviews.
+            child: MealioCartList(session: _session()..deselect('saffron'), onAdd: () {}),
           ),
         ),
       ));
@@ -158,7 +159,9 @@ void main() {
         strings: const <String, String>{'selectItems': 'From configure', 'total': 'Suma'},
       );
       addTearDown(() => MealioCart.configure(publishableKey: 'pk', sessionTokenProvider: () async => 't'));
-      final session = _session()..deselect('onion');
+      final session = _session()
+        ..deselect('onion')
+        ..deselect('saffron');
       await tester.pumpWidget(MaterialApp(home: Scaffold(body: MealioCartList(session: session, onAdd: () {}))));
       expect(find.text('From configure'), findsOneWidget);
       await tester.pumpWidget(MaterialApp(

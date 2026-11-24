@@ -5,7 +5,9 @@
 //
 // The list shows EVERY item, every time. Remembered products come back
 // pre-selected. Unchecking an item leaves it out of this run only: its
-// remembered choice stays for next time. There is no skip button.
+// remembered choice stays for next time. An item missing from the add (a
+// usual out of stock or gone, an item never chosen, one the store does not
+// have) must be picked or skipped ("Skip this time") before Add.
 
 #if canImport(SwiftUI) && canImport(UIKit) && canImport(WebKit)
 import Combine
@@ -918,70 +920,132 @@ public struct MealioCartList: View {
     public var body: some View {
         let est = cart.estimate()
         let selectable = cart.items.filter { $0.status != .unavailable }.count
-        return VStack(spacing: 0) {
-            if let location = cart.location {
-                locationRow(location)
-            }
-            HStack(spacing: 10) {
-                if let change = onChangeStore {
-                    Button(action: change) {
-                        HStack(spacing: 8) {
-                            Text(storeName)
-                                .font(t.font(13, .semibold))
-                                .foregroundColor(t.text)
-                                .lineLimit(1)
-                            Text(ui.tr(.change))
-                                .font(t.font(13, .semibold))
-                                .foregroundColor(t.accent)
+        // Every item missing from the add must be picked or skipped first, so
+        // no ingredient goes missing that the user did not choose to leave
+        // out. Until then the button takes them to the first one instead.
+        let undecided = cart.undecided()
+        return ScrollViewReader { proxy in
+            VStack(spacing: 0) {
+                if let location = cart.location {
+                    locationRow(location)
+                }
+                HStack(spacing: 10) {
+                    if let change = onChangeStore {
+                        Button(action: change) {
+                            HStack(spacing: 8) {
+                                Text(storeName)
+                                    .font(t.font(13, .semibold))
+                                    .foregroundColor(t.text)
+                                    .lineLimit(1)
+                                Text(ui.tr(.change))
+                                    .font(t.font(13, .semibold))
+                                    .foregroundColor(t.accent)
+                            }
+                            .padding(.horizontal, 12)
+                            .frame(minHeight: 36)
+                            .background(Capsule().fill(t.surface))
+                            .padding(.vertical, 4)
+                            .contentShape(Rectangle())
                         }
+                        .buttonStyle(.plain)
+                        .disabled(busy)
+                        .accessibilityLabel(ui.tr(.a11yChangeStore, ["store": storeName]))
+                    }
+                    Text(ui.tr(.selectedCount, ["count": String(est.count), "total": String(selectable)]))
+                        .font(t.font(14))
+                        .foregroundColor(t.muted)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 10)
+                // Said while any item has no saved product, which on a recipe's first
+                // cart is every item: the run where nothing on screen shows it yet.
+                if cart.showsRememberNote {
+                    Text(ui.tr(.rememberNote))
+                        .font(t.font(13, .medium))
+                        .foregroundColor(t.text)
+                        .lineSpacing(3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(t.surface))
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(t.border, lineWidth: 1))
                         .padding(.horizontal, 12)
-                        .frame(minHeight: 36)
-                        .background(Capsule().fill(t.surface))
-                        .padding(.vertical, 4)
+                        .padding(.bottom, 10)
+                        .accessibilityIdentifier("mealio-remember-note")
+                }
+                ScrollView {
+                    VStack(spacing: 10) {
+                        ForEach(cart.items) { item in
+                            MealioItemRow(cart: cart, item: item, t: t, storeName: storeName,
+                                          isOpen: open == item.key, disabled: busy,
+                                          onToggleOpen: {
+                                              withAnimation(.easeInOut(duration: 0.2)) {
+                                                  open = (open == item.key) ? nil : item.key
+                                              }
+                                          })
+                            .id(item.key)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 24)
+                }
+                footer(est, undecided: undecided, proxy: proxy)
+            }
+        }
+    }
+
+    /// Pantry and optional items left off by default, in recipe order. The
+    /// footer names them above Add every time, so leaving the salt off is
+    /// never a surprise, with one tap to add them.
+    var offByDefault: [CartItem] {
+        cart.uncheckedByDefault().compactMap { key in cart.items.first { $0.key == key } }
+    }
+
+    /// "Add them": tick each item left off by default that has a usual
+    /// product, with its remembered preference. One without a usual stays
+    /// named until the user picks one.
+    func addOffByDefault() {
+        guard !busy else { return }
+        for item in offByDefault {
+            guard let id = item.selectedId else { continue }
+            try? cart.select(key: item.key, productId: id, preferenceId: item.rememberedPreferenceId)
+            MealioCart.emit(.itemChecked(key: item.key))
+        }
+    }
+
+    private func offLine(_ off: [CartItem]) -> some View {
+        let names = off.map(\.ingredient).joined(separator: ", ")
+        return HStack(spacing: 12) {
+            Text(ui.tr(.notAddingList, ["items": names]))
+                .font(t.font(12))
+                .foregroundColor(t.muted)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if off.contains(where: { $0.selectedId != nil }) {
+                Button(action: addOffByDefault) {
+                    Text(ui.tr(.addThem))
+                        .font(t.font(14, .semibold))
+                        .foregroundColor(t.accent)
+                        .frame(minHeight: 44)
                         .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(busy)
-                    .accessibilityLabel(ui.tr(.a11yChangeStore, ["store": storeName]))
                 }
-                Text(ui.tr(.selectedCount, ["count": String(est.count), "total": String(selectable)]))
-                    .font(t.font(14))
-                    .foregroundColor(t.muted)
-                Spacer(minLength: 0)
+                .buttonStyle(.plain)
+                .disabled(busy)
+                .accessibilityLabel(ui.tr(.a11yAddThem, ["items": names]))
+                .accessibilityIdentifier("mealio-off-add")
             }
-            .padding(.horizontal, 20)
-            .padding(.bottom, 10)
-            // Said while any item has no saved product, which on a recipe's first
-            // cart is every item: the run where nothing on screen shows it yet.
-            if cart.showsRememberNote {
-                Text(ui.tr(.rememberNote))
-                    .font(t.font(13, .medium))
-                    .foregroundColor(t.text)
-                    .lineSpacing(3)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(t.surface))
-                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(t.border, lineWidth: 1))
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 10)
-                    .accessibilityIdentifier("mealio-remember-note")
-            }
-            ScrollView {
-                VStack(spacing: 10) {
-                    ForEach(cart.items) { item in
-                        MealioItemRow(cart: cart, item: item, t: t, storeName: storeName,
-                                      isOpen: open == item.key, disabled: busy,
-                                      onToggleOpen: {
-                                          withAnimation(.easeInOut(duration: 0.2)) {
-                                              open = (open == item.key) ? nil : item.key
-                                          }
-                                      })
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 24)
-            }
-            footer(est)
+        }
+        .padding(.bottom, 2)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("mealio-off-line")
+    }
+
+    /// Open the first item that needs a decision and scroll to it.
+    private func review(_ undecided: [String], proxy: ScrollViewProxy) {
+        guard let first = undecided.first else { return }
+        withAnimation(.easeInOut(duration: 0.2)) {
+            open = first
+            proxy.scrollTo(first, anchor: .top)
         }
     }
 
@@ -1011,14 +1075,28 @@ public struct MealioCartList: View {
         .accessibilityIdentifier("mealio-location")
     }
 
-    private func footer(_ est: CartEstimate) -> some View {
+    private func footer(_ est: CartEstimate, undecided: [String], proxy: ScrollViewProxy) -> some View {
+        let waiting = undecided.count
         // Off while a search runs: what the user is looking for may change the list.
-        let off = busy || est.count == 0 || cart.searching
-        let label = est.count > 0
-            ? ui.plural("addItems", est.count, ["store": storeName])
+        let off = busy || cart.searching || (est.count == 0 && waiting == 0)
+        let label = waiting > 0 ? ui.plural("reviewItems", waiting)
+            : est.count > 0 ? ui.plural("addItems", est.count, ["store": storeName])
             : ui.tr(.selectItems)
         let pending = cart.pendingPreferences().count
+        let leftOff = offByDefault
         return VStack(spacing: 8) {
+            if !leftOff.isEmpty {
+                offLine(leftOff)
+            }
+            if waiting > 0 {
+                Text(ui.plural("undecidedNote", waiting))
+                    .font(t.font(12))
+                    .foregroundColor(t.warnText)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.bottom, 6)
+                    .accessibilityIdentifier("mealio-undecided-note")
+            }
             if pending > 0 {
                 Text(ui.plural("pendingOptions", pending))
                     .font(t.font(12))
@@ -1046,7 +1124,10 @@ public struct MealioCartList: View {
                 }
                 .accessibilityElement(children: .combine)
             }
-            MealioCTA(t: t, title: label, busy: busy, enabled: !off, action: onAdd)
+            MealioCTA(t: t, title: label, busy: busy, enabled: !off, action: {
+                if waiting > 0 { review(undecided, proxy: proxy) } else { onAdd() }
+            })
+            .accessibilityIdentifier("mealio-list-cta")
         }
         .padding(.horizontal, 16)
         .padding(.top, 12)
@@ -1092,29 +1173,124 @@ struct MealioItemRow: View {
     }
 
     private var unavailableCard: some View {
-        HStack(spacing: 10) {
-            RoundedRectangle(cornerRadius: 7)
-                .strokeBorder(t.border, lineWidth: 2)
-                .frame(width: 24, height: 24)
-                .frame(width: 48, height: 48)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(item.ingredient)
-                    .font(t.font(12, .medium))
-                    .foregroundColor(t.muted)
-                    .lineLimit(1)
-                Text(ui.tr(.notFoundAt, ["store": storeName]))
-                    .font(t.font(14))
-                    .foregroundColor(t.muted)
+        let waiting = cart.needsDecision(item.key)
+        let skipped = isSkipped
+        return VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                RoundedRectangle(cornerRadius: 7)
+                    .strokeBorder(t.border, lineWidth: 2)
+                    .frame(width: 24, height: 24)
+                    .frame(width: 48, height: 48)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.ingredient)
+                        .font(t.font(12, .medium))
+                        .foregroundColor(t.muted)
+                        .lineLimit(1)
+                    Text(ui.tr(.notFoundAt, ["store": storeName]))
+                        .font(t.font(14))
+                        .foregroundColor(t.muted)
+                    if skipped {
+                        Text(ui.tr(.skippedThisTime))
+                            .font(t.font(12))
+                            .foregroundColor(t.muted)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 10)
+            .padding(.trailing, 6)
+            .accessibilityElement(children: .combine)
+
+            if waiting {
+                decideRow { skipButton }
+            }
+            if skipped {
+                decideRow { undoButton }
+            }
         }
-        .padding(.vertical, 10)
-        .padding(.trailing, 6)
         .background(t.background)
         .clipShape(cardShape)
-        .overlay(cardShape.strokeBorder(t.border, lineWidth: 1))
-        .accessibilityElement(children: .combine)
+        .overlay(cardShape.strokeBorder(waiting ? t.warnText : t.border, lineWidth: 1))
+    }
+
+    /// Left out with "Skip this time" (or unticked after a pick): not a usual
+    /// that starts out, so it says so and can be undone.
+    var isSkipped: Bool {
+        !cart.isSelected(item.key) && item.status != .remembered && !item.startUnchecked
+            && cart.isDeselected(item.key)
+    }
+
+    /// "Skip this time": leave the item out of this run, the same as unticking it.
+    func skip() {
+        guard !disabled else { return }
+        cart.deselect(key: item.key)
+        MealioCart.emit(.itemUnchecked(key: item.key))
+    }
+
+    /// Undo a skip: the item waits on the user again.
+    func undoSkip() {
+        guard !disabled else { return }
+        cart.undoDeselect(key: item.key)
+    }
+
+    private var skipButton: some View {
+        Button(action: skip) {
+            Text(ui.tr(.skipThisTime))
+                .font(t.font(14, .semibold))
+                .foregroundColor(t.warnText)
+                .padding(.horizontal, 12)
+                .frame(minHeight: 44)
+                .background(RoundedRectangle(cornerRadius: 8).fill(t.background))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .accessibilityLabel(ui.tr(.a11ySkip, ["item": item.ingredient]))
+        .accessibilityIdentifier("mealio-skip-\(item.key)")
+    }
+
+    private var undoButton: some View {
+        Button(action: undoSkip) {
+            Text(ui.tr(.undo))
+                .font(t.font(14, .semibold))
+                .foregroundColor(t.accent)
+                .padding(.horizontal, 12)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .accessibilityLabel(ui.tr(.a11yUndoSkip, ["item": item.ingredient]))
+        .accessibilityIdentifier("mealio-undo-skip-\(item.key)")
+    }
+
+    private var pickAnotherButton: some View {
+        Button(action: {
+            guard !disabled, !isOpen else { return }
+            onToggleOpen()
+        }) {
+            Text(ui.tr(.pickAnother))
+                .font(t.font(14, .semibold))
+                .foregroundColor(t.accent)
+                .padding(.horizontal, 12)
+                .frame(minHeight: 44)
+                .background(RoundedRectangle(cornerRadius: 8).fill(t.background))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .accessibilityIdentifier("mealio-pick-another-\(item.key)")
+    }
+
+    /// A row of decision buttons at the right of the card.
+    private func decideRow<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        HStack(spacing: 8) {
+            Spacer(minLength: 0)
+            content()
+        }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 10)
     }
 
     private var card: some View {
@@ -1123,6 +1299,8 @@ struct MealioItemRow: View {
         let options = cart.options(for: item.key)
         let shown = picked ?? (item.status == .remembered ? item.remembered : nil)
         let changeLabel = ui.tr(isOpen ? .done : ((on || item.status == .remembered) ? .change : .choose))
+        let waiting = cart.needsDecision(item.key)
+        let skipped = isSkipped
 
         return VStack(spacing: 0) {
             HStack(spacing: 10) {
@@ -1205,10 +1383,33 @@ struct MealioItemRow: View {
                 quantityRow(picked: picked)
             }
 
-            if item.status == .rememberedUnavailable && !on {
-                MealioWarnBox(t: t, text: rememberedUnavailableText)
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 12)
+            if item.status == .rememberedUnavailable && !on && !skipped {
+                VStack(alignment: .trailing, spacing: 8) {
+                    Text(rememberedUnavailableText)
+                        .font(t.font(13))
+                        .foregroundColor(t.warnText)
+                        .lineSpacing(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if waiting {
+                        HStack(spacing: 8) {
+                            if !isOpen { pickAnotherButton }
+                            skipButton
+                        }
+                    }
+                }
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: 10).fill(t.warnBackground))
+                .padding(.horizontal, 12)
+                .padding(.bottom, 12)
+            }
+
+            // An item never chosen: the same decision, without the warning.
+            if waiting && item.status == .choose {
+                decideRow { skipButton }
+            }
+            if skipped {
+                decideRow { undoButton }
             }
 
             if isOpen {
@@ -1217,7 +1418,7 @@ struct MealioItemRow: View {
         }
         .background(t.background)
         .clipShape(cardShape)
-        .overlay(cardShape.strokeBorder(isOpen ? t.muted : t.border, lineWidth: 1))
+        .overlay(cardShape.strokeBorder(waiting ? t.warnText : (isOpen ? t.muted : t.border), lineWidth: 1))
     }
 
     /// Sold by weight: the stepper is pounds, stepping through the store's
@@ -1287,6 +1488,7 @@ struct MealioItemRow: View {
             let parts: [String?] = [ui.price(p), p.id == item.remembered?.id ? ui.tr(.yourUsual) : nil]
             return parts.compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " \u{00B7} ")
         }
+        if isSkipped { return ui.tr(.skippedThisTime) }
         if item.startUnchecked { return ui.tr(.pantryHint) }
         switch item.status {
         case .remembered: return ui.tr(.notAddingThisTime)

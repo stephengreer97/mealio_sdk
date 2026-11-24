@@ -88,6 +88,8 @@ class CartSession internal constructor(
     private data class Pick(val productId: String, val preferenceId: String?)
 
     private val picks = LinkedHashMap<String, Pick>()
+    /** Items the user chose to leave out of this run ([deselect]), so they are not waiting on a decision. */
+    private val leftOut = HashSet<String>()
     private val extra = HashMap<String, List<Product>>()
     private val qty = HashMap<String, Int>()
     private val lb = HashMap<String, Double>()
@@ -278,13 +280,60 @@ class CartSession internal constructor(
             throw MealioException("unknown_product", "Product $productId was not offered for $key")
         }
         picks[key] = Pick(productId, preferenceId)
+        leftOut.remove(key)
     }
 
-    /** Leave the item out of this run. Its remembered choice is kept on the server. */
+    /**
+     * Leave the item out of this run. Its remembered choice is kept on the
+     * server. Works on an item with nothing selected too ("Skip this time"):
+     * that settles it, so it no longer needs a decision (see [needsDecision]).
+     */
     @Synchronized
     fun deselect(key: String) {
         picks.remove(key)
+        leftOut.add(key)
     }
+
+    /** True when the user left the item out of this run with [deselect]. */
+    @Synchronized
+    fun isDeselected(key: String): Boolean = key in leftOut && key !in picks
+
+    /** Undo [deselect] on an item with nothing selected: it waits on the user again. */
+    @Synchronized
+    fun undoDeselect(key: String) {
+        leftOut.remove(key)
+    }
+
+    /**
+     * True when the item is missing from the add and the user has not said so:
+     * nothing selected, not deselected, and not a remembered product (which
+     * starts selected) or a startUnchecked one (pantry, optional), which are
+     * meant to start out. That is a usual that is out of stock or gone, an item
+     * never chosen, and an item the store does not have.
+     *
+     * The drop-in holds Add until no item needs a decision, so nobody finds an
+     * ingredient missing at pickup that they never chose to leave out. Your own
+     * UI should do the same: pick a product, or [deselect] to skip it.
+     */
+    @Synchronized
+    fun needsDecision(key: String): Boolean {
+        val item = find(key) ?: return false
+        if (item.startUnchecked || item.status == ItemStatus.REMEMBERED) return false
+        return key !in picks && key !in leftOut
+    }
+
+    /**
+     * Keys of the startUnchecked items (pantry, optional) that are not selected,
+     * in recipe order. The drop-in names them above Add every time, so nobody
+     * misses that salt was left off on purpose, with one tap to add them: select
+     * each one's `item.selectedId` (the usual) where it has one.
+     */
+    @Synchronized
+    fun uncheckedByDefault(): List<String> = items.filter { it.startUnchecked && it.key !in picks }.map { it.key }
+
+    /** Keys of the items that need a decision, in recipe order. */
+    @Synchronized
+    fun undecided(): List<String> = items.filter { needsDecision(it.key) }.map { it.key }
 
     /**
      * Take the user's picks from an earlier cart, after a failed add. Works by
@@ -312,7 +361,7 @@ class CartSession internal constructor(
             items.associate {
                 val productId = from.picks[it.key]?.productId
                 it.key to Old(from.find(it.key) != null, productId, from.picks[it.key]?.preferenceId, from.qty[it.key], from.lb[it.key],
-                    productId?.let { id -> from.foundBy[it.key]?.get(id) })
+                    productId?.let { id -> from.foundBy[it.key]?.get(id) }, it.key in from.leftOut)
             }
         }
         val again = ArrayList<Pair<String, String>>()
@@ -321,7 +370,12 @@ class CartSession internal constructor(
                 val o = old[it.key] ?: continue
                 if (!o.known) continue
                 val productId = o.productId
-                if (productId == null) { deselect(it.key); continue }
+                // Unselected there, unselected here; deselected only if the user did so.
+                if (productId == null) {
+                    picks.remove(it.key)
+                    if (o.leftOut) leftOut.add(it.key) else leftOut.remove(it.key)
+                    continue
+                }
                 if (restoreOne(it.key, o)) continue
                 // Not offered here. Found with search there: that search again here.
                 if (o.query != null) again.add(it.key to o.query)
@@ -340,7 +394,7 @@ class CartSession internal constructor(
         }
     }
 
-    private class Old(val known: Boolean, val productId: String?, val pref: String?, val qty: Int?, val lb: Double?, val query: String?)
+    private class Old(val known: Boolean, val productId: String?, val pref: String?, val qty: Int?, val lb: Double?, val query: String?, val leftOut: Boolean)
 
     /** Select the old pick for `key` if this cart offers it. False (nothing changed) when it does not. */
     private fun restoreOne(key: String, o: Old): Boolean {

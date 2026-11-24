@@ -150,6 +150,8 @@ void main() {
       final addeds = <AddResult>[];
       final events = <MealioEvent>[];
       await _open(tester, srv, events: events, onClose: closes.add, onAdded: addeds.add);
+      // "Skip this time" on garlic, the item the cart leaves unchosen, so Add can go.
+      await skipUndecided(tester, <String>['garlic']);
       await tester.tap(find.text('Add 1 item to H-E-B'));
       await tester.pump();
       // The X, the back button and the scrim all leave it open.
@@ -176,6 +178,7 @@ void main() {
       final srv = _Server()..addGate = Completer<void>();
       final events = <MealioEvent>[];
       await _open(tester, srv, events: events);
+      await skipUndecided(tester, <String>['garlic']);
       final add = find.text('Add 1 item to H-E-B');
       await tester.tap(add);
       await tester.tap(add, warnIfMissed: false);
@@ -188,6 +191,7 @@ void main() {
     testWidgets('a failed add says to check the cart, and Try again keeps the picks', (WidgetTester tester) async {
       final srv = _Server()..addFails = true;
       await _open(tester, srv);
+      await tester.ensureVisible(find.text('Garlic Bulb'));
       await tester.tap(find.text('Garlic Bulb'));
       await tester.pump();
       expect(find.text('2 of 2 selected'), findsOneWidget);
@@ -206,6 +210,7 @@ void main() {
       final srv = _Server()..searchGate = Completer<void>();
       final events = <MealioEvent>[];
       await _open(tester, srv, events: events);
+      await skipUndecided(tester, <String>['garlic']);
       // The garlic row is open; search for something else there.
       await tester.enterText(find.byType(TextField).first, 'red onion');
       await tester.testTextInput.receiveAction(TextInputAction.search);
@@ -224,6 +229,7 @@ void main() {
       final srv = _Server();
       final events = <MealioEvent>[];
       await _open(tester, srv, events: events);
+      await tester.ensureVisible(find.text('Garlic Bulb'));
       await tester.tap(find.text('Garlic Bulb'));
       await tester.pump();
       expect(events.whereType<MealioItemChecked>().map((MealioItemChecked e) => e.key), <String>['garlic']);

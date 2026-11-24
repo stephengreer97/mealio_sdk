@@ -1,7 +1,10 @@
 // The list screen: every item, every time. Remembered products come back
 // pre-selected. Unchecking an item leaves it out of this run only: its
-// remembered choice stays for next time. There is no skip button. Mirrors
-// CartList in packages/react-native/src/MealioCartFlow.tsx.
+// remembered choice stays for next time. An item missing from the add (a
+// usual out of stock, one never chosen, one the store does not have) must be
+// picked or skipped ("Skip this time") before Add: until then the button
+// reviews the first such item instead. Mirrors CartList in
+// packages/react-native/src/MealioCartFlow.tsx.
 
 import 'package:flutter/material.dart';
 
@@ -73,6 +76,21 @@ class MealioCartList extends StatefulWidget {
 class _MealioCartListState extends State<MealioCartList> {
   String? _open;
 
+  /// One per row, so the CTA can scroll to the item that needs a decision.
+  final Map<String, GlobalKey> _rowKeys = <String, GlobalKey>{};
+
+  GlobalKey _rowKey(String key) => _rowKeys.putIfAbsent(key, () => GlobalKey(debugLabel: 'mealio-row-$key'));
+
+  /// Open the first item that needs a decision and bring it into view.
+  void _review(String key) {
+    setState(() => _open = key);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final ctx = _rowKeys[key]?.currentContext;
+      if (ctx == null || !ctx.mounted) return;
+      Scrollable.ensureVisible(ctx, duration: const Duration(milliseconds: 250), curve: Curves.easeOut);
+    });
+  }
+
   @override
   void initState() {
     super.initState();
@@ -100,9 +118,22 @@ class _MealioCartListState extends State<MealioCartList> {
           builder: (BuildContext context, Widget? _) {
             final est = s.estimate();
             final selectable = s.items.where((CartItem i) => i.status != ItemStatus.unavailable).length;
+            // Every item missing from the add must be picked or skipped first,
+            // so no ingredient goes missing that the user did not choose to
+            // leave out. Until then the button takes them to the first one.
+            final undecided = s.undecided();
+            final waiting = undecided.length;
             // Off while a search runs: the add would wait behind it on the page.
-            final canAdd = !widget.busy && est.count > 0 && widget.onAdd != null && !s.searching;
+            final canTap =
+                !widget.busy && (est.count > 0 || waiting > 0) && widget.onAdd != null && !s.searching;
             final pending = s.pendingPreferences().length;
+            // Pantry and optional items start unchecked. Name them above Add
+            // every time, so leaving the salt off is never a surprise, with
+            // one tap to add them.
+            final offKeys = s.uncheckedByDefault().toSet();
+            final offByDefault = s.items.where((CartItem i) => offKeys.contains(i.key)).toList();
+            final offNames = offByDefault.map((CartItem i) => i.ingredient).join(', ');
+            final canAddOff = offByDefault.any((CartItem i) => i.selectedId != null && i.selectedId!.isNotEmpty);
             final location = s.location;
             return Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -141,27 +172,46 @@ class _MealioCartListState extends State<MealioCartList> {
                     ),
                   ),
                 Expanded(
-                  child: ListView(
+                  // Every row is built (not a lazy ListView), so the CTA can
+                  // scroll to any of them.
+                  child: SingleChildScrollView(
                     keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.manual,
                     padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
-                    children: gapped(<Widget>[
-                      for (final CartItem it in s.items)
-                        _ItemRow(
-                          key: ValueKey<String>(it.key),
-                          theme: t,
-                          session: s,
-                          item: it,
-                          storeName: storeName,
-                          open: _open == it.key,
-                          disabled: widget.busy,
-                          onToggleOpen: () => setState(() => _open = _open == it.key ? null : it.key),
-                        ),
-                    ], 10),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: gapped(<Widget>[
+                        for (final CartItem it in s.items)
+                          KeyedSubtree(
+                            key: _rowKey(it.key),
+                            child: _ItemRow(
+                              key: ValueKey<String>(it.key),
+                              theme: t,
+                              session: s,
+                              item: it,
+                              storeName: storeName,
+                              open: _open == it.key,
+                              disabled: widget.busy,
+                              onToggleOpen: () => setState(() => _open = _open == it.key ? null : it.key),
+                              onOpen: () => setState(() => _open = it.key),
+                            ),
+                          ),
+                      ], 10),
+                    ),
                   ),
                 ),
                 Footer(
                   theme: t,
                   children: <Widget>[
+                    if (offByDefault.isNotEmpty) _offLine(t, ui, offByDefault, offNames, canAddOff),
+                    if (waiting > 0)
+                      Padding(
+                        key: const ValueKey<String>('mealio-undecided-note'),
+                        padding: const EdgeInsets.only(bottom: 6),
+                        child: Text(
+                          ui.plural('undecidedNote', waiting),
+                          style: t.style(size: 12, height: 17 / 12, color: t.warnText),
+                        ),
+                      ),
                     if (pending > 0)
                       Padding(
                         padding: const EdgeInsets.only(bottom: 6),
@@ -189,12 +239,19 @@ class _MealioCartListState extends State<MealioCartList> {
                         ],
                       ),
                     Cta(
+                      key: const ValueKey<String>('mealio-list-cta'),
                       theme: t,
                       busy: widget.busy,
-                      label: est.count > 0
-                          ? ui.plural('addItems', est.count, <String, Object?>{'store': storeName})
-                          : ui.tr('selectItems'),
-                      onTap: canAdd ? widget.onAdd : null,
+                      label: waiting > 0
+                          ? ui.plural('reviewItems', waiting)
+                          : est.count > 0
+                              ? ui.plural('addItems', est.count, <String, Object?>{'store': storeName})
+                              : ui.tr('selectItems'),
+                      onTap: !canTap
+                          ? null
+                          : waiting > 0
+                              ? () => _review(undecided.first)
+                              : widget.onAdd,
                     ),
                   ],
                 ),
@@ -208,6 +265,54 @@ class _MealioCartListState extends State<MealioCartList> {
 }
 
 extension on _MealioCartListState {
+  /// "Not adding: salt, olive oil." and, when any has a usual, "Add them".
+  Widget _offLine(MealioTheme t, MealioUi ui, List<CartItem> off, String names, bool canAdd) {
+    final small = t.style(size: 12, height: 17 / 12, color: t.muted);
+    void addOff() {
+      if (widget.busy) return;
+      final s = widget.session;
+      for (final CartItem i in off) {
+        final id = i.selectedId;
+        if (id == null || id.isEmpty) continue;
+        s.select(i.key, id, preferenceId: i.rememberedPreferenceId);
+        ui.emit(MealioItemChecked(key: i.key));
+      }
+    }
+
+    final onTap = widget.busy ? null : addOff;
+    return Padding(
+      key: const ValueKey<String>('mealio-off-line'),
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        children: <Widget>[
+          Expanded(child: Text(ui.tr('notAddingList', <String, Object?>{'items': names}), style: small)),
+          if (canAdd) ...<Widget>[
+            const SizedBox(width: 12),
+            Semantics(
+              key: const ValueKey<String>('mealio-off-add'),
+              button: true,
+              enabled: onTap != null,
+              label: ui.tr('a11yAddThem', <String, Object?>{'items': names}),
+              onTap: onTap,
+              excludeSemantics: true,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: onTap,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(minHeight: 44, minWidth: 44),
+                  child: Center(
+                    widthFactor: 1,
+                    child: Text(ui.tr('addThem'), style: t.style(size: 14, weight: FontWeight.w600, color: t.accent)),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   Widget _locationRow(MealioTheme t, MealioUi ui, StoreLocation location) {
     final small = t.style(size: 12, height: 17 / 12, color: t.muted);
     final onTap = widget.busy ? null : widget.onChangeLocation;
@@ -290,6 +395,7 @@ class _ItemRow extends StatefulWidget {
     required this.open,
     required this.disabled,
     required this.onToggleOpen,
+    required this.onOpen,
   });
 
   final MealioTheme theme;
@@ -299,6 +405,9 @@ class _ItemRow extends StatefulWidget {
   final bool open;
   final bool disabled;
   final VoidCallback onToggleOpen;
+
+  /// Opens the row (Pick another), never closes it.
+  final VoidCallback onOpen;
 
   @override
   State<_ItemRow> createState() => _ItemRowState();
@@ -337,6 +446,61 @@ class _ItemRowState extends State<_ItemRow> {
     }
   }
 
+  /// "Skip this time": leave the item out of this run. The same event as
+  /// unticking it.
+  void _skip() {
+    if (widget.disabled) return;
+    _s.deselect(_item.key);
+    MealioUi.of(context).emit(MealioItemUnchecked(key: _item.key));
+  }
+
+  void _undoSkip() {
+    if (widget.disabled) return;
+    _s.undoDeselect(_item.key);
+  }
+
+  Widget _decideButton(MealioTheme t, String testKey, String text, String? a11y, Color color, VoidCallback onTap) {
+    final enabled = !widget.disabled;
+    return Semantics(
+      key: ValueKey<String>(testKey),
+      button: true,
+      enabled: enabled,
+      label: a11y ?? text,
+      onTap: enabled ? onTap : null,
+      excludeSemantics: true,
+      child: Material(
+        color: t.background,
+        borderRadius: BorderRadius.circular(8),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: enabled ? onTap : null,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 40, minWidth: 44),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Center(
+                widthFactor: 1,
+                child: Text(text, style: t.style(size: 14, weight: FontWeight.w600, color: color)),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _skipButton(MealioTheme t, MealioUi ui) => _decideButton(t, 'mealio-skip-${_item.key}', ui.tr('skipThisTime'),
+      ui.tr('a11ySkip', <String, Object?>{'item': _item.ingredient}), t.warnText, _skip);
+
+  Widget _undoButton(MealioTheme t, MealioUi ui) => _decideButton(t, 'mealio-undo-skip-${_item.key}', ui.tr('undo'),
+      ui.tr('a11yUndoSkip', <String, Object?>{'item': _item.ingredient}), t.accent, _undoSkip);
+
+  /// Buttons under the row, right-aligned, outside any warning box.
+  Widget _decideRow(List<Widget> buttons) => Padding(
+        padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+        child: Wrap(alignment: WrapAlignment.end, spacing: 8, runSpacing: 8, children: buttons),
+      );
+
   void _pick(Product p, [String? preferenceId]) {
     if (widget.disabled) return;
     if (!_s.isSelected(_item.key)) MealioUi.of(context).emit(MealioItemChecked(key: _item.key));
@@ -370,10 +534,16 @@ class _ItemRowState extends State<_ItemRow> {
     final item = _item;
     final storeName = widget.storeName;
     final notFound = ui.tr('notFoundAt', <String, Object?>{'store': storeName});
+    final on = _s.isSelected(item.key);
+    final waiting = _s.needsDecision(item.key);
+    // Left out with "Skip this time" (or unticked after a pick): not a usual
+    // that starts out, so it says so and can be undone.
+    final skipped =
+        !on && item.status != ItemStatus.remembered && item.startUnchecked != true && _s.isDeselected(item.key);
     final cardDecoration = BoxDecoration(
       color: t.background,
       borderRadius: BorderRadius.circular(t.radius + 2),
-      border: Border.all(color: widget.open ? t.muted : t.border),
+      border: Border.all(color: waiting ? t.warnText : (widget.open ? t.muted : t.border)),
     );
     final ingredient = Text(item.ingredient,
         maxLines: 1, overflow: TextOverflow.ellipsis, style: t.style(size: 12, weight: FontWeight.w500, color: t.muted));
@@ -387,34 +557,44 @@ class _ItemRowState extends State<_ItemRow> {
           );
 
     if (item.status == ItemStatus.unavailable) {
-      return Semantics(
-        container: true,
-        label: '${item.ingredient}, $notFound',
-        excludeSemantics: true,
-        child: Container(
-          decoration: cardDecoration,
-          padding: const EdgeInsets.symmetric(vertical: 10),
-          child: Row(
-            children: <Widget>[
-              SizedBox(width: 48, height: 48, child: Center(child: _box(t, on: false, disabled: true))),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+      final skippedText = ui.tr('skippedThisTime');
+      return Container(
+        decoration: cardDecoration,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            Semantics(
+              container: true,
+              label: skipped ? '${item.ingredient}, $notFound, $skippedText' : '${item.ingredient}, $notFound',
+              excludeSemantics: true,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 10),
+                child: Row(
                   children: <Widget>[
-                    ingredient,
-                    if (forText != null) forText,
-                    Text(notFound, style: t.style(size: 14, weight: FontWeight.w600, color: t.muted)),
+                    SizedBox(width: 48, height: 48, child: Center(child: _box(t, on: false, disabled: true))),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: <Widget>[
+                          ingredient,
+                          if (forText != null) forText,
+                          Text(notFound, style: t.style(size: 14, weight: FontWeight.w600, color: t.muted)),
+                          if (skipped) Text(skippedText, style: t.style(size: 12, height: 17 / 12, color: t.muted)),
+                        ],
+                      ),
+                    ),
                   ],
                 ),
               ),
-            ],
-          ),
+            ),
+            if (waiting) _decideRow(<Widget>[_skipButton(t, ui)]),
+            if (skipped) _decideRow(<Widget>[_undoButton(t, ui)]),
+          ],
         ),
       );
     }
 
-    final on = _s.isSelected(item.key);
     final picked = _s.selected(item.key);
     final options = _s.options(item.key);
     final shown = picked ?? (item.status == ItemStatus.remembered ? item.remembered : null);
@@ -426,6 +606,8 @@ class _ItemRowState extends State<_ItemRow> {
         priceText(picked, ui),
         picked.id == rememberedId ? ui.tr('yourUsual') : null,
       ].whereType<String>().where((String x) => x.isNotEmpty).join(' · ');
+    } else if (skipped) {
+      meta = ui.tr('skippedThisTime');
     } else if (item.startUnchecked == true) {
       meta = ui.tr('pantryHint');
     } else if (item.status == ItemStatus.remembered) {
@@ -530,7 +712,7 @@ class _ItemRowState extends State<_ItemRow> {
 
     if (on && picked != null) children.add(_quantityRow(t, ui, picked));
 
-    if (item.status == ItemStatus.rememberedUnavailable && !on) {
+    if (item.status == ItemStatus.rememberedUnavailable && !on && !skipped) {
       final r = item.remembered;
       children.add(WarnBox(
         theme: t,
@@ -539,8 +721,20 @@ class _ItemRowState extends State<_ItemRow> {
             ? ui.tr(item.reason == 'not_found' ? 'usualNotAvailableNamed' : 'usualOutNamed',
                 <String, Object?>{'name': r.name})
             : ui.tr(item.reason == 'not_found' ? 'usualNotAvailable' : 'usualOut'),
+        actions: waiting
+            ? <Widget>[
+                if (!widget.open)
+                  _decideButton(t, 'mealio-pick-another-${item.key}', ui.tr('pickAnother'), null, t.accent,
+                      widget.onOpen),
+                _skipButton(t, ui),
+              ]
+            : null,
       ));
     }
+
+    // An item never chosen: the same decision, without the warning.
+    if (waiting && item.status == ItemStatus.choose) children.add(_decideRow(<Widget>[_skipButton(t, ui)]));
+    if (skipped) children.add(_decideRow(<Widget>[_undoButton(t, ui)]));
 
     if (widget.open) children.add(_expanded(t, ui, picked, options, rememberedId, storeName));
 

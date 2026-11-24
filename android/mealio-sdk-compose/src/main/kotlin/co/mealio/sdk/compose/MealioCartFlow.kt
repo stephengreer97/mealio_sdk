@@ -75,6 +75,8 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
@@ -586,6 +588,39 @@ fun MealioCartList(
     val est = cart.estimate()
     val selectable = cart.items.count { it.status != ItemStatus.UNAVAILABLE }
     val location = cart.cart.location
+    // Every item missing from the add must be picked or skipped first, so no
+    // ingredient goes missing that the user did not choose to leave out. Until
+    // then the button takes them to the first one instead of adding.
+    val undecided = cart.undecided()
+    val waiting = undecided.size
+    val listScroll = rememberScrollState()
+    val listScope = rememberCoroutineScope()
+    /** Each row's top inside the scrolling list, in px, for the Review button. */
+    val rowY = remember(cart) { HashMap<String, Int>() }
+    val gap = with(LocalDensity.current) { 8.dp.toPx() }.toInt()
+    val ctaOff = busy || cart.searching || (est.count == 0 && waiting == 0)
+    // Pantry and optional items start unchecked. Name them above Add every time,
+    // so leaving the salt off is never a surprise, with one tap to add them.
+    val offByDefault = cart.uncheckedByDefault().mapNotNull { k -> cart.items.firstOrNull { i -> i.key == k } }
+    val offNames = offByDefault.joinToString(", ") { i -> i.ingredient }
+    val canAddOff = offByDefault.any { i -> i.selectedId != null }
+    val addOff: () -> Unit = addOff@{
+        if (busy) return@addOff
+        for (i in offByDefault) {
+            val id = i.selectedId ?: continue
+            // A usual this cart does not offer stays off, as the row's own tick would leave it.
+            try { cart.select(i.key, id, i.rememberedPreferenceId) } catch (e: MealioException) { continue }
+            ui.emit(MealioEvent.ItemChecked(i.key))
+        }
+        bump()
+    }
+    val onCta: () -> Unit = {
+        if (waiting == 0) onAdd() else {
+            val first = undecided[0]
+            open = first
+            rowY[first]?.let { y -> listScope.launch { listScroll.animateScrollTo(maxOf(0, y - gap)) } }
+        }
+    }
 
     Column(modifier.fillMaxWidth()) {
         if (location != null) {
@@ -661,19 +696,23 @@ fun MealioCartList(
             Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(listScroll)
                 .padding(start = 16.dp, end = 16.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             for (it in cart.items) {
                 key(it.key) {
-                    ItemRow(
-                        t, cart, it, storeName, version,
-                        open = open == it.key,
-                        onToggleOpen = { open = if (open == it.key) null else it.key },
-                        onChange = bump,
-                        disabled = busy,
-                    )
+                    val rowKey = it.key
+                    Box(Modifier.fillMaxWidth().onGloballyPositioned { c -> rowY[rowKey] = c.positionInParent().y.toInt() }) {
+                        ItemRow(
+                            t, cart, it, storeName, version,
+                            open = open == it.key,
+                            onToggleOpen = { open = if (open == it.key) null else it.key },
+                            onOpen = { open = it.key },
+                            onChange = bump,
+                            disabled = busy,
+                        )
+                    }
                 }
             }
         }
@@ -682,6 +721,38 @@ fun MealioCartList(
             Modifier.fillMaxWidth().background(t.background).padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            if (offByDefault.isNotEmpty()) {
+                Row(
+                    Modifier.fillMaxWidth().padding(bottom = 8.dp).testTag("mealio-off-line"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Text(
+                        ui.tr("notAddingList", "items" to offNames),
+                        style = t.ts(12, color = t.muted, lineHeight = 17),
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (canAddOff) {
+                        val addThemLabel = ui.tr("a11yAddThem", "items" to offNames)
+                        Text(
+                            ui.tr("addThem"),
+                            style = t.ts(14, FontWeight.SemiBold, t.accent),
+                            modifier = Modifier
+                                .clickable(enabled = !busy, role = Role.Button, onClick = addOff)
+                                .semantics { contentDescription = addThemLabel }
+                                .testTag("mealio-off-add")
+                                .padding(8.dp),
+                        )
+                    }
+                }
+            }
+            if (waiting > 0) {
+                Text(
+                    ui.plural("undecidedNote", waiting),
+                    style = t.ts(12, color = t.warnText, lineHeight = 17),
+                    modifier = Modifier.padding(bottom = 6.dp).testTag("mealio-undecided-note"),
+                )
+            }
             val pending = cart.pendingPreferences().size
             if (pending > 0) {
                 Text(
@@ -700,13 +771,13 @@ fun MealioCartList(
                 }
             }
             // Off while a search runs, so the add never waits behind it.
-            val off = busy || est.count == 0 || cart.searching
-            Cta(t, enabled = !off, onClick = onAdd, modifier = Modifier.alpha(if (off) 0.5f else 1f)) {
+            Cta(t, enabled = !ctaOff, onClick = onCta, modifier = Modifier.alpha(if (ctaOff) 0.5f else 1f).testTag("mealio-list-cta")) {
                 if (busy) {
                     CircularProgressIndicator(Modifier.size(24.dp), color = t.onAccent, strokeWidth = 2.5.dp)
                 } else {
                     Text(
-                        if (est.count > 0) ui.plural("addItems", est.count, "store" to storeName) else ui.tr("selectItems"),
+                        if (waiting > 0) ui.plural("reviewItems", waiting)
+                        else if (est.count > 0) ui.plural("addItems", est.count, "store" to storeName) else ui.tr("selectItems"),
                         style = t.ts(16, FontWeight.Bold, t.onAccent),
                     )
                 }
@@ -763,6 +834,7 @@ private fun ItemRow(
     @Suppress("UNUSED_PARAMETER") version: Int,
     open: Boolean,
     onToggleOpen: () -> Unit,
+    onOpen: () -> Unit,
     onChange: () -> Unit,
     disabled: Boolean,
 ) {
@@ -776,9 +848,29 @@ private fun ItemRow(
     val options = cart.options(item.key)
     val shown = picked ?: (if (item.status == ItemStatus.REMEMBERED) item.remembered else null)
     val cardShape = RoundedCornerShape(t.radius + 2.dp)
+    val waiting = cart.needsDecision(item.key)
+    // Left out with "Skip this time" (or unticked after a pick): not a usual
+    // that starts out, so it says so and can be undone.
+    val skipped = !on && item.status != ItemStatus.REMEMBERED && !item.startUnchecked && cart.isDeselected(item.key)
+
+    fun skip() {
+        if (disabled) return
+        cart.deselect(item.key)
+        ui.emit(MealioEvent.ItemUnchecked(item.key))
+        onChange()
+    }
+
+    fun undoSkip() {
+        if (disabled) return
+        cart.undoDeselect(item.key)
+        onChange()
+    }
+
+    val skipLabel = ui.tr("a11ySkip", "item" to item.ingredient)
+    val undoLabel = ui.tr("a11yUndoSkip", "item" to item.ingredient)
 
     if (item.status == ItemStatus.UNAVAILABLE) {
-        Column(Modifier.fillMaxWidth().clip(cardShape).background(t.background).border(1.dp, t.border, cardShape)) {
+        Column(Modifier.fillMaxWidth().clip(cardShape).background(t.background).border(1.dp, if (waiting) t.warnText else t.border, cardShape)) {
             Row(
                 Modifier.padding(top = 10.dp, bottom = 10.dp, end = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -790,6 +882,17 @@ private fun ItemRow(
                 Column(Modifier.weight(1f)) {
                     Text(item.ingredient, style = t.ts(12, FontWeight.Medium, t.muted), maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(ui.tr("notFoundAt", "store" to storeName), style = t.ts(14, color = t.muted))
+                    if (skipped) Text(ui.tr("skippedThisTime"), style = t.ts(12, color = t.muted, lineHeight = 17))
+                }
+            }
+            if (waiting) {
+                DecideRow(bare = true) {
+                    DecideButton(t, ui.tr("skipThisTime"), t.warnText, skipLabel, !disabled, "mealio-skip-${item.key}") { skip() }
+                }
+            }
+            if (skipped) {
+                DecideRow(bare = true) {
+                    DecideButton(t, ui.tr("undo"), t.accent, undoLabel, !disabled, "mealio-undo-skip-${item.key}") { undoSkip() }
                 }
             }
         }
@@ -851,6 +954,7 @@ private fun ItemRow(
             priceText(picked, ui).takeIf { it.isNotEmpty() },
             if (picked.id == item.remembered?.id) ui.tr("yourUsual") else null,
         ).joinToString(" · ")
+        skipped -> ui.tr("skippedThisTime")
         item.startUnchecked -> ui.tr("pantryHint")
         item.status == ItemStatus.REMEMBERED -> ui.tr("notAddingThisTime")
         item.status == ItemStatus.REMEMBERED_UNAVAILABLE -> ui.tr("usualOutOfStock")
@@ -860,7 +964,8 @@ private fun ItemRow(
     val rowAction = ui.tr(if (open) "done" else if (on || item.status == ItemStatus.REMEMBERED) "change" else "choose")
 
     Column(
-        Modifier.fillMaxWidth().clip(cardShape).background(t.background).border(1.dp, if (open) t.muted else t.border, cardShape),
+        Modifier.fillMaxWidth().clip(cardShape).background(t.background)
+            .border(1.dp, if (waiting) t.warnText else if (open) t.muted else t.border, cardShape),
     ) {
         Row(
             Modifier.padding(top = 10.dp, bottom = 10.dp, end = 6.dp),
@@ -966,12 +1071,35 @@ private fun ItemRow(
             }
         }
 
-        if (item.status == ItemStatus.REMEMBERED_UNAVAILABLE && !on) {
+        if (item.status == ItemStatus.REMEMBERED_UNAVAILABLE && !on && !skipped) {
             val notFound = item.reason == "not_found"
             val usual = item.remembered
             val warning = if (usual != null) ui.tr(if (notFound) "usualNotAvailableNamed" else "usualOutNamed", "name" to usual.name)
             else ui.tr(if (notFound) "usualNotAvailable" else "usualOut")
-            WarnBox(t, warning, Modifier.padding(start = 12.dp, end = 12.dp, bottom = 12.dp))
+            WarnBox(t, warning, Modifier.padding(start = 12.dp, end = 12.dp, bottom = 12.dp)) {
+                if (waiting) {
+                    DecideRow(bare = false) {
+                        if (!open) {
+                            DecideButton(t, ui.tr("pickAnother"), t.accent, null, !disabled, "mealio-pick-another-${item.key}") {
+                                if (!disabled) onOpen()
+                            }
+                        }
+                        DecideButton(t, ui.tr("skipThisTime"), t.warnText, skipLabel, !disabled, "mealio-skip-${item.key}") { skip() }
+                    }
+                }
+            }
+        }
+
+        // An item never chosen: the same decision, without the warning.
+        if (waiting && item.status == ItemStatus.CHOOSE) {
+            DecideRow(bare = true) {
+                DecideButton(t, ui.tr("skipThisTime"), t.warnText, skipLabel, !disabled, "mealio-skip-${item.key}") { skip() }
+            }
+        }
+        if (skipped) {
+            DecideRow(bare = true) {
+                DecideButton(t, ui.tr("undo"), t.accent, undoLabel, !disabled, "mealio-undo-skip-${item.key}") { undoSkip() }
+            }
         }
 
         if (open) {
@@ -1084,9 +1212,38 @@ private fun ItemRow(
 }
 
 @Composable
-private fun WarnBox(t: MealioTheme, text: String, modifier: Modifier = Modifier) {
-    Box(modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(t.warnBackground).padding(12.dp)) {
+private fun WarnBox(t: MealioTheme, text: String, modifier: Modifier = Modifier, extra: @Composable () -> Unit = {}) {
+    Column(modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(t.warnBackground).padding(12.dp)) {
         Text(text, style = t.ts(13, color = t.warnText, lineHeight = 18))
+        extra()
+    }
+}
+
+/** The buttons that settle a missing item: Pick another, Skip this time, Undo. Right-aligned. */
+@Composable
+private fun DecideRow(bare: Boolean, content: @Composable () -> Unit) {
+    Row(
+        if (bare) Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 10.dp)
+        else Modifier.fillMaxWidth().padding(top = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+    ) { content() }
+}
+
+@Composable
+private fun DecideButton(t: MealioTheme, text: String, color: Color, label: String?, enabled: Boolean, tag: String, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .heightIn(min = 36.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(t.background)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .then(if (label != null) Modifier.semantics { contentDescription = label } else Modifier)
+            .testTag(tag)
+            .padding(horizontal = 12.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(text, style = t.ts(14, FontWeight.SemiBold, color))
     }
 }
 

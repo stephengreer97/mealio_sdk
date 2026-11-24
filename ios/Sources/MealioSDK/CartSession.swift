@@ -146,6 +146,9 @@ public final class CartSession: ObservableObject {
     /// The user's picks, by item key. Remembered items start picked, unless
     /// the server marked them `startUnchecked`.
     @Published private var picks: [String: Pick] = [:]
+    /// Items the user chose to leave out of this run (`deselect`), so they
+    /// are not waiting on a decision.
+    @Published private var leftOut: Set<String> = []
     /// Options found with `search`, by item key, newest first.
     @Published private var extra: [String: [Product]] = [:]
     /// Per item, the search that found each product (product id -> query),
@@ -337,11 +340,53 @@ public final class CartSession: ObservableObject {
             throw MealioError(code: MealioError.Code.unknownProduct, message: "Product \(productId) was not offered for \(key)")
         }
         picks[key] = Pick(productId: productId, preferenceId: preferenceId)
+        leftOut.remove(key)
     }
 
-    /// Leave the item out of this run. Its remembered choice is kept on the server.
+    /// Leave the item out of this run. Its remembered choice is kept on the
+    /// server. Works on an item with nothing selected too ("Skip this time"):
+    /// that settles it, so it no longer needs a decision (see `needsDecision`).
     public func deselect(key: String) {
         picks[key] = nil
+        leftOut.insert(key)
+    }
+
+    /// True when the user left the item out of this run with `deselect`.
+    public func isDeselected(_ key: String) -> Bool {
+        leftOut.contains(key) && picks[key] == nil
+    }
+
+    /// Undo `deselect` on an item with nothing selected: it waits on the user again.
+    public func undoDeselect(key: String) {
+        leftOut.remove(key)
+    }
+
+    /// True when the item is missing from the add and the user has not said
+    /// so: nothing selected, not deselected, and not a remembered product
+    /// (which starts selected) or a `startUnchecked` one (pantry, optional),
+    /// which are meant to start out. That is a usual that is out of stock or
+    /// gone, an item never chosen, and an item the store does not have.
+    ///
+    /// The drop-in holds Add until no item needs a decision, so nobody finds
+    /// an ingredient missing at pickup that they never chose to leave out.
+    /// Your own UI should do the same: pick a product, or `deselect` to skip it.
+    public func needsDecision(_ key: String) -> Bool {
+        guard let it = find(key), !it.startUnchecked, it.status != .remembered else { return false }
+        return picks[key] == nil && !leftOut.contains(key)
+    }
+
+    /// Keys of the `startUnchecked` items (pantry, optional) that are not
+    /// selected, in recipe order. The drop-in names them above Add every
+    /// time, so nobody misses that salt was left off on purpose, with one tap
+    /// to add them: select each one's `item.selectedId` (the usual) where it
+    /// has one.
+    public func uncheckedByDefault() -> [String] {
+        items.filter { $0.startUnchecked && picks[$0.key] == nil }.map(\.key)
+    }
+
+    /// Keys of the items that need a decision, in recipe order.
+    public func undecided() -> [String] {
+        items.filter { needsDecision($0.key) }.map(\.key)
     }
 
     /// Take the user's picks from an earlier cart, after a failed add. Works
@@ -366,7 +411,9 @@ public final class CartSession: ObservableObject {
         for it in items {
             guard old.find(it.key) != nil else { continue }
             guard let productId = old.selectedId(for: it.key) else {
-                deselect(key: it.key)
+                // Unselected there, unselected here; deselected only if the user did so.
+                picks[it.key] = nil
+                if old.leftOut.contains(it.key) { leftOut.insert(it.key) } else { leftOut.remove(it.key) }
                 continue
             }
             if restore(it.key, productId, from: old) { continue }

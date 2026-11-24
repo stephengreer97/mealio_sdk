@@ -435,20 +435,34 @@ class ProductThumb extends StatelessWidget {
 
 /// The amber note box.
 class WarnBox extends StatelessWidget {
-  const WarnBox({super.key, required this.theme, required this.text, this.margin = EdgeInsets.zero});
+  const WarnBox({super.key, required this.theme, required this.text, this.margin = EdgeInsets.zero, this.actions});
 
   final MealioTheme theme;
   final String text;
   final EdgeInsets margin;
 
+  /// Buttons under the text, right-aligned (Pick another, Skip this time).
+  final List<Widget>? actions;
+
   @override
   Widget build(BuildContext context) {
     final t = theme;
+    final message = Text(text, style: t.style(size: 13, height: 18 / 13, color: t.warnText));
+    final acts = actions;
     return Container(
       margin: margin,
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(color: t.warnBackground, borderRadius: BorderRadius.circular(10)),
-      child: Text(text, style: t.style(size: 13, height: 18 / 13, color: t.warnText)),
+      child: acts == null || acts.isEmpty
+          ? message
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                message,
+                const SizedBox(height: 8),
+                Wrap(alignment: WrapAlignment.end, spacing: 8, runSpacing: 8, children: acts),
+              ],
+            ),
     );
   }
 }

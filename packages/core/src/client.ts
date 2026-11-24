@@ -612,6 +612,8 @@ const cents = (amount: number) => Math.round(amount * 100);
 
 export class CartSession {
   private picks = new Map<string, { productId: string; preferenceId: string | null }>();
+  /** Items the user chose to leave out of this run (deselect), so they are not waiting on a decision. */
+  private leftOut = new Set<string>();
   private extra = new Map<string, Product[]>();
   private qty = new Map<string, number>();
   private lb = new Map<string, number>();
@@ -762,10 +764,51 @@ export class CartSession {
     if (!this.find(key)) throw new MealioError('unknown_item', `No item ${key}`);
     if (!this.options(key).some((p) => p.id === productId)) throw new MealioError('unknown_product', `Product ${productId} was not offered for ${key}`);
     this.picks.set(key, { productId, preferenceId: opts.preferenceId ?? null });
+    this.leftOut.delete(key);
   }
 
-  /** Leave the item out of this run. Its remembered choice is kept. */
-  deselect(key: string): void { this.picks.delete(key); }
+  /**
+   * Leave the item out of this run. Its remembered choice is kept. Works on an
+   * item with nothing selected too ("Skip this time"): that settles it, so it
+   * no longer needs a decision (see needsDecision).
+   */
+  deselect(key: string): void { this.picks.delete(key); this.leftOut.add(key); }
+
+  /** True when the user left the item out of this run with deselect(). */
+  isDeselected(key: string): boolean { return this.leftOut.has(key) && !this.picks.has(key); }
+
+  /** Undo deselect() on an item with nothing selected: it waits on the user again. */
+  undoDeselect(key: string): void { this.leftOut.delete(key); }
+
+  /**
+   * True when the item is missing from the add and the user has not said so:
+   * nothing selected, not deselected, and not a remembered product (which
+   * starts selected) or a startUnchecked one (pantry, optional), which are
+   * meant to start out. That is a usual that is out of stock or gone, an item
+   * never chosen, and an item the store does not have.
+   *
+   * The drop-in holds Add until no item needs a decision, so nobody finds an
+   * ingredient missing at pickup that they never chose to leave out. Your own
+   * UI should do the same: pick a product, or deselect() to skip it.
+   */
+  needsDecision(key: string): boolean {
+    const it = this.find(key);
+    if (!it || it.startUnchecked || it.status === 'remembered') return false;
+    return !this.picks.has(key) && !this.leftOut.has(key);
+  }
+
+  /**
+   * Keys of the startUnchecked items (pantry, optional) that are not selected,
+   * in recipe order. The drop-in names them above Add every time, so nobody
+   * misses that salt was left off on purpose, with one tap to add them: select
+   * each one's `item.selectedId` (the usual) where it has one.
+   */
+  uncheckedByDefault(): string[] {
+    return this.items.filter((it) => it.startUnchecked && !this.picks.has(it.key)).map((it) => it.key);
+  }
+
+  /** Keys of the items that need a decision, in recipe order. */
+  undecided(): string[] { return this.items.filter((it) => this.needsDecision(it.key)).map((it) => it.key); }
 
   /**
    * Take the user's picks from an earlier cart, after a failed add. Works by
@@ -793,7 +836,8 @@ export class CartSession {
     for (const it of this.items) {
       if (!from.find(it.key)) continue;
       const productId = from.selectedId(it.key);
-      if (!productId) { this.deselect(it.key); continue; }
+      // Unselected there, unselected here; deselected only if the user did so.
+      if (!productId) { this.picks.delete(it.key); if (from.leftOut.has(it.key)) this.leftOut.add(it.key); else this.leftOut.delete(it.key); continue; }
       if (this.options(it.key).some((p) => p.id === productId)) { this.takePick(from, it.key, productId); continue; }
       const query = from.foundBy.get(it.key)?.get(productId);
       if (query) again.push({ key: it.key, productId, query });

@@ -139,7 +139,7 @@ class _Pick {
   final String? preferenceId;
 }
 
-/// A prepared cart. A [ChangeNotifier]: it notifies after [select],
+/// A prepared cart. A [ChangeNotifier]: it notifies after [select], [undoDeselect],
 /// [deselect], [setQuantity], [setWeight], [stepWeight] and [search], so widgets can rebuild with a
 /// `ListenableBuilder`.
 class CartSession extends ChangeNotifier {
@@ -159,6 +159,10 @@ class CartSession extends ChangeNotifier {
 
   // Insertion-ordered, like the reference's Map.
   final Map<String, _Pick> _picks = <String, _Pick>{};
+
+  /// Items the user chose to leave out of this run ([deselect]), so they are
+  /// not waiting on a decision.
+  final Set<String> _leftOut = <String>{};
   final Map<String, List<Product>> _extra = <String, List<Product>>{};
   final Map<String, int> _qty = <String, int>{};
   final Map<String, double> _lb = <String, double>{};
@@ -348,13 +352,55 @@ class CartSession extends ChangeNotifier {
       throw MealioException(MealioErrorCode.unknownProduct, 'Product $productId was not offered for $key');
     }
     _picks[key] = _Pick(productId, preferenceId);
+    _leftOut.remove(key);
     notifyListeners();
   }
 
-  /// Leave the item out of this run. Its remembered choice is kept.
+  /// Leave the item out of this run. Its remembered choice is kept. Works on
+  /// an item with nothing selected too ("Skip this time"): that settles it,
+  /// so it no longer needs a decision (see [needsDecision]).
   void deselect(String key) {
-    if (_picks.remove(key) != null) notifyListeners();
+    final removed = _picks.remove(key) != null;
+    final added = _leftOut.add(key);
+    if (removed || added) notifyListeners();
   }
+
+  /// True when the user left the item out of this run with [deselect].
+  bool isDeselected(String key) => _leftOut.contains(key) && !_picks.containsKey(key);
+
+  /// Undo [deselect] on an item with nothing selected: it waits on the user
+  /// again.
+  void undoDeselect(String key) {
+    if (_leftOut.remove(key)) notifyListeners();
+  }
+
+  /// True when the item is missing from the add and the user has not said
+  /// so: nothing selected, not deselected, and not a remembered product
+  /// (which starts selected) or a startUnchecked one (pantry, optional),
+  /// which are meant to start out. That is a usual that is out of stock or
+  /// gone, an item never chosen, and an item the store does not have.
+  ///
+  /// The drop-in holds Add until no item needs a decision, so nobody finds
+  /// an ingredient missing at pickup that they never chose to leave out.
+  /// Your own UI should do the same: pick a product, or [deselect] to skip it.
+  bool needsDecision(String key) {
+    final it = _find(key);
+    if (it == null || it.startUnchecked == true || it.status == ItemStatus.remembered) return false;
+    return !_picks.containsKey(key) && !_leftOut.contains(key);
+  }
+
+  /// Keys of the startUnchecked items (pantry, optional) that are not
+  /// selected, in recipe order. The drop-in names them above Add every time,
+  /// so nobody misses that salt was left off on purpose, with one tap to add
+  /// them: select each one's `item.selectedId` (the usual) where it has one.
+  List<String> uncheckedByDefault() => items
+      .where((CartItem it) => it.startUnchecked == true && !_picks.containsKey(it.key))
+      .map((CartItem it) => it.key)
+      .toList();
+
+  /// Keys of the items that need a decision, in recipe order.
+  List<String> undecided() =>
+      items.where((CartItem it) => needsDecision(it.key)).map((CartItem it) => it.key).toList();
 
   /// Take the user's picks from an earlier cart, after a failed add. Works by
   /// item key, on the same store: what they unticked stays unticked, and a
@@ -378,7 +424,10 @@ class CartSession extends ChangeNotifier {
       if (from._find(it.key) == null) continue;
       final productId = from.selectedId(it.key);
       if (productId == null) {
-        deselect(it.key);
+        // Unselected there, unselected here; deselected only if the user did so.
+        final hadPick = _picks.remove(it.key) != null;
+        final changed = from._leftOut.contains(it.key) ? _leftOut.add(it.key) : _leftOut.remove(it.key);
+        if (hadPick || changed) notifyListeners();
         continue;
       }
       if (_restoreOne(it.key, from, productId)) continue;

@@ -109,7 +109,11 @@ void main() {
         'unitPrice': 1.25,
         'maxQuantity': 2,
       };
-      final s = _session(cart: cart);
+      // The other items are skipped, so the CTA counts the onion alone.
+      final s = _session(cart: cart)
+        ..deselect('garlic')
+        ..deselect('beef')
+        ..deselect('saffron');
       await tester.pumpWidget(MaterialApp(home: Scaffold(body: MealioCartList(session: s, onAdd: () {}))));
 
       expect(find.text('Quantity'), findsOneWidget);
@@ -225,7 +229,10 @@ void main() {
           ],
         },
       ];
-      final s = _session(cart: cart);
+      // Beef and saffron are skipped, so the CTA counts the add, not a review.
+      final s = _session(cart: cart)
+        ..deselect('beef')
+        ..deselect('saffron');
       await tester.pumpWidget(MaterialApp(home: Scaffold(body: MealioCartList(session: s, onAdd: () {}))));
       expect(find.textContaining('Choose one'), findsNothing);
       expect(find.textContaining('needs an option chosen'), findsNothing);
@@ -256,7 +263,12 @@ void main() {
 
     testWidgets('shows the count and CTA, and unchecking changes them', (WidgetTester tester) async {
       _phone(tester);
-      final s = _session();
+      // Every item missing from the add is skipped, so the CTA adds rather
+      // than reviews (see "the decision gate" below).
+      final s = _session()
+        ..deselect('garlic')
+        ..deselect('beef')
+        ..deselect('saffron');
       var adds = 0;
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(body: MealioCartList(session: s, onAdd: () => adds += 1)),
@@ -312,7 +324,9 @@ void main() {
       garlic['options'] = <Object?>[
         <String, Object?>{'id': 'g1', 'name': 'Garlic Bulb'},
       ];
-      final s = _session(cart: cart);
+      final s = _session(cart: cart)
+        ..deselect('beef')
+        ..deselect('saffron');
       await tester.pumpWidget(MaterialApp(home: Scaffold(body: MealioCartList(session: s, onAdd: () {}))));
       expect(find.text('Total'), findsOneWidget);
       expect(find.text(r'$1.25'), findsWidgets);
@@ -562,6 +576,7 @@ void main() {
       expect(prepared, <String?>['heb', 'kroger']);
       expect(find.text('Your Kroger list'), findsOneWidget);
 
+      await skipUndecided(tester);
       await tester.tap(find.text('Add 1 item to Kroger'));
       await tester.pumpAndSettle();
       expect(find.text('Weeknight Tacos'), findsOneWidget);
@@ -616,6 +631,8 @@ void main() {
       await tester.tap(find.text('H-E-B'));
       await tester.pumpAndSettle();
       expect(prepared, <String?>[null, 'heb']);
+      expect(find.text('Review 3 items'), findsOneWidget);
+      await skipUndecided(tester);
       expect(find.text('Add 1 item to H-E-B'), findsOneWidget);
     });
 
