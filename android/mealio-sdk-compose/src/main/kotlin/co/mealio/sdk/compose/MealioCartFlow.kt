@@ -599,6 +599,21 @@ fun MealioCartList(
     val rowY = remember(cart) { HashMap<String, Int>() }
     val gap = with(LocalDensity.current) { 8.dp.toPx() }.toInt()
     val ctaOff = busy || cart.searching || (est.count == 0 && waiting == 0)
+    // Pantry and optional items start unchecked. Name them above Add every time,
+    // so leaving the salt off is never a surprise, with one tap to add them.
+    val offByDefault = cart.uncheckedByDefault().mapNotNull { k -> cart.items.firstOrNull { i -> i.key == k } }
+    val offNames = offByDefault.joinToString(", ") { i -> i.ingredient }
+    val canAddOff = offByDefault.any { i -> i.selectedId != null }
+    val addOff: () -> Unit = addOff@{
+        if (busy) return@addOff
+        for (i in offByDefault) {
+            val id = i.selectedId ?: continue
+            // A usual this cart does not offer stays off, as the row's own tick would leave it.
+            try { cart.select(i.key, id, i.rememberedPreferenceId) } catch (e: MealioException) { continue }
+            ui.emit(MealioEvent.ItemChecked(i.key))
+        }
+        bump()
+    }
     val onCta: () -> Unit = {
         if (waiting == 0) onAdd() else {
             val first = undecided[0]
@@ -706,6 +721,31 @@ fun MealioCartList(
             Modifier.fillMaxWidth().background(t.background).padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            if (offByDefault.isNotEmpty()) {
+                Row(
+                    Modifier.fillMaxWidth().padding(bottom = 8.dp).testTag("mealio-off-line"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Text(
+                        ui.tr("notAddingList", "items" to offNames),
+                        style = t.ts(12, color = t.muted, lineHeight = 17),
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (canAddOff) {
+                        val addThemLabel = ui.tr("a11yAddThem", "items" to offNames)
+                        Text(
+                            ui.tr("addThem"),
+                            style = t.ts(14, FontWeight.SemiBold, t.accent),
+                            modifier = Modifier
+                                .clickable(enabled = !busy, role = Role.Button, onClick = addOff)
+                                .semantics { contentDescription = addThemLabel }
+                                .testTag("mealio-off-add")
+                                .padding(8.dp),
+                        )
+                    }
+                }
+            }
             if (waiting > 0) {
                 Text(
                     ui.plural("undecidedNote", waiting),

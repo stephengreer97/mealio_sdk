@@ -797,6 +797,16 @@ export class CartSession {
     return !this.picks.has(key) && !this.leftOut.has(key);
   }
 
+  /**
+   * Keys of the startUnchecked items (pantry, optional) that are not selected,
+   * in recipe order. The drop-in names them above Add every time, so nobody
+   * misses that salt was left off on purpose, with one tap to add them: select
+   * each one's `item.selectedId` (the usual) where it has one.
+   */
+  uncheckedByDefault(): string[] {
+    return this.items.filter((it) => it.startUnchecked && !this.picks.has(it.key)).map((it) => it.key);
+  }
+
   /** Keys of the items that need a decision, in recipe order. */
   undecided(): string[] { return this.items.filter((it) => this.needsDecision(it.key)).map((it) => it.key); }
 

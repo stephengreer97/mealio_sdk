@@ -674,4 +674,17 @@ class CartSessionTest {
         assertTrue(to.isDeselected("spinach"))
         assertEquals(listOf("garlic", "saffron"), to.undecided())
     }
+
+    @Test
+    fun uncheckedByDefaultListsStartUncheckedItemsNotSelectedInOrderAndDropsOneOnceSelected() {
+        val p = missing()
+        p.getJSONArray("items").put(
+            item("pepper", "remembered", listOf(product("pepper-1", "pepper one")), "pepper-1", product("pepper-1", "pepper one"))
+                .put("startUnchecked", true),
+        )
+        val cs = session(p)
+        assertEquals(listOf("salt", "pepper"), cs.uncheckedByDefault())
+        cs.select("pepper", "pepper-1")
+        assertEquals(listOf("salt"), cs.uncheckedByDefault())
+    }
 }

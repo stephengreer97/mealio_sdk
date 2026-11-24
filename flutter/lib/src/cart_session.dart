@@ -389,6 +389,15 @@ class CartSession extends ChangeNotifier {
     return !_picks.containsKey(key) && !_leftOut.contains(key);
   }
 
+  /// Keys of the startUnchecked items (pantry, optional) that are not
+  /// selected, in recipe order. The drop-in names them above Add every time,
+  /// so nobody misses that salt was left off on purpose, with one tap to add
+  /// them: select each one's `item.selectedId` (the usual) where it has one.
+  List<String> uncheckedByDefault() => items
+      .where((CartItem it) => it.startUnchecked == true && !_picks.containsKey(it.key))
+      .map((CartItem it) => it.key)
+      .toList();
+
   /// Keys of the items that need a decision, in recipe order.
   List<String> undecided() =>
       items.where((CartItem it) => needsDecision(it.key)).map((CartItem it) => it.key).toList();

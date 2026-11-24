@@ -470,6 +470,7 @@ session.setWeight(key: key, to: 1.25); session.stepWeight(key: key, by: 1)   // 
 session.needsPreference(key); session.pendingPreferences()  // ticked, but no preference chosen yet
 session.needsDecision(key); session.undecided()  // missing from the add and not yet picked or skipped
 session.isDeselected(key); session.undoDeselect(key: key)  // "Skip this time", and its undo
+session.uncheckedByDefault()                     // pantry/optional items left off: name them above Add
 let est = session.estimate()                     // total (nil if any item is unpriced), count, estimated, unpriced
 let result = try await session.addToCart(onStep: { step, _ in })
 ```

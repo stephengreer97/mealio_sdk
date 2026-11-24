@@ -118,6 +118,9 @@ public enum MealioStringKey: String, CaseIterable {
     case a11yChangeLocation
     case a11yChangeStore
     case pantryHint
+    case notAddingList
+    case addThem
+    case a11yAddThem
     case capReached
     case tooManyCarts
 }
@@ -232,6 +235,9 @@ public let DEFAULT_STRINGS: MealioStrings = [
     .a11yChangeLocation: "Store location: {name}. Change location",
     .a11yChangeStore: "Store: {store}. Change store",
     .pantryHint: "You may already have this",
+    .notAddingList: "Not adding: {items}.",
+    .addThem: "Add them",
+    .a11yAddThem: "Add {items}",
     .capReached: "Adding to your grocery cart is paused in this app right now. Please try again later.",
     .tooManyCarts: "You've started a lot of carts. Please try again a little later.",
 ]

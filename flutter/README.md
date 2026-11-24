@@ -291,6 +291,7 @@ session.deselect(item.key);          // leave out of THIS run; the usual pick is
 session.needsDecision(item.key);     // missing from the add and not yet picked or skipped
 session.undecided();                 // those keys, in recipe order
 session.isDeselected(item.key);      // "Skip this time"; undoDeselect(item.key) undoes it
+session.uncheckedByDefault();        // pantry/optional items left off; name them above Add
 await session.search(item.key, 'minced garlic jar');
 session.estimate();                  // total, count, estimated, unpriced
                                      // total is null when any item is unpriced

@@ -64,3 +64,14 @@ describe('a missing item needs a decision', () => {
     expect(to.undecided()).toEqual(['garlic', 'saffron']);
   });
 });
+
+describe('items left off by default', () => {
+  it('lists startUnchecked items not selected, in order, and drops one once selected', () => {
+    const p = prepared();
+    p.items.push(item('pepper', 'remembered', { startUnchecked: true, selectedId: 'pepper-1', remembered: { id: 'pepper-1', name: 'pepper one' } }));
+    const cs = new CartSession({} as any, p);
+    expect(cs.uncheckedByDefault()).toEqual(['salt', 'pepper']);
+    cs.select('pepper', 'pepper-1');
+    expect(cs.uncheckedByDefault()).toEqual(['salt']);
+  });
+});

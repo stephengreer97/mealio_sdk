@@ -105,7 +105,7 @@ function mockCart(over) {
     isWeight: fn(() => false), weight: fn(() => 0), setWeight: fn((_k, lb) => lb), stepWeight: fn(() => 0),
     weightRange: fn(() => ({ min: 0.25, max: 20 })),
     preferenceId: fn(() => null), needsPreference: fn(() => false), pendingPreferences: fn(() => []),
-    isDeselected: fn(() => false), undoDeselect: fn(), needsDecision: fn(() => false), undecided: fn(() => []),
+    isDeselected: fn(() => false), undoDeselect: fn(), needsDecision: fn(() => false), undecided: fn(() => []), uncheckedByDefault: fn(() => []),
     search: fn(async () => []), cancelSearches: fn(), restorePicks: fn(async () => {}),
     selections: fn(() => []), addToCart: fn(async () => result()),
     estimate: fn(() => ({ ...none })), addedTotal: fn(() => ({ ...none })), addedPrice: fn(() => null),

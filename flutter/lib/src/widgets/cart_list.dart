@@ -127,6 +127,13 @@ class _MealioCartListState extends State<MealioCartList> {
             final canTap =
                 !widget.busy && (est.count > 0 || waiting > 0) && widget.onAdd != null && !s.searching;
             final pending = s.pendingPreferences().length;
+            // Pantry and optional items start unchecked. Name them above Add
+            // every time, so leaving the salt off is never a surprise, with
+            // one tap to add them.
+            final offKeys = s.uncheckedByDefault().toSet();
+            final offByDefault = s.items.where((CartItem i) => offKeys.contains(i.key)).toList();
+            final offNames = offByDefault.map((CartItem i) => i.ingredient).join(', ');
+            final canAddOff = offByDefault.any((CartItem i) => i.selectedId != null && i.selectedId!.isNotEmpty);
             final location = s.location;
             return Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -195,6 +202,7 @@ class _MealioCartListState extends State<MealioCartList> {
                 Footer(
                   theme: t,
                   children: <Widget>[
+                    if (offByDefault.isNotEmpty) _offLine(t, ui, offByDefault, offNames, canAddOff),
                     if (waiting > 0)
                       Padding(
                         key: const ValueKey<String>('mealio-undecided-note'),
@@ -257,6 +265,54 @@ class _MealioCartListState extends State<MealioCartList> {
 }
 
 extension on _MealioCartListState {
+  /// "Not adding: salt, olive oil." and, when any has a usual, "Add them".
+  Widget _offLine(MealioTheme t, MealioUi ui, List<CartItem> off, String names, bool canAdd) {
+    final small = t.style(size: 12, height: 17 / 12, color: t.muted);
+    void addOff() {
+      if (widget.busy) return;
+      final s = widget.session;
+      for (final CartItem i in off) {
+        final id = i.selectedId;
+        if (id == null || id.isEmpty) continue;
+        s.select(i.key, id, preferenceId: i.rememberedPreferenceId);
+        ui.emit(MealioItemChecked(key: i.key));
+      }
+    }
+
+    final onTap = widget.busy ? null : addOff;
+    return Padding(
+      key: const ValueKey<String>('mealio-off-line'),
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        children: <Widget>[
+          Expanded(child: Text(ui.tr('notAddingList', <String, Object?>{'items': names}), style: small)),
+          if (canAdd) ...<Widget>[
+            const SizedBox(width: 12),
+            Semantics(
+              key: const ValueKey<String>('mealio-off-add'),
+              button: true,
+              enabled: onTap != null,
+              label: ui.tr('a11yAddThem', <String, Object?>{'items': names}),
+              onTap: onTap,
+              excludeSemantics: true,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: onTap,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(minHeight: 44, minWidth: 44),
+                  child: Center(
+                    widthFactor: 1,
+                    child: Text(ui.tr('addThem'), style: t.style(size: 14, weight: FontWeight.w600, color: t.accent)),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   Widget _locationRow(MealioTheme t, MealioUi ui, StoreLocation location) {
     final small = t.style(size: 12, height: 17 / 12, color: t.muted);
     final onTap = widget.busy ? null : widget.onChangeLocation;

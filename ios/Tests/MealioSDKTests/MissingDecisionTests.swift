@@ -37,9 +37,19 @@ final class MissingDecisionTests: XCTestCase {
         return MealioClient(config: config, host: FakeHost())
     }
 
+    /// Pepper: a pantry item with a usual, so it starts unchecked though remembered.
+    static let pepperJSON = #"""
+    ,{"key":"pepper","ingredient":"pepper","quantity":1,"status":"remembered","selectedId":"pepper-1",
+      "startUnchecked":true,"remembered":{"id":"pepper-1","name":"pepper one"},
+      "options":[{"id":"pepper-1","name":"pepper one"}]}
+    """#
+
     @MainActor
-    static func prepared(cartId: String = "c") throws -> CartSession {
-        let json = preparedJSON.replacingOccurrences(of: #""cartId":"c""#, with: #""cartId":"\#(cartId)""#)
+    static func prepared(cartId: String = "c", withPepper: Bool = false) throws -> CartSession {
+        var json = preparedJSON.replacingOccurrences(of: #""cartId":"c""#, with: #""cartId":"\#(cartId)""#)
+        if withPepper {
+            json = json.replacingOccurrences(of: #""name":"salt one"}]}"#, with: #""name":"salt one"}]}"# + pepperJSON)
+        }
         let cart = try JSONDecoder().decode(PreparedCart.self, from: Data(json.utf8))
         return CartSession(client: makeClient(), cart: cart)
     }
@@ -91,6 +101,15 @@ final class MissingDecisionTests: XCTestCase {
         XCTAssertTrue(to.isDeselected("spinach"))
         XCTAssertEqual(to.undecided(), ["garlic", "saffron"])
     }
+
+    // items left off by default
+    @MainActor
+    func testListsStartUncheckedItemsNotSelectedInOrderAndDropsOneOnceSelected() throws {
+        let cs = try Self.prepared(withPepper: true)
+        XCTAssertEqual(cs.uncheckedByDefault(), ["salt", "pepper"])
+        try cs.select(key: "pepper", productId: "pepper-1")
+        XCTAssertEqual(cs.uncheckedByDefault(), ["salt"])
+    }
 }
 
 #if canImport(SwiftUI) && canImport(UIKit) && canImport(WebKit)
@@ -137,6 +156,34 @@ final class MissingDecisionRowTests: XCTestCase {
         cs.deselect(key: "salt")
         XCTAssertFalse(try row(cs, "salt").isSkipped)
         XCTAssertEqual(cs.undecided(), ["spinach", "garlic", "saffron"])
+    }
+
+    @MainActor
+    func testAddThemChecksTheItemsLeftOffByDefaultThatHaveAUsual() throws {
+        let log = Log()
+        MealioCart.onEvent = { log.events.append($0) }
+        defer { MealioCart.onEvent = nil }
+        let cs = try MissingDecisionTests.prepared(withPepper: true)
+        let list = MealioCartList(cart: cs, onAdd: {})
+        XCTAssertEqual(list.offByDefault.map(\.key), ["salt", "pepper"])
+
+        list.addOffByDefault()
+        XCTAssertEqual(log.events, [.itemChecked(key: "pepper")])
+        XCTAssertEqual(cs.selectedId(for: "pepper"), "pepper-1")
+        // Salt has no usual, so it is still named until the user picks one.
+        XCTAssertEqual(list.offByDefault.map(\.key), ["salt"])
+
+        // Busy: nothing changes.
+        cs.deselect(key: "pepper")
+        MealioCartList(cart: cs, busy: true, onAdd: {}).addOffByDefault()
+        XCTAssertFalse(cs.isSelected("pepper"))
+    }
+
+    @MainActor
+    func testNothingIsLeftOffByDefaultWithoutAPantryItem() throws {
+        let cart = try JSONDecoder().decode(PreparedCart.self, from: Data(ClientTests.newCartJSON.utf8))
+        let cs = CartSession(client: MissingDecisionTests.makeClient(), cart: cart)
+        XCTAssertTrue(MealioCartList(cart: cs, onAdd: {}).offByDefault.isEmpty)
     }
 
     @MainActor

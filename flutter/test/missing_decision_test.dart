@@ -289,4 +289,60 @@ void main() {
       expect(skipButtons(), findsNothing);
     });
   });
+
+  group('items left off by default', () {
+    test('lists startUnchecked items not selected, in order, and drops one once selected', () {
+      final p = _prepared();
+      (p['items']! as List<Object?>).add(_item('pepper', 'remembered', <String, Object?>{
+        'startUnchecked': true,
+        'selectedId': 'pepper-1',
+        'remembered': <String, Object?>{'id': 'pepper-1', 'name': 'pepper one'},
+      }));
+      final cs = _session(p);
+      expect(cs.uncheckedByDefault(), <String>['salt', 'pepper']);
+      cs.select('pepper', 'pepper-1');
+      expect(cs.uncheckedByDefault(), <String>['salt']);
+    });
+
+    testWidgets('names the items left off by default above Add, and Add them checks the ones with a usual',
+        (WidgetTester tester) async {
+      _phone(tester);
+      final handle = tester.ensureSemantics();
+      final events = <MealioEvent>[];
+      final s = _session(<String, Object?>{
+        ..._prepared(),
+        'items': <Object?>[
+          (_prepared()['items']! as List<Object?>).first,
+          _item('salt', 'remembered', <String, Object?>{
+            'startUnchecked': true,
+            'selectedId': 'salt-1',
+            'remembered': <String, Object?>{'id': 'salt-1', 'name': 'salt one'},
+          }),
+          _item('olive oil', 'choose', <String, Object?>{'startUnchecked': true}),
+        ],
+      });
+      await _pumpList(tester, s, events: events);
+      expect(find.text('Not adding: salt, olive oil.'), findsOneWidget);
+      expect(find.bySemanticsLabel('Add salt, olive oil'), findsOneWidget);
+
+      await tester.tap(_key('mealio-off-add'));
+      await tester.pump();
+      expect(events.whereType<MealioItemChecked>().map((MealioItemChecked e) => e.key), <String>['salt']);
+      // Olive oil has no usual, so it is still named until the user picks one.
+      expect(find.text('Not adding: olive oil.'), findsOneWidget);
+      expect(_key('mealio-off-add'), findsNothing);
+      expect(find.text('Add 2 items to H-E-B'), findsOneWidget);
+      handle.dispose();
+    });
+
+    testWidgets('says nothing above Add when nothing is left off by default', (WidgetTester tester) async {
+      _phone(tester);
+      final s = _session(<String, Object?>{
+        ..._prepared(),
+        'items': <Object?>[(_prepared()['items']! as List<Object?>).first],
+      });
+      await _pumpList(tester, s);
+      expect(_key('mealio-off-line'), findsNothing);
+    });
+  });
 }

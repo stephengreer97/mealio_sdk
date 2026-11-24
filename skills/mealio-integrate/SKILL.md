@@ -599,6 +599,7 @@ Rules for custom screens:
 
 - The store sign-in is not yours to draw. On React Native, `MealioProvider` shows it in its own modal; on native and Flutter the SDK presents it. Your screen only waits for `prepareCart`.
 - When the user ticks a pantry or optional item, select `item.selectedId` if it has one, so their usual product comes back.
+- Name the pantry and optional items left off above Add, every time, from `uncheckedByDefault()`, with one tap to add them. Users otherwise miss that the salt was left off on purpose.
 - Keep Add disabled while `cart.searching` is true.
 - After the user picks from `stores`, call `setStore(id)`. If that fails with `location_required`, ask for a zip, list stores with `storeLocations`, and call `setStore(id, locationId)`.
 - An add that returns a result is not a failed add, even if some items are in `failed`. Show those items. On the done screen, use `addedTotal(result)`, which follows the same no-partial-total rule.

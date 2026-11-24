@@ -114,6 +114,9 @@ val DEFAULT_STRINGS: Map<String, String> = linkedMapOf(
     "a11yChangeLocation" to "Store location: {name}. Change location",
     "a11yChangeStore" to "Store: {store}. Change store",
     "pantryHint" to "You may already have this",
+    "notAddingList" to "Not adding: {items}.",
+    "addThem" to "Add them",
+    "a11yAddThem" to "Add {items}",
     "capReached" to "Adding to your grocery cart is paused in this app right now. Please try again later.",
     "tooManyCarts" to "You've started a lot of carts. Please try again a little later.",
 )

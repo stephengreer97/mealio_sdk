@@ -217,6 +217,29 @@ describe('the list', () => {
     expect(texts(r).some((t: string) => t.includes('is out of stock today'))).toBe(false);
   });
 
+  it('names the items left off by default above Add, and Add them checks the ones with a usual', async () => {
+    const pantry = { ...CART(), items: [
+      CART().items[0],
+      { key: 's', ingredient: 'salt', quantity: 1, status: 'remembered', selectedId: 'ps', startUnchecked: true,
+        remembered: { id: 'ps', name: 'Salt' }, options: [{ id: 'ps', name: 'Salt', unitPrice: 1 }] },
+      { key: 'o', ingredient: 'olive oil', quantity: 1, status: 'choose', selectedId: null, startUnchecked: true,
+        remembered: null, options: [{ id: 'po', name: 'Olive Oil', unitPrice: 6 }] },
+    ] };
+    const r = await toList({}, (p) => p.endsWith('/carts') ? startJob([done(pantry)]) : json({}));
+    expect(texts(r)).toContain('Not adding: salt, olive oil.');
+    await press(r, (n) => n.props.testID === 'mealio-off-add');
+    expect(events.filter((e) => e.type === 'item_checked')).toEqual([{ type: 'item_checked', key: 's' }]);
+    // Olive oil has no usual, so it is still named until the user picks one.
+    expect(texts(r)).toContain('Not adding: olive oil.');
+    expect(pressables(r, (n) => n.props.testID === 'mealio-off-add')).toHaveLength(0);
+    expect(texts(r)).toContain('Add 2 items to H-E-B');
+  });
+
+  it('says nothing above Add when nothing is left off by default', async () => {
+    const r = await toList({}, (p) => p.endsWith('/carts') ? startJob([done(CART())]) : json({}));
+    expect(r.root.findAll((n: any) => n.props?.testID === 'mealio-off-line')).toHaveLength(0);
+  });
+
   it('Add is off while a search runs', async () => {
     const r = await toList({}, (p) => p.endsWith('/carts') ? startJob([done(CART())]) : p.endsWith('/search') ? startJob([script('search', 'SEARCH_DONE', 2000)])
       : jobOf(p) ? nextEnv(jobOf(p)!, [done({ key: 'a', query: 'red onion', options: [] })]) : json({}));

@@ -415,6 +415,20 @@ export function CartList({ t, cart, storeName, busy, onChange, onAdd, onChangeSt
   const scrollRef = useRef<ScrollView | null>(null);
   const rowY = useRef<Record<string, number>>({});
   const ctaOff = busy || cart.searching || (est.count === 0 && waiting === 0);
+  // Pantry and optional items start unchecked. Name them above Add every time,
+  // so leaving the salt off is never a surprise, with one tap to add them.
+  const offByDefault = cart.uncheckedByDefault().map((k) => cart.items.find((i) => i.key === k)!).filter(Boolean);
+  const offNames = offByDefault.map((i) => i.ingredient).join(', ');
+  const canAddOff = offByDefault.some((i) => !!i.selectedId);
+  const addOff = () => {
+    if (busy) return;
+    for (const i of offByDefault) {
+      if (!i.selectedId) continue;
+      cart.select(i.key, i.selectedId, { preferenceId: i.rememberedPreferenceId ?? null });
+      ui.emit({ type: 'item_checked', key: i.key });
+    }
+    onChange();
+  };
   const onCta = () => {
     if (!waiting) { onAdd(); return; }
     const first = undecided[0];
@@ -460,6 +474,17 @@ export function CartList({ t, cart, storeName, busy, onChange, onAdd, onChangeSt
         ))}
       </ScrollView>
       <View style={s.footer}>
+        {offByDefault.length ? (
+          <View style={s.offLine} testID="mealio-off-line">
+            <Text style={[s.small, s.flex]}>{ui.tr('notAddingList', { items: offNames })}</Text>
+            {canAddOff ? (
+              <Pressable onPress={addOff} disabled={busy} accessibilityRole="button" hitSlop={8} testID="mealio-off-add"
+                accessibilityLabel={ui.tr('a11yAddThem', { items: offNames })}>
+                <Text style={s.change}>{ui.tr('addThem')}</Text>
+              </Pressable>
+            ) : null}
+          </View>
+        ) : null}
         {waiting ? (
           <Text style={[s.small, s.pendingNote]} testID="mealio-undecided-note">{ui.plural('undecidedNote', waiting)}</Text>
         ) : null}
@@ -1122,6 +1147,7 @@ function make(t: MealioTheme) {
     qtyText: { ...f, fontSize: 20, fontWeight: '600', color: t.text },
     stepValue: { ...f, minWidth: 28, textAlign: 'center', fontSize: 16, fontWeight: '700', color: t.text },
     stepValueWide: { minWidth: 64 },
+    offLine: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingBottom: 8 },
     cardWaiting: { borderColor: t.warnText },
     decideRow: { flexDirection: 'row', justifyContent: 'flex-end', gap: 8, marginTop: 8 },
     decideRowBare: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 8, marginHorizontal: 12, marginBottom: 10 },

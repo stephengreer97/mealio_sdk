@@ -994,6 +994,52 @@ public struct MealioCartList: View {
         }
     }
 
+    /// Pantry and optional items left off by default, in recipe order. The
+    /// footer names them above Add every time, so leaving the salt off is
+    /// never a surprise, with one tap to add them.
+    var offByDefault: [CartItem] {
+        cart.uncheckedByDefault().compactMap { key in cart.items.first { $0.key == key } }
+    }
+
+    /// "Add them": tick each item left off by default that has a usual
+    /// product, with its remembered preference. One without a usual stays
+    /// named until the user picks one.
+    func addOffByDefault() {
+        guard !busy else { return }
+        for item in offByDefault {
+            guard let id = item.selectedId else { continue }
+            try? cart.select(key: item.key, productId: id, preferenceId: item.rememberedPreferenceId)
+            MealioCart.emit(.itemChecked(key: item.key))
+        }
+    }
+
+    private func offLine(_ off: [CartItem]) -> some View {
+        let names = off.map(\.ingredient).joined(separator: ", ")
+        return HStack(spacing: 12) {
+            Text(ui.tr(.notAddingList, ["items": names]))
+                .font(t.font(12))
+                .foregroundColor(t.muted)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if off.contains(where: { $0.selectedId != nil }) {
+                Button(action: addOffByDefault) {
+                    Text(ui.tr(.addThem))
+                        .font(t.font(14, .semibold))
+                        .foregroundColor(t.accent)
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(busy)
+                .accessibilityLabel(ui.tr(.a11yAddThem, ["items": names]))
+                .accessibilityIdentifier("mealio-off-add")
+            }
+        }
+        .padding(.bottom, 2)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("mealio-off-line")
+    }
+
     /// Open the first item that needs a decision and scroll to it.
     private func review(_ undecided: [String], proxy: ScrollViewProxy) {
         guard let first = undecided.first else { return }
@@ -1037,7 +1083,11 @@ public struct MealioCartList: View {
             : est.count > 0 ? ui.plural("addItems", est.count, ["store": storeName])
             : ui.tr(.selectItems)
         let pending = cart.pendingPreferences().count
+        let leftOff = offByDefault
         return VStack(spacing: 8) {
+            if !leftOff.isEmpty {
+                offLine(leftOff)
+            }
             if waiting > 0 {
                 Text(ui.plural("undecidedNote", waiting))
                     .font(t.font(12))
