@@ -468,6 +468,8 @@ session.isWeight(key)                            // soldByWeight: use weight, no
 session.weight(for: key); session.weightRange(for: key)
 session.setWeight(key: key, to: 1.25); session.stepWeight(key: key, by: 1)   // snapped to the store's weights
 session.needsPreference(key); session.pendingPreferences()  // ticked, but no preference chosen yet
+session.needsDecision(key); session.undecided()  // missing from the add and not yet picked or skipped
+session.isDeselected(key); session.undoDeselect(key: key)  // "Skip this time", and its undo
 let est = session.estimate()                     // total (nil if any item is unpriced), count, estimated, unpriced
 let result = try await session.addToCart(onStep: { step, _ in })
 ```
@@ -478,6 +480,13 @@ remember: false`, which leaves them out without forgetting the usual pick. A
 sold-by-weight item sends `quantity: 1` and `weightLb`, and is estimated as
 `pricePerLb` times the weight. An item whose product has `preferences` and none
 chosen is held out of `selections()` and `estimate()` until one is.
+
+An item missing from the add (a usual out of stock or gone, an item never
+chosen, one the store does not have) needs a decision: `undecided()` lists
+them. The drop-in holds Add until each is picked or skipped with `deselect`,
+so nobody finds an ingredient missing that they never chose to leave out.
+Your own UI should do the same. Remembered and `startUnchecked` items never
+wait.
 `select` throws `unknown_item` / `unknown_product` if the key or product was not
 part of the cart.
 

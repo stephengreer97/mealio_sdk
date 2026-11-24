@@ -288,6 +288,9 @@ session.options(item.key);           // options, plus anything found with search
 session.isSelected(item.key);        // remembered items start selected, unless marked pantry or optional
 session.select(item.key, product.id, preferenceId: 'sliced');
 session.deselect(item.key);          // leave out of THIS run; the usual pick is kept
+session.needsDecision(item.key);     // missing from the add and not yet picked or skipped
+session.undecided();                 // those keys, in recipe order
+session.isDeselected(item.key);      // "Skip this time"; undoDeselect(item.key) undoes it
 await session.search(item.key, 'minced garlic jar');
 session.estimate();                  // total, count, estimated, unpriced
                                      // total is null when any item is unpriced
@@ -296,6 +299,13 @@ session.addedTotal(result);          // the same, for what the store took
 
 final stores = await MealioCart.instance.stores(); // id, name, via
 ```
+
+An item missing from the add (a usual out of stock or gone, an item never
+chosen, one the store does not have) needs a decision: `undecided()` lists
+them. The drop-in holds Add until each is picked or skipped with `deselect`,
+so nobody finds an ingredient missing that they never chose to leave out.
+Your own UI should do the same. Remembered and `startUnchecked` items never
+wait.
 
 `MealioCartList(session: session, onAdd: ...)` is the list screen on its own,
 for hosting in your own sheet. `MealioCartSheet.show(context, session)` (the

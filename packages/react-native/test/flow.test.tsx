@@ -81,6 +81,8 @@ const pressables = (r: TR.ReactTestRenderer, pred: (n: any) => boolean) => r.roo
 const press = (r: TR.ReactTestRenderer, pred: (n: any) => boolean) => act(async () => { pressables(r, pred)[0].props.onPress(); await new Promise((x) => setTimeout(x, 5)); });
 const closeBtn = (n: any) => n.props.accessibilityLabel === 'Close';
 const addBtn = (r: TR.ReactTestRenderer) => pressables(r, hasText('Add ')).slice(-1)[0];
+/** "Skip this time" on garlic, the item CART leaves unchosen, so Add can go. */
+const skipGarlic = (r: TR.ReactTestRenderer) => press(r, (n) => n.props.testID === 'mealio-skip-b');
 const pickGarlic = (r: TR.ReactTestRenderer) => act(async () => { const c = pressables(r, (n) => n.props.accessibilityRole === 'radio'); c[c.length - 1].props.onPress(); await new Promise((x) => setTimeout(x, 5)); });
 async function toList(init: any = {}, on?: On) {
   srv.on = on ?? ((p) => (p.endsWith('/carts') ? startJob([done(CART())]) : json({})));
@@ -135,6 +137,7 @@ describe('adding', () => {
 
   it('cannot be closed once tapped, and reports the add when it ends', async () => {
     const r = await toList({}, adding);
+    await skipGarlic(r);
     await press(r, hasText('Add 1')); await wait();
     expect(pressables(r, closeBtn)[0].props.disabled).toBe(true);
     await press(r, closeBtn);
@@ -148,6 +151,7 @@ describe('adding', () => {
 
   it('two taps before a render add once', async () => {
     const r = await toList({}, adding);
+    await skipGarlic(r);
     const b = addBtn(r);
     await act(async () => { b.props.onPress(); b.props.onPress(); await new Promise((x) => setTimeout(x, 10)); });
     expect(posts('/add')).toHaveLength(1);
@@ -158,6 +162,7 @@ describe('adding', () => {
     const seen: string[] = [];
     const r = await toList({ onAdded: () => seen.push('v1') }, (p) => p.endsWith('/carts') ? startJob([done(CART())]) : p.endsWith('/add') ? startJob([done(ADDED)]) : json({}));
     await act(async () => { set((x) => ({ ...x, onAdded: () => seen.push('v2') })); });
+    await skipGarlic(r);
     await press(r, hasText('Add 1')); await wait();
     expect(seen).toEqual(['v2']);
   });
@@ -182,9 +187,40 @@ describe('adding', () => {
 });
 
 describe('the list', () => {
+  it('a missing item must be picked or skipped before Add: the button reviews it instead', async () => {
+    const r = await toList({}, (p) => p.endsWith('/carts') ? startJob([done(CART())]) : json({}));
+    expect(texts(r)).toContain('Review 1 item');
+    expect(texts(r)).toContain('1 item is not in your order yet. Pick a product or skip it.');
+    await press(r, (n) => n.props.testID === 'mealio-list-cta');
+    expect(posts('/add')).toHaveLength(0);
+    await skipGarlic(r);
+    expect(texts(r)).toContain('Skipped this time');
+    expect(texts(r)).toContain('Add 1 item to H-E-B');
+    expect(events.filter((e) => e.type === 'item_unchecked')).toEqual([{ type: 'item_unchecked', key: 'b' }]);
+    await press(r, (n) => n.props.testID === 'mealio-undo-skip-b');
+    expect(texts(r)).toContain('Review 1 item');
+    await pickGarlic(r);
+    expect(texts(r)).toContain('Add 2 items to H-E-B');
+  });
+
+  it('an out-of-stock usual offers Pick another and Skip this time', async () => {
+    const oos = { ...CART(), items: [
+      { key: 'a', ingredient: 'spinach', quantity: 1, status: 'remembered_unavailable', reason: 'out_of_stock', selectedId: null,
+        remembered: { id: 'p0', name: 'Baby Spinach' }, options: [{ id: 'p3', name: 'Spinach Bunch', unitPrice: 2 }] },
+    ] };
+    const r = await toList({}, (p) => p.endsWith('/carts') ? startJob([done(oos)]) : json({}));
+    expect(texts(r).some((t: string) => t.includes('Baby Spinach'))).toBe(true);
+    // The row opened first, so Pick another is not needed until it is closed.
+    expect(pressables(r, (n) => n.props.testID === 'mealio-pick-another-a')).toHaveLength(0);
+    await press(r, (n) => n.props.testID === 'mealio-skip-a');
+    expect(texts(r)).toContain('Select items to add');
+    expect(texts(r).some((t: string) => t.includes('is out of stock today'))).toBe(false);
+  });
+
   it('Add is off while a search runs', async () => {
     const r = await toList({}, (p) => p.endsWith('/carts') ? startJob([done(CART())]) : p.endsWith('/search') ? startJob([script('search', 'SEARCH_DONE', 2000)])
       : jobOf(p) ? nextEnv(jobOf(p)!, [done({ key: 'a', query: 'red onion', options: [] })]) : json({}));
+    await skipGarlic(r);
     await act(async () => { r.root.findAll((n: any) => n.type === 'TextInput' && n.props.onSubmitEditing)[0].props.onChangeText('red onion'); });
     await press(r, (n) => hasText('Search')(n) && n.props.style !== undefined && !n.props.accessibilityLabel);
     expect(addBtn(r).props.disabled).toBe(true);

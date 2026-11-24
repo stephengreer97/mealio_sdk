@@ -5,6 +5,8 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:cryptography/cryptography.dart';
+import 'package:flutter/widgets.dart';
+import 'package:flutter_test/flutter_test.dart';
 import 'package:mealio_sdk/mealio_sdk.dart';
 
 /// test/fixtures/test-vectors.json, a copy of protocol/test-vectors.json.
@@ -111,5 +113,25 @@ class FakeHost implements MealioHost {
     final f = onFetch;
     if (f != null) return f(request);
     return const HttpResult(ok: true, status: 200, body: '{}');
+  }
+}
+
+/// The list's "Skip this time" buttons: all of them, or only those for `keys`.
+Finder skipButtons([Iterable<String>? keys]) => find.byWidgetPredicate((Widget w) {
+      final k = w.key;
+      if (k is! ValueKey<String> || !k.value.startsWith('mealio-skip-')) return false;
+      return keys == null || keys.contains(k.value.substring('mealio-skip-'.length));
+    });
+
+/// Taps "Skip this time" on every list item that must be picked or skipped
+/// before Add (or only on `keys`), so the CTA adds instead of reviewing.
+Future<void> skipUndecided(WidgetTester tester, [Iterable<String>? keys]) async {
+  for (var guard = 0; guard < 50; guard += 1) {
+    final f = skipButtons(keys);
+    if (f.evaluate().isEmpty) return;
+    await tester.ensureVisible(f.first);
+    await tester.pump();
+    await tester.tap(f.first);
+    await tester.pump();
   }
 }

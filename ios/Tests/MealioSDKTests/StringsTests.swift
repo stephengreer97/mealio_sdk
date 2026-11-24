@@ -18,7 +18,7 @@ final class StringsTests: XCTestCase {
     }
 
     func testEveryPluralTheDropInAsksForHasBothForms() {
-        for base in ["stepFinding", "pendingOptions", "addItems", "options", "itemsAdded"] {
+        for base in ["stepFinding", "pendingOptions", "addItems", "options", "itemsAdded", "undecidedNote", "reviewItems"] {
             XCTAssertNotNil(MealioStringKey(rawValue: "\(base)_one"), base)
             XCTAssertNotNil(MealioStringKey(rawValue: "\(base)_other"), base)
         }

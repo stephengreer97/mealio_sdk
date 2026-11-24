@@ -585,6 +585,7 @@ for (const item of cart.items) {
 cart.select(key, productId);                      // Only after the user taps a product.
 cart.select(key, productId, { preferenceId });    // When a product asks a follow-up.
 cart.deselect(key);                               // Leave out this run. The memory is kept.
+cart.undecided();                                 // Keys still missing from the add that the user has not picked or skipped.
 const more = await cart.search(key, 'oat milk');  // Search the store for something else.
 cart.estimate();                                  // Total of what is selected.
 
@@ -606,6 +607,7 @@ Rules for custom screens:
 - If the user has no store, `prepareCart` fails with `store_required`. List choices with `stores`.
 - Kroger family stores also need `storeLocations` and `setStore`, or `location_required` comes back before any sign-in. Read the saved store with `storePreferences`.
 - Before adding, check `needsPreference` and `pendingPreferences`. A ticked item waiting on a preference stays out of the add.
+- Hold Add until `undecided()` is empty. An item missing from the add (a usual out of stock, one never chosen, one the store does not have) needs a pick or a skip, so nobody finds an ingredient missing at pickup that they never chose to leave out. Skip is `deselect(key)`, undo is `undoDeselect(key)`, and `isDeselected(key)` says the user skipped it. Pantry and optional items are exempt.
 - For items sold by weight, use `isWeight`, `weight` and `setWeight`. For the rest, use `quantity` and `setQuantity`.
 - With several recipes, `recipesFor(key)` says which meals an item is for.
 - If `estimate` gives a null `total`, show no total at all. Never total only the priced items.

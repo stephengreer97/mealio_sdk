@@ -45,6 +45,8 @@ public enum MealioStringKey: String, CaseIterable {
     case rememberNote
     case pendingOptions_one
     case pendingOptions_other
+    case undecidedNote_one
+    case undecidedNote_other
     case total
     case estimatedTotal
     case pricesAtCheckout
@@ -52,6 +54,8 @@ public enum MealioStringKey: String, CaseIterable {
     case addItems_one
     case addItems_other
     case selectItems
+    case reviewItems_one
+    case reviewItems_other
     case notFoundAt
     case nothingFound
     case searchFailed
@@ -59,6 +63,10 @@ public enum MealioStringKey: String, CaseIterable {
     case search
     case yourUsual
     case notAddingThisTime
+    case skippedThisTime
+    case pickAnother
+    case skipThisTime
+    case undo
     case usualOutOfStock
     case options_one
     case options_other
@@ -105,6 +113,8 @@ public enum MealioStringKey: String, CaseIterable {
     case a11yAdd
     case a11yLess
     case a11yMore
+    case a11ySkip
+    case a11yUndoSkip
     case a11yChangeLocation
     case a11yChangeStore
     case pantryHint
@@ -149,6 +159,8 @@ public let DEFAULT_STRINGS: MealioStrings = [
     .rememberNote: "Pick a product for each item and Mealio will remember your preferences.",
     .pendingOptions_one: "1 checked item needs an option chosen before adding.",
     .pendingOptions_other: "{count} checked items need an option chosen before adding.",
+    .undecidedNote_one: "1 item is not in your order yet. Pick a product or skip it.",
+    .undecidedNote_other: "{count} items are not in your order yet. Pick a product or skip each one.",
     .total: "Total",
     .estimatedTotal: "Estimated total",
     .pricesAtCheckout: "Prices at checkout",
@@ -156,6 +168,8 @@ public let DEFAULT_STRINGS: MealioStrings = [
     .addItems_one: "Add 1 item to {store}",
     .addItems_other: "Add {count} items to {store}",
     .selectItems: "Select items to add",
+    .reviewItems_one: "Review 1 item",
+    .reviewItems_other: "Review {count} items",
     .notFoundAt: "Not found at {store}",
     .nothingFound: "Nothing found for \"{query}\".",
     .searchFailed: "Search failed. Try again.",
@@ -163,6 +177,10 @@ public let DEFAULT_STRINGS: MealioStrings = [
     .search: "Search",
     .yourUsual: "Your usual",
     .notAddingThisTime: "Not adding this time",
+    .skippedThisTime: "Skipped this time",
+    .pickAnother: "Pick another",
+    .skipThisTime: "Skip this time",
+    .undo: "Undo",
     .usualOutOfStock: "Your usual is out of stock",
     .options_one: "1 option",
     .options_other: "{count} options",
@@ -209,6 +227,8 @@ public let DEFAULT_STRINGS: MealioStrings = [
     .a11yAdd: "Add {item}",
     .a11yLess: "Less {item}",
     .a11yMore: "More {item}",
+    .a11ySkip: "Skip {item} this time",
+    .a11yUndoSkip: "Undo skip {item}",
     .a11yChangeLocation: "Store location: {name}. Change location",
     .a11yChangeStore: "Store: {store}. Change store",
     .pantryHint: "You may already have this",

@@ -407,6 +407,21 @@ export function CartList({ t, cart, storeName, busy, onChange, onAdd, onChangeSt
   const est = cart.estimate();
   const selectable = cart.items.filter((i) => i.status !== 'unavailable');
   const location = cart.cart.location;
+  // Every item missing from the add must be picked or skipped first, so no
+  // ingredient goes missing that the user did not choose to leave out. Until
+  // then the button takes them to the first one instead of adding.
+  const undecided = cart.undecided();
+  const waiting = undecided.length;
+  const scrollRef = useRef<ScrollView | null>(null);
+  const rowY = useRef<Record<string, number>>({});
+  const ctaOff = busy || cart.searching || (est.count === 0 && waiting === 0);
+  const onCta = () => {
+    if (!waiting) { onAdd(); return; }
+    const first = undecided[0];
+    setOpen(first);
+    const y = rowY.current[first];
+    if (y != null) scrollRef.current?.scrollTo({ y: Math.max(0, y - 8), animated: true });
+  };
   return (
     <View style={s.flex}>
       {location ? (
@@ -435,13 +450,19 @@ export function CartList({ t, cart, storeName, busy, onChange, onAdd, onChangeSt
           <Text style={s.infoText}>{ui.tr('rememberNote')}</Text>
         </View>
       ) : null}
-      <ScrollView style={s.flex} contentContainerStyle={s.list} keyboardShouldPersistTaps="handled">
+      <ScrollView ref={scrollRef} style={s.flex} contentContainerStyle={s.list} keyboardShouldPersistTaps="handled">
         {cart.items.map((it) => (
-          <ItemRow key={it.key} t={t} cart={cart} item={it} storeName={storeName} open={open === it.key}
-            onToggleOpen={() => setOpen(open === it.key ? null : it.key)} onChange={onChange} disabled={busy} />
+          <View key={it.key} onLayout={(e) => { rowY.current[it.key] = e.nativeEvent.layout.y; }}>
+            <ItemRow t={t} cart={cart} item={it} storeName={storeName} open={open === it.key}
+              onToggleOpen={() => setOpen(open === it.key ? null : it.key)} onOpen={() => setOpen(it.key)}
+              onChange={onChange} disabled={busy} />
+          </View>
         ))}
       </ScrollView>
       <View style={s.footer}>
+        {waiting ? (
+          <Text style={[s.small, s.pendingNote]} testID="mealio-undecided-note">{ui.plural('undecidedNote', waiting)}</Text>
+        ) : null}
         {cart.pendingPreferences().length ? (
           <Text style={[s.small, s.pendingNote]}>
             {ui.plural('pendingOptions', cart.pendingPreferences().length)}
@@ -456,19 +477,20 @@ export function CartList({ t, cart, storeName, busy, onChange, onAdd, onChangeSt
               : <Text style={s.totalNone}>{ui.tr('pricesAtCheckout')}</Text>}
           </View>
         ) : null}
-        <Pressable onPress={onAdd} disabled={busy || est.count === 0 || cart.searching} accessibilityRole="button"
-          style={[s.cta, (busy || est.count === 0 || cart.searching) && s.ctaOff]}>
+        <Pressable onPress={onCta} disabled={ctaOff} accessibilityRole="button" testID="mealio-list-cta"
+          style={[s.cta, ctaOff && s.ctaOff]}>
           {busy ? <ActivityIndicator color={t.onAccent} />
-            : <Text style={s.ctaText}>{est.count ? ui.plural('addItems', est.count, { store: storeName }) : ui.tr('selectItems')}</Text>}
+            : <Text style={s.ctaText}>{waiting ? ui.plural('reviewItems', waiting)
+              : est.count ? ui.plural('addItems', est.count, { store: storeName }) : ui.tr('selectItems')}</Text>}
         </Pressable>
       </View>
     </View>
   );
 }
 
-function ItemRow({ t, cart, item, storeName, open, onToggleOpen, onChange, disabled }: {
+function ItemRow({ t, cart, item, storeName, open, onToggleOpen, onOpen, onChange, disabled }: {
   t: MealioTheme; cart: CartSession; item: CartItem; storeName: string; open: boolean;
-  onToggleOpen: () => void; onChange: () => void; disabled: boolean;
+  onToggleOpen: () => void; onOpen: () => void; onChange: () => void; disabled: boolean;
 }) {
   const s = styles(t);
   const { ui } = useMealio();
@@ -479,17 +501,49 @@ function ItemRow({ t, cart, item, storeName, open, onToggleOpen, onChange, disab
   const picked = cart.selected(item.key);
   const options = cart.options(item.key);
   const shown = picked || (item.status === 'remembered' ? item.remembered : null);
+  const waiting = cart.needsDecision(item.key);
+  // Left out with "Skip this time" (or unticked after a pick): not a usual
+  // that starts out, so it says so and can be undone.
+  const skipped = !on && item.status !== 'remembered' && !item.startUnchecked && cart.isDeselected(item.key);
+  const skip = () => {
+    if (disabled) return;
+    cart.deselect(item.key);
+    ui.emit({ type: 'item_unchecked', key: item.key });
+    onChange();
+  };
+  const undoSkip = () => {
+    if (disabled) return;
+    cart.undoDeselect(item.key);
+    onChange();
+  };
+  const skipButton = (
+    <Pressable onPress={skip} disabled={disabled} accessibilityRole="button" testID={`mealio-skip-${item.key}`}
+      accessibilityLabel={ui.tr('a11ySkip', { item: item.ingredient })} style={s.decideBtn}>
+      <Text style={s.decidePlain}>{ui.tr('skipThisTime')}</Text>
+    </Pressable>
+  );
+  const undoRow = skipped ? (
+    <View style={s.decideRowBare}>
+      <Pressable onPress={undoSkip} disabled={disabled} accessibilityRole="button" testID={`mealio-undo-skip-${item.key}`}
+        accessibilityLabel={ui.tr('a11yUndoSkip', { item: item.ingredient })} style={s.decideBtn}>
+        <Text style={s.change}>{ui.tr('undo')}</Text>
+      </Pressable>
+    </View>
+  ) : null;
 
   if (item.status === 'unavailable') {
     return (
-      <View style={s.card}>
+      <View style={[s.card, waiting && s.cardWaiting]}>
         <View style={s.rowInner}>
           <View style={s.checkSlot}><View style={[s.box, s.boxDisabled]} /></View>
           <View style={s.flex}>
             <Text style={s.ingredient} numberOfLines={1}>{item.ingredient}</Text>
             <Text style={[s.name, s.muted]}>{ui.tr('notFoundAt', { store: storeName })}</Text>
+            {skipped ? <Text style={s.small}>{ui.tr('skippedThisTime')}</Text> : null}
           </View>
         </View>
+        {waiting ? <View style={s.decideRowBare}>{skipButton}</View> : null}
+        {undoRow}
       </View>
     );
   }
@@ -529,13 +583,14 @@ function ItemRow({ t, cart, item, storeName, open, onToggleOpen, onChange, disab
 
   const meta = picked
     ? [priceText(picked, ui), picked.id === item.remembered?.id ? ui.tr('yourUsual') : null].filter(Boolean).join(' · ')
+    : skipped ? ui.tr('skippedThisTime')
     : item.startUnchecked ? ui.tr('pantryHint')
     : item.status === 'remembered' ? ui.tr('notAddingThisTime')
       : item.status === 'remembered_unavailable' ? ui.tr('usualOutOfStock')
         : ui.plural('options', options.length);
 
   return (
-    <View style={[s.card, open && s.cardOpen]}>
+    <View style={[s.card, open && s.cardOpen, waiting && s.cardWaiting]}>
       <View style={s.rowInner}>
         <Pressable onPress={toggle} accessibilityRole="checkbox" accessibilityState={{ checked: on, disabled }}
           accessibilityLabel={ui.tr(on ? 'a11yLeaveOut' : 'a11yAdd', { item: item.ingredient })} style={s.checkSlot}>
@@ -595,13 +650,28 @@ function ItemRow({ t, cart, item, storeName, open, onToggleOpen, onChange, disab
         );
       })() : null}
 
-      {item.status === 'remembered_unavailable' && !on ? (
+      {item.status === 'remembered_unavailable' && !on && !skipped ? (
         <View style={s.warn}>
           <Text style={s.warnText}>{item.remembered
             ? ui.tr(item.reason === 'not_found' ? 'usualNotAvailableNamed' : 'usualOutNamed', { name: item.remembered.name })
             : ui.tr(item.reason === 'not_found' ? 'usualNotAvailable' : 'usualOut')}</Text>
+          {waiting ? (
+            <View style={s.decideRow}>
+              {!open ? (
+                <Pressable onPress={() => { if (!disabled) onOpen(); }} disabled={disabled} accessibilityRole="button"
+                  testID={`mealio-pick-another-${item.key}`} style={s.decideBtn}>
+                  <Text style={s.change}>{ui.tr('pickAnother')}</Text>
+                </Pressable>
+              ) : null}
+              {skipButton}
+            </View>
+          ) : null}
         </View>
       ) : null}
+
+      {/* An item never chosen: the same decision, without the warning. */}
+      {waiting && item.status === 'choose' ? <View style={s.decideRowBare}>{skipButton}</View> : null}
+      {undoRow}
 
       {open ? (
         <View style={s.expand}>
@@ -1052,6 +1122,11 @@ function make(t: MealioTheme) {
     qtyText: { ...f, fontSize: 20, fontWeight: '600', color: t.text },
     stepValue: { ...f, minWidth: 28, textAlign: 'center', fontSize: 16, fontWeight: '700', color: t.text },
     stepValueWide: { minWidth: 64 },
+    cardWaiting: { borderColor: t.warnText },
+    decideRow: { flexDirection: 'row', justifyContent: 'flex-end', gap: 8, marginTop: 8 },
+    decideRowBare: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 8, marginHorizontal: 12, marginBottom: 10 },
+    decideBtn: { minHeight: 36, paddingHorizontal: 12, justifyContent: 'center', borderRadius: 8, backgroundColor: t.background },
+    decidePlain: { ...f, fontSize: 14, fontWeight: '600', color: t.warnText },
     warnText: { ...f, fontSize: 13, lineHeight: 18, color: t.warnText },
     prefNeeded: { ...f, fontSize: 13, lineHeight: 18, fontWeight: '600', paddingLeft: 12, paddingRight: 12, paddingBottom: 8 },
     pendingNote: { color: t.warnText, paddingBottom: 6 },

@@ -608,4 +608,70 @@ class CartSessionTest {
     fun startUncheckedDefaultsToFalseWhenTheServerLeavesItOut() {
         assertFalse(session().items[0].startUnchecked)
     }
+
+    // ── a missing item needs a decision ──────────────────────────────────
+    // Mirrors packages/core/test/missing-decision.test.ts. An item missing from
+    // the add (a usual out of stock or gone, an item never chosen, one the store
+    // does not have) must be picked or deselected before the drop-in adds.
+
+    /** onion remembered, spinach's usual out, garlic to choose, saffron unavailable, salt startUnchecked. */
+    private fun missing(cartId: String = "c"): JSONObject {
+        fun opts(key: String) = listOf(product("$key-1", "$key one"))
+        return JSONObject().put("cartId", cartId).put("store", "heb")
+            .put("items", JSONArray()
+                .put(item("onion", "remembered", opts("onion"), "onion-1", product("onion-1", "onion one")))
+                .put(item("spinach", "remembered_unavailable", opts("spinach"), remembered = product("spinach-0", "Baby spinach")))
+                .put(item("garlic", "choose", opts("garlic")))
+                .put(item("saffron", "unavailable", emptyList()))
+                .put(item("salt", "choose", opts("salt")).put("startUnchecked", true)))
+            .put("ready", JSONArray()).put("needsChoice", JSONArray()).put("unavailable", JSONArray())
+    }
+
+    @Test
+    fun waitsOnEveryUnpickedItemExceptARememberedOneAndAStartUncheckedOne() {
+        val cs = session(missing())
+        assertEquals(listOf("spinach", "garlic", "saffron"), cs.undecided())
+        assertFalse(cs.needsDecision("onion"))
+        assertFalse(cs.needsDecision("salt"))
+        assertFalse(cs.needsDecision("nope"))
+    }
+
+    @Test
+    fun deselectSettlesAnItemAndUndoDeselectBringsItBack() {
+        val cs = session(missing())
+        cs.deselect("spinach")
+        assertTrue(cs.isDeselected("spinach"))
+        assertEquals(listOf("garlic", "saffron"), cs.undecided())
+        cs.undoDeselect("spinach")
+        assertFalse(cs.isDeselected("spinach"))
+        assertEquals(listOf("spinach", "garlic", "saffron"), cs.undecided())
+    }
+
+    @Test
+    fun aPickSettlesAnItemAndClearsADeselect() {
+        val cs = session(missing())
+        cs.deselect("garlic")
+        cs.select("garlic", "garlic-1")
+        assertFalse(cs.isDeselected("garlic"))
+        assertFalse(cs.needsDecision("garlic"))
+    }
+
+    @Test
+    fun untickingAPickIsADecisionTooAndSendsNothingForTheItem() {
+        val cs = session(missing())
+        cs.select("garlic", "garlic-1")
+        cs.deselect("garlic")
+        assertFalse(cs.needsDecision("garlic"))
+        assertNull(cs.selections().first { it.key == "garlic" }.productId)
+    }
+
+    @Test
+    fun restorePicksCarriesADeselectOverAndNothingTheUserDidNotDecide(): Unit = runBlocking {
+        val from = session(missing())
+        from.deselect("spinach")
+        val to = session(missing("c2"))
+        to.restorePicks(from)
+        assertTrue(to.isDeselected("spinach"))
+        assertEquals(listOf("garlic", "saffron"), to.undecided())
+    }
 }

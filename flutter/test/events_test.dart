@@ -266,6 +266,8 @@ void main() {
     await tester.pump();
     await tester.tap(find.bySemanticsLabel('Add onion'));
     await tester.pump();
+    // Saffron is not at the store: skip it so Add can go.
+    await skipUndecided(tester);
     await tester.tap(find.text('Add 1 item to H-E-B'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Done'));
@@ -277,6 +279,7 @@ void main() {
       <String, Object?>{'type': 'list_shown', 'store': 'heb', 'items': 2},
       <String, Object?>{'type': 'item_unchecked', 'key': 'onion'},
       <String, Object?>{'type': 'item_checked', 'key': 'onion'},
+      <String, Object?>{'type': 'item_unchecked', 'key': 'saffron'},
       <String, Object?>{'type': 'add_started', 'items': 1},
       <String, Object?>{'type': 'cart_added', 'store': 'heb', 'added': 1, 'failed': 1},
       <String, Object?>{'type': 'sheet_closed', 'step': 'done', 'added': 1},
@@ -383,6 +386,7 @@ void main() {
     testWidgets('a failed add reports step adding, then closing reports step error', (WidgetTester tester) async {
       await _open(tester, listen, mock: _addFails);
       await tester.pumpAndSettle();
+      await skipUndecided(tester);
       await tester.tap(find.text('Add 1 item to H-E-B'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Close').last);
@@ -390,6 +394,7 @@ void main() {
       expect(log, <_Json>[
         <String, Object?>{'type': 'sheet_opened', 'recipes': 1},
         <String, Object?>{'type': 'list_shown', 'store': 'heb', 'items': 2},
+        <String, Object?>{'type': 'item_unchecked', 'key': 'saffron'},
         <String, Object?>{'type': 'add_started', 'items': 1},
         <String, Object?>{'type': 'error', 'code': 'network', 'step': 'adding'},
         <String, Object?>{'type': 'sheet_closed', 'step': 'error', 'added': 0},
@@ -442,6 +447,7 @@ void main() {
       final mock = (await tester.runAsync(_adds))!;
       await _open(tester, listen, mock: mock);
       await tester.pumpAndSettle();
+      await skipUndecided(tester);
       await tester.tap(find.text('Add 1 item to H-E-B'));
       await tester.pumpAndSettle();
       await _tapScrim(tester);
@@ -582,6 +588,7 @@ void main() {
       },
     );
     await tester.pumpAndSettle();
+    await skipUndecided(tester);
     await tester.tap(find.bySemanticsLabel('Leave out onion'));
     await tester.pump();
     expect(find.text('Select items to add'), findsOneWidget);
@@ -601,6 +608,7 @@ void main() {
     expect(seen, <String>[
       'sheet_opened',
       'list_shown',
+      'item_unchecked',
       'item_unchecked',
       'item_checked',
       'add_started',
